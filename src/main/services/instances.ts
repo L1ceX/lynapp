@@ -1,0 +1,366 @@
+import { randomUUID } from "node:crypto";
+import { closeSync, openSync } from "node:fs";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import path from "node:path";
+import type { CreateInstancePayload, UpdateInstancePayload } from "@shared/ipc";
+import type { LaunchResult, LauncherInstance } from "@shared/types";
+import { getInstancesRoot } from "../paths";
+import { JsonStore, getActiveAccount } from "../store";
+import { JavaService } from "./java";
+import { MinecraftService } from "./minecraft";
+
+function sanitizeFilePart(value: string): string {
+  return value
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 64) || "Instance";
+}
+
+function toFolderPart(value: string): string {
+  return sanitizeFilePart(value).replace(/\s+/g, "-");
+}
+
+function buildInstanceFolderName(payload: CreateInstancePayload, uniqueSuffix: string): string {
+  const name = toFolderPart(payload.name || `${payload.loader} ${payload.gameVersion}`);
+  const loader = toFolderPart(payload.loader || "vanilla").toLowerCase();
+  const version = toFolderPart(payload.gameVersion || "1.21.1");
+  const loaderVersion = payload.loaderVersion?.trim() ? `-${toFolderPart(payload.loaderVersion)}` : "";
+  return `${name}-${loader}-${version}${loaderVersion}-${uniqueSuffix}`.slice(0, 80);
+}
+
+function redactLaunchArgs(args: string[]): string[] {
+  const secretKeys = new Set(["--accessToken", "--clientId", "--xuid"]);
+  return args.map((arg, index) => (secretKeys.has(args[index - 1]) ? "<redacted>" : arg));
+}
+
+async function writeInstanceManifest(instance: LauncherInstance): Promise<void> {
+  const launcherDir = path.join(instance.directory, ".launcher");
+  await mkdir(launcherDir, { recursive: true });
+  await writeFile(path.join(launcherDir, "instance.json"), JSON.stringify(instance, null, 2), "utf8");
+}
+
+export class InstanceService {
+  constructor(
+    private readonly store: JsonStore,
+    private readonly java: JavaService,
+    private readonly minecraft: MinecraftService
+  ) {}
+
+  async list(): Promise<LauncherInstance[]> {
+    const data = await this.store.getData();
+    return data.instances;
+  }
+
+  async create(payload: CreateInstancePayload): Promise<LauncherInstance> {
+    const gameVersion = payload.gameVersion?.trim() || "1.21.1";
+    const loader = payload.loader || "vanilla";
+    await this.minecraft.assertVersionExists(gameVersion);
+    await this.minecraft.assertLoaderCompatible(loader, gameVersion);
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    const name = sanitizeFilePart(payload.name || `${payload.loader} ${gameVersion}`);
+    const folderName = buildInstanceFolderName({ ...payload, gameVersion }, id.slice(0, 6));
+    const directory = path.join(getInstancesRoot(), folderName);
+
+    const instance: LauncherInstance = {
+      id,
+      name,
+      gameVersion,
+      loader: payload.loader || "vanilla",
+      loaderVersion: payload.loaderVersion?.trim() || undefined,
+      directory,
+      icon: payload.loader === "vanilla" ? "grass" : "anvil",
+      createdAt: now,
+      updatedAt: now,
+      mods: []
+    };
+
+    await mkdir(path.join(directory, "mods"), { recursive: true });
+    await mkdir(path.join(directory, "resourcepacks"), { recursive: true });
+    await mkdir(path.join(directory, "shaderpacks"), { recursive: true });
+    await mkdir(path.join(directory, "datapacks"), { recursive: true });
+    await mkdir(path.join(directory, "modpacks"), { recursive: true });
+    await mkdir(path.join(directory, "config"), { recursive: true });
+    await mkdir(path.join(directory, "saves"), { recursive: true });
+    await writeInstanceManifest(instance);
+
+    return this.store.update((data) => {
+      data.instances.unshift(instance);
+      data.activeInstanceId = instance.id;
+      return instance;
+    });
+  }
+
+  async updateInstance(payload: UpdateInstancePayload): Promise<LauncherInstance> {
+    if (payload.patch.gameVersion !== undefined) {
+      const gameVersion = payload.patch.gameVersion.trim() || "1.21.1";
+      await this.minecraft.assertVersionExists(gameVersion);
+      payload.patch.gameVersion = gameVersion;
+    }
+
+    const data = await this.store.getData();
+    const current = data.instances.find((item) => item.id === payload.id);
+    if (!current) {
+      throw new Error("Instance not found");
+    }
+    await this.minecraft.assertLoaderCompatible(payload.patch.loader ?? current.loader, payload.patch.gameVersion ?? current.gameVersion);
+
+    const updated = await this.store.update((data) => {
+      const instance = data.instances.find((item) => item.id === payload.id);
+      if (!instance) {
+        throw new Error("Instance not found");
+      }
+
+      Object.assign(instance, payload.patch);
+      instance.name = sanitizeFilePart(instance.name);
+      instance.updatedAt = new Date().toISOString();
+      return instance;
+    });
+
+    await writeInstanceManifest(updated);
+    return updated;
+  }
+
+  async remove(id: string): Promise<boolean> {
+    const data = await this.store.getData();
+    const target = data.instances.find((item) => item.id === id);
+    if (!target) {
+      return false;
+    }
+
+    const pid = data.runningProcesses[id];
+    if (pid !== undefined) {
+      let alive = false;
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
+      if (alive) {
+        throw new Error(`${target.name} is running. Stop it before deleting.`);
+      }
+    }
+
+    const root = getInstancesRoot();
+    const directory = target.directory;
+    if (directory === root || !directory.startsWith(root + path.sep)) {
+      throw new Error("Refusing to delete a folder outside the instances directory");
+    }
+    await rm(directory, { recursive: true, force: true });
+
+    return this.store.update((current) => {
+      const before = current.instances.length;
+      current.instances = current.instances.filter((item) => item.id !== id);
+      delete current.runningProcesses[id];
+
+      if (current.activeInstanceId === id) {
+        current.activeInstanceId = current.instances[0]?.id ?? null;
+      }
+
+      return current.instances.length !== before;
+    });
+  }
+
+  async launch(id: string): Promise<LaunchResult> {
+    const data = await this.store.getData();
+    const instance = data.instances.find((item) => item.id === id);
+
+    if (!instance) {
+      return {
+        ok: false,
+        message: "Instance not found"
+      };
+    }
+
+    const existingPid = data.runningProcesses[id];
+    if (existingPid !== undefined) {
+      try {
+        process.kill(existingPid, 0);
+        return {
+          ok: false,
+          message: `${instance.name} is already running`
+        };
+      } catch {
+      }
+    }
+
+    const activeAccount = getActiveAccount(data);
+    if (!activeAccount) {
+      return {
+        ok: false,
+        message: "Add an account first (Microsoft login or offline profile)"
+      };
+    }
+    if (
+      activeAccount.kind === "microsoft" &&
+      activeAccount.expiresAt &&
+      !Number.isNaN(Date.parse(activeAccount.expiresAt)) &&
+      Date.parse(activeAccount.expiresAt) < Date.now()
+    ) {
+      return {
+        ok: false,
+        message: `Microsoft session for ${activeAccount.profileName ?? "account"} expired. Log in again via Add account.`
+      };
+    }
+
+    const requiredMajor = await this.minecraft.getRequiredJavaMajor(instance.gameVersion);
+    const javaRuntime = await this.java.ensureRuntime(requiredMajor, [
+      instance.javaPath,
+      data.settings.javaPaths?.[String(requiredMajor)],
+      data.settings.javaPath
+    ]);
+    const javaPath = javaRuntime.path;
+    const rawMemory = instance.maxMemoryMb || data.settings.maxMemoryMb;
+    const maxMemoryMb = Math.min(65536, Math.max(512, Math.round(rawMemory) || 4096));
+
+    const updatedInstance = await this.store.update((current) => {
+      const target = current.instances.find((item) => item.id === id);
+
+      if (!target) {
+        throw new Error("Instance not found");
+      }
+
+      target.javaPath = javaPath;
+      target.updatedAt = new Date().toISOString();
+      return target;
+    });
+
+    await writeInstanceManifest(updatedInstance);
+
+    const launch = await this.minecraft.prepareLaunch(updatedInstance, activeAccount, {
+      memoryMb: maxMemoryMb
+    }, javaPath);
+    const launchPlanPath = path.join(instance.directory, ".launcher", "logs", "latest-launch-plan.log");
+    await mkdir(path.dirname(launchPlanPath), { recursive: true });
+    await writeFile(
+      launchPlanPath,
+      [
+        `Instance: ${instance.name}`,
+        `Game version: ${instance.gameVersion}`,
+        `Loader: ${instance.loader}${instance.loaderVersion ? ` ${instance.loaderVersion}` : ""}`,
+        `Java: ${javaRuntime.message}`,
+        `Java path: ${javaPath}`,
+        `Main class: ${launch.mainClass}`,
+        `Natives: ${launch.nativesDir}`,
+        `Working directory: ${instance.directory}`,
+        `Command: "${javaPath}" ${redactLaunchArgs(launch.args).map((arg) => (arg.includes(" ") ? `"${arg}"` : arg)).join(" ")}`,
+        launch.warning ? `Warning: ${launch.warning}` : ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const logHeader = [
+      `lynapp Minecraft log`,
+      `Started: ${new Date().toISOString()}`,
+      `Instance: ${instance.name}`,
+      `Game version: ${instance.gameVersion}`,
+      `Java: ${javaPath}`,
+      launch.warning ? `Warning: ${launch.warning}` : "",
+      ""
+    ].join("\n");
+    await writeFile(launch.logPath, logHeader, "utf8");
+
+    const logFd = openSync(launch.logPath, "a");
+    const child = spawn(javaPath, launch.args, {
+      cwd: instance.directory,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      windowsHide: false
+    });
+    child.unref();
+    closeSync(logFd);
+
+    if (!child.pid) {
+      return {
+        ok: false,
+        message: "Minecraft process failed to start"
+      };
+    }
+
+    const startedPid = child.pid;
+    child.on("exit", () => {
+      void this.store
+        .update((current) => {
+          delete current.runningProcesses[id];
+        })
+        .catch(() => undefined);
+    });
+
+    await this.store.update((current) => {
+      current.runningProcesses[id] = startedPid;
+    });
+
+    return {
+      ok: true,
+      message: `${javaRuntime.message}. Minecraft process started${launch.warning ? ` (${launch.warning})` : ""}.`,
+      logPath: launch.logPath,
+      pid: startedPid,
+      java: javaRuntime
+    };
+  }
+
+  async getRunning(): Promise<string[]> {
+    const data = await this.store.getData();
+    const alive: string[] = [];
+
+    for (const [id, pid] of Object.entries(data.runningProcesses)) {
+      try {
+        process.kill(pid, 0);
+        alive.push(id);
+      } catch {
+      }
+    }
+
+    const dead = Object.keys(data.runningProcesses).filter((id) => !alive.includes(id));
+    if (dead.length) {
+      await this.store.update((current) => {
+        for (const id of dead) {
+          delete current.runningProcesses[id];
+        }
+      });
+    }
+
+    return alive;
+  }
+
+  async stop(id: string): Promise<LaunchResult> {
+    const data = await this.store.getData();
+    const instance = data.instances.find((item) => item.id === id);
+
+    if (!instance) {
+      return {
+        ok: false,
+        message: "Instance not found"
+      };
+    }
+
+    const pid = data.runningProcesses[id];
+    if (pid === undefined) {
+      return {
+        ok: false,
+        message: `${instance.name} is not running`
+      };
+    }
+
+    try {
+      process.kill(pid);
+    } catch {
+    }
+
+    await this.store.update((current) => {
+      delete current.runningProcesses[id];
+    });
+
+    return {
+      ok: true,
+      message: `${instance.name} stopped`
+    };
+  }
+
+  async pruneRunning(): Promise<void> {
+    await this.getRunning();
+  }
+}
