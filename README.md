@@ -11,7 +11,6 @@ Windows-first Minecraft launcher. Electron + React + TypeScript (electron-vite, 
 - Skins: upload 64x64 PNG, Wide/Slim, upload to Mojang for Microsoft accounts, cape equip, 3D preview (skinview3d) with idle pose and spring cape physics. Offline profiles cannot change skins.
 - Theming: 13 color tokens, presets, cursor glow, animations toggle.
 - Automatic Java provisioning (Adoptium Temurin) per Minecraft requirement, detected from Mojang's `javaVersion.majorVersion`.
-- Single RAM slider per instance / global default (`-Xms` = `-Xmx`).
 
 ## Data layout (`%APPDATA%\lynapp`)
 
