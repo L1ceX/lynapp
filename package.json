@@ -4,6 +4,7 @@
   "productName": "lynapp",
   "private": true,
   "description": "lynapp Minecraft launcher",
+  "license": "MIT",
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
