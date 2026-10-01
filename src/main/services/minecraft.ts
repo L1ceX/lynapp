@@ -297,6 +297,19 @@ async function getForgeGameVersions(releases: string[]): Promise<string[]> {
   }
 }
 
+async function getNeoForgeGameVersions(releases: string[]): Promise<string[]> {
+  try {
+    const metadata = await fetchText("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml");
+    const builds = parseMavenVersions(metadata);
+    return releases.filter((release) => {
+      const prefix = neoForgePrefixForGameVersion(release);
+      return prefix ? builds.some((item) => item.startsWith(prefix)) : false;
+    });
+  } catch {
+    return [];
+  }
+}
+
 export type LoaderSupportMap = Record<Exclude<ModLoader, "vanilla">, string[]>;
 
 let loaderSupportCache: { at: number; map: LoaderSupportMap } | null = null;
@@ -308,10 +321,11 @@ async function getLoaderSupportMap(): Promise<LoaderSupportMap> {
 
   const manifest = await getManifest();
   const releases = manifest.versions.filter((item) => item.type === "release").map((item) => item.id);
-  const [fabricLive, quiltLive, forgeLive] = await Promise.all([
+  const [fabricLive, quiltLive, forgeLive, neoforgeLive] = await Promise.all([
     getFabricGameVersions(),
     getQuiltGameVersions(),
-    getForgeGameVersions(releases)
+    getForgeGameVersions(releases),
+    getNeoForgeGameVersions(releases)
   ]);
 
   const fabricSet = new Set(fabricLive);
@@ -320,7 +334,7 @@ async function getLoaderSupportMap(): Promise<LoaderSupportMap> {
     fabric: fabricLive.length ? releases.filter((item) => fabricSet.has(item)) : releases.filter((item) => isGameVersionAtLeast(item, 1, 14, 0)),
     quilt: quiltLive.length ? releases.filter((item) => quiltSet.has(item)) : releases.filter((item) => isGameVersionAtLeast(item, 1, 14, 0)),
     forge: forgeLive.length ? forgeLive : releases,
-    neoforge: releases.filter((item) => isGameVersionAtLeast(item, 1, 20, 1))
+    neoforge: neoforgeLive.length ? neoforgeLive : releases.filter((item) => isGameVersionAtLeast(item, 1, 20, 1))
   };
 
   loaderSupportCache = { at: Date.now(), map };
@@ -401,6 +415,19 @@ function mavenPath(name: string): string {
 
 function mavenUrl(baseUrl: string, name: string): string {
   return `${baseUrl.replace(/\/$/, "")}/${mavenPath(name).replace(/\\/g, "/")}`;
+}
+
+const legacyLibrariesRoot = "https://libraries.minecraft.net";
+
+function mavenClassifierPath(name: string, classifier: string): string {
+  const [group, artifact, version] = name.split(":");
+  const fileName = `${artifact}-${version}-${classifier}.jar`;
+  return path.join(...group.split("."), artifact, version, fileName);
+}
+
+function legacyMavenUrl(name: string, classifier?: string): string {
+  const rel = classifier ? mavenClassifierPath(name, classifier) : mavenPath(name);
+  return `${legacyLibrariesRoot}/${rel.replace(/\\/g, "/")}`;
 }
 
 function libraryIdentity(library: VersionJson["libraries"][number]): string | null {
@@ -588,10 +615,10 @@ async function prepareLibraries(version: VersionJson, nativesDir: string): Promi
       const artifactPath = path.join(getLibrariesRoot(), mavenPath(library.name));
       await downloadFile(mavenUrl(library.url, library.name), artifactPath);
       classpath.push(artifactPath);
-    } else if (library.name) {
+    } else if (library.name && !library.natives) {
       const artifactPath = path.join(getLibrariesRoot(), mavenPath(library.name));
       if (!pathExists(artifactPath)) {
-        throw new Error(`Library is missing and has no download URL: ${library.name}`);
+        await downloadFile(legacyMavenUrl(library.name), artifactPath);
       }
       classpath.push(artifactPath);
     }
@@ -599,9 +626,15 @@ async function prepareLibraries(version: VersionJson, nativesDir: string): Promi
     const classifier = getNativesClassifier(library.natives?.windows);
     const nativeDownload = classifier ? library.downloads?.classifiers?.[classifier] : undefined;
 
-    if (nativeDownload?.path) {
-      const nativePath = path.join(getLibrariesRoot(), normalizePath(nativeDownload.path));
-      await downloadFile(nativeDownload.url, nativePath, nativeDownload.sha1);
+    if (classifier && nativeDownload && (nativeDownload.path || nativeDownload.url)) {
+      const nativePath = nativeDownload.path
+        ? path.join(getLibrariesRoot(), normalizePath(nativeDownload.path))
+        : path.join(getLibrariesRoot(), mavenClassifierPath(library.name ?? "", classifier));
+      if (!nativeDownload.path && !library.name) {
+        throw new Error(`Native library is missing and has no download URL (${classifier})`);
+      }
+      const nativeUrl = nativeDownload.url ?? legacyMavenUrl(library.name ?? "", classifier);
+      await downloadFile(nativeUrl, nativePath, nativeDownload.sha1);
       await extractNativeJar(nativePath, nativesDir);
     }
   }
@@ -688,7 +721,8 @@ async function getQuiltLoaderVersion(gameVersion: string, requested?: string): P
   }
 
   const versions = (await response.json()) as Array<{ loader?: { version?: string }; version?: string }>;
-  const latest = versions[0]?.loader?.version ?? versions[0]?.version;
+  const all = versions.map((item) => item.loader?.version ?? item.version).filter((item): item is string => Boolean(item));
+  const latest = all.find((item) => !item.includes("-")) ?? all[0];
   if (!latest) {
     throw new Error(`No Quilt loader found for Minecraft ${gameVersion}.`);
   }
@@ -882,12 +916,19 @@ function neoForgePrefixForGameVersion(gameVersion: string): string | null {
     return known[gameVersion];
   }
 
-  const match = /^1\.(\d+)\.(\d+)$/.exec(gameVersion);
-  if (!match) {
-    return null;
+  const legacy = /^1\.(\d+)\.(\d+)$/.exec(gameVersion);
+
+  if (legacy) {
+    return `${legacy[1]}.${legacy[2]}.`;
   }
 
-  return `${match[1]}.${match[2]}.`;
+  const modern = /^(\d+)\.(\d+)(?:\.\d+)?$/.exec(gameVersion.trim());
+
+  if (modern) {
+    return `${modern[1]}.${modern[2]}.`;
+  }
+
+  return null;
 }
 
 async function getNeoForgeLoaderVersion(gameVersion: string, requested?: string): Promise<string> {
@@ -1049,6 +1090,11 @@ export class MinecraftService {
 
     if (!support[loader]?.includes(gameVersion)) {
       throw new Error(`Loader "${loader}" does not support Minecraft ${gameVersion}. Pick a compatible combination.`);
+    }
+
+    const versions = await this.listLoaderVersions(loader, gameVersion);
+    if (!versions.length) {
+      throw new Error(`No ${loader} releases for Minecraft ${gameVersion} yet. Try another loader or version.`);
     }
   }
 
