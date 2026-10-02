@@ -268,7 +268,7 @@ async function downloadRuntimeZip(major: number): Promise<string> {
   const tempPath = `${zipPath}.tmp`;
   const response = await fetch(getAdoptiumDownloadUrl(major), {
     headers: {
-      "user-agent": "lynapp/1.0.0"
+      "user-agent": "lynapp/1.0.1"
     }
   });
 

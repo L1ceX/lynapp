@@ -47,7 +47,7 @@ function targetDirectory(instance: LauncherInstance, projectType: ModrinthProjec
 }
 
 async function downloadFile(url: string, target: string): Promise<void> {
-  const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.0.0" } });
+  const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.0.1" } });
   if (!response.ok) throw new Error(`Modrinth download failed with HTTP ${response.status}`);
   await writeFile(target, Buffer.from(await response.arrayBuffer()));
 }
@@ -60,7 +60,7 @@ export class ModService {
   async getCategoryTags(projectType: ModrinthProjectType): Promise<string[]> {
     if (!this.categoryCache) {
       const response = await fetch("https://api.modrinth.com/v2/tag/category", {
-        headers: { "User-Agent": "lynapp/1.0.0" }
+        headers: { "User-Agent": "lynapp/1.0.1" }
       });
 
       if (!response.ok) {
@@ -112,7 +112,7 @@ export class ModService {
 
       url.searchParams.set("facets", JSON.stringify(facets));
 
-      const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.0.0" } });
+      const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.0.1" } });
       if (!response.ok) throw new Error(`Modrinth returned ${response.status}`);
       const body = (await response.json()) as { hits: ModrinthHit[]; total_hits?: number };
       return {
@@ -188,7 +188,7 @@ export class ModService {
     const url = new URL(`https://api.modrinth.com/v2/project/${projectId}/version`);
     url.searchParams.set("game_versions", JSON.stringify([instance.gameVersion]));
     if (projectType === "mod" && instance.loader !== "vanilla") url.searchParams.set("loaders", JSON.stringify([instance.loader]));
-    const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.0.0" } });
+    const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.0.1" } });
     if (!response.ok) return [];
     return (await response.json()) as ModrinthVersion[];
   }

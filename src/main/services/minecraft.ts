@@ -155,7 +155,7 @@ async function downloadFile(url: string, filePath: string, expectedSha1?: string
 
   const response = await fetch(url, {
     headers: {
-      "user-agent": "lynapp/1.0.0"
+      "user-agent": "lynapp/1.0.1"
     }
   });
 
@@ -179,7 +179,7 @@ async function downloadJson<T>(url: string, filePath: string, expectedSha1?: str
 async function fetchText(url: string): Promise<string> {
   const response = await fetch(url, {
     headers: {
-      "user-agent": "lynapp/1.0.0"
+      "user-agent": "lynapp/1.0.1"
     }
   });
 
@@ -214,7 +214,7 @@ async function getCachedLoaderVersions(key: string, loader: () => Promise<string
 
 async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.0.0" }
+    headers: { "user-agent": "lynapp/1.0.1" }
   });
   if (!response.ok) {
     throw new Error(`Fabric loader versions returned ${response.status}`);
@@ -225,7 +225,7 @@ async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> 
 
 async function listQuiltLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.0.0" }
+    headers: { "user-agent": "lynapp/1.0.1" }
   });
   if (!response.ok) {
     throw new Error(`Quilt loader versions returned ${response.status}`);
@@ -264,7 +264,7 @@ function isGameVersionAtLeast(version: string, major: number, minor: number, pat
 async function getFabricGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.fabricmc.net/v2/versions/game", {
-      headers: { "user-agent": "lynapp/1.0.0" }
+      headers: { "user-agent": "lynapp/1.0.1" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -277,7 +277,7 @@ async function getFabricGameVersions(): Promise<string[]> {
 async function getQuiltGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.quiltmc.org/v3/versions/game", {
-      headers: { "user-agent": "lynapp/1.0.0" }
+      headers: { "user-agent": "lynapp/1.0.1" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -558,7 +558,7 @@ async function getManifest(): Promise<VersionManifest> {
   try {
     const response = await fetch(versionManifestUrl, {
       headers: {
-        "user-agent": "lynapp/1.0.0"
+        "user-agent": "lynapp/1.0.1"
       }
     });
     if (!response.ok) {
@@ -684,7 +684,7 @@ async function getFabricLoaderVersion(requested?: string): Promise<string> {
   }
 
   const response = await fetch("https://meta.fabricmc.net/v2/versions/loader", {
-    headers: { "user-agent": "lynapp/1.0.0" }
+    headers: { "user-agent": "lynapp/1.0.1" }
   });
   if (!response.ok) {
     throw new Error(`Fabric loader versions returned ${response.status}`);
@@ -714,7 +714,7 @@ async function getQuiltLoaderVersion(gameVersion: string, requested?: string): P
   }
 
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.0.0" }
+    headers: { "user-agent": "lynapp/1.0.1" }
   });
   if (!response.ok) {
     throw new Error(`Quilt loader versions returned ${response.status}`);
@@ -1020,7 +1020,7 @@ function buildLaunchArgs(
     version_type: version.type,
     natives_directory: paths.nativesDir,
     launcher_name: "lynapp",
-    launcher_version: "1.0.0",
+    launcher_version: "1.0.1",
     classpath: paths.classpath,
     classpath_separator: ";",
     library_directory: getLibrariesRoot(),
