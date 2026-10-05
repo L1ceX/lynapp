@@ -21,6 +21,7 @@ function defaultSettings(): LauncherSettings {
     javaPath: "",
     javaPaths: {},
     maxMemoryMb: 4096,
+    extraJvmArgs: "",
     launcherDataDir: getLauncherRoot(),
     concurrentDownloads: 4,
     closeOnLaunch: false,

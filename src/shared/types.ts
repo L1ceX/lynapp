@@ -28,6 +28,7 @@ export interface LauncherInstance {
   icon: string;
   javaPath?: string;
   maxMemoryMb?: number;
+  extraJvmArgs?: string;
   createdAt: string;
   updatedAt: string;
   mods: InstalledMod[];
@@ -37,6 +38,7 @@ export interface LauncherSettings {
   javaPath: string;
   javaPaths: Record<string, string>;
   maxMemoryMb: number;
+  extraJvmArgs: string;
   launcherDataDir: string;
   concurrentDownloads: number;
   closeOnLaunch: boolean;
@@ -69,7 +71,7 @@ export interface CapeInfo {
 
 export interface AccountState {
   id: string;
-  kind: "microsoft" | "offline";
+  kind: "microsoft" | "offline" | "ely";
   status: "signed-out" | "pending" | "signed-in" | "offline";
   profileName?: string;
   minecraftUuid?: string;
@@ -80,6 +82,8 @@ export interface AccountState {
   loginExpiresAt?: string;
   minecraftAccessToken?: string;
   microsoftRefreshToken?: string;
+  elyAccessToken?: string;
+  elyClientToken?: string;
   activeSkinId?: string | null;
   addedAt?: string;
 }

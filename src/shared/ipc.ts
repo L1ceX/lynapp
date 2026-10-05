@@ -30,6 +30,8 @@ export const IPC = {
   searchMods: "mods:search",
   installMod: "mods:install",
   beginMicrosoftLogin: "auth:microsoft:begin",
+  refreshSession: "auth:refresh",
+  elyLogin: "auth:ely",
   useOfflineProfile: "auth:offline",
   setActiveAccount: "auth:set-active",
   removeAccount: "auth:remove",
@@ -48,12 +50,14 @@ export const IPC = {
   removeLocalContent: "content:remove",
   getRunningInstances: "instances:running",
   stopInstance: "instances:stop",
+  cancelLaunch: "instances:cancel-launch",
   windowMinimize: "window:minimize",
   windowToggleMaximize: "window:toggle-maximize",
   windowClose: "window:close",
   windowIsMaximized: "window:is-maximized",
   windowMaximized: "window:maximized",
   listSkins: "skins:list",
+  elySkin: "skins:ely",
   addSkin: "skins:add",
   updateSkin: "skins:update",
   removeSkin: "skins:remove",
@@ -74,7 +78,7 @@ export interface CreateInstancePayload {
 
 export interface UpdateInstancePayload {
   id: string;
-  patch: Partial<Pick<LauncherInstance, "name" | "gameVersion" | "loader" | "javaPath" | "maxMemoryMb" | "loaderVersion">>;
+  patch: Partial<Pick<LauncherInstance, "name" | "gameVersion" | "loader" | "javaPath" | "maxMemoryMb" | "extraJvmArgs" | "loaderVersion">>;
 }
 
 export interface ModSearchPayload {
@@ -138,6 +142,11 @@ export interface SkinRemoveResult {
   activeSkinId: string | null;
 }
 
+export interface ElySkinResult {
+  dataUrl: string;
+  slim: boolean;
+}
+
 export interface LauncherApi {
   getFilePath(file: File): Promise<string>;
   getBootstrap(): Promise<BootstrapState>;
@@ -153,6 +162,8 @@ export interface LauncherApi {
   getCategoryTags(projectType: ModrinthProjectType): Promise<string[]>;
   installMod(payload: InstallModPayload): Promise<LauncherInstance>;
   beginMicrosoftLogin(): Promise<LoginStartResult>;
+  refreshSession(): Promise<AccountsState>;
+  elyLogin(username: string, password: string, totp?: string): Promise<AccountsState>;
   useOfflineProfile(username: string): Promise<AccountsState>;
   setActiveAccount(id: string): Promise<AccountsState>;
   removeAccount(id: string): Promise<AccountsState>;
@@ -170,7 +181,9 @@ export interface LauncherApi {
   removeLocalContent(payload: LocalContentPayload): Promise<LocalContentItem[]>;
   getRunningInstances(): Promise<string[]>;
   stopInstance(id: string): Promise<LaunchResult>;
+  cancelLaunch(id: string): Promise<LaunchResult>;
   listSkins(): Promise<SkinInfo[]>;
+  elySkin(): Promise<ElySkinResult | null>;
   addSkin(payload: SkinAddPayload): Promise<SkinInfo[]>;
   updateSkin(payload: SkinUpdatePayload): Promise<SkinInfo[]>;
   removeSkin(id: string): Promise<SkinRemoveResult>;

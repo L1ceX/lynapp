@@ -256,7 +256,8 @@ function getExecErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function downloadRuntimeZip(major: number): Promise<string> {
+async function downloadRuntimeZip(major: number, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   await mkdir(getCacheDir(), { recursive: true });
 
   const zipPath = path.join(getCacheDir(), `temurin-jre-${major}.zip`);
@@ -267,8 +268,9 @@ async function downloadRuntimeZip(major: number): Promise<string> {
 
   const tempPath = `${zipPath}.tmp`;
   const response = await fetch(getAdoptiumDownloadUrl(major), {
+    signal,
     headers: {
-      "user-agent": "lynapp/1.0.1"
+      "user-agent": "lynapp/1.0.2"
     }
   });
 
@@ -334,7 +336,7 @@ export class JavaService {
     return collectCandidatePaths(preferredPaths);
   }
 
-  async ensureRuntime(requiredMajor: number, preferredPaths: Array<string | undefined> = []): Promise<JavaRuntimeState> {
+  async ensureRuntime(requiredMajor: number, preferredPaths: Array<string | undefined> = [], signal?: AbortSignal): Promise<JavaRuntimeState> {
     const candidates = await collectCandidatePaths(preferredPaths);
     const preferred = preferredPaths.filter(Boolean) as string[];
 
@@ -372,7 +374,7 @@ export class JavaService {
       }
     }
 
-    const installed = await this.installFresh(downloadMajor);
+    const installed = await this.installFresh(downloadMajor, signal);
 
     if (!isCompatibleJavaMajor(installed.major, requiredMajor)) {
       throw new Error(`Downloaded Java ${downloadMajor}, but archive contains Java ${installed.major}.`);
@@ -474,9 +476,9 @@ export class JavaService {
     return { javawPath, major: await readJavaMajor(javawPath) };
   }
 
-  private async installFresh(downloadMajor: number): Promise<{ javawPath: string; major: number }> {
+  private async installFresh(downloadMajor: number, signal?: AbortSignal): Promise<{ javawPath: string; major: number }> {
     const runtimeDir = getRuntimeInstallDir(downloadMajor);
-    const zipPath = await downloadRuntimeZip(downloadMajor);
+    const zipPath = await downloadRuntimeZip(downloadMajor, signal);
     const tempDir = `${runtimeDir}.tmp-${Date.now()}`;
 
     try {

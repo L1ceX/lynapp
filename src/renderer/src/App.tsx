@@ -377,13 +377,8 @@ function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | null; slim
     let lastY = 0;
     let lastT = 0;
     let spinW = 0;
-    let prevW = 0;
     let capeX = 0.14;
     let capeVX = 0;
-    let capeY = 0;
-    let capeVY = 0;
-    let bodyLean = 0;
-    let bodyLeanV = 0;
     let playerRef: any = null;
     const onPointerDown = (event: PointerEvent): void => {
       dragging = true;
@@ -391,7 +386,6 @@ function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | null; slim
       lastY = event.clientY;
       lastT = performance.now();
       spinW = 0;
-      prevW = 0;
       try {
         canvas.setPointerCapture(event.pointerId);
       } catch {
@@ -447,7 +441,6 @@ function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | null; slim
       const w = (dx * 0.0085) / dt;
       playerRef.rotation.y += dx * 0.0085;
       spinW = spinW * 0.65 + w * 0.35;
-      prevW = spinW;
       pitchCamera(dy);
     };
     const onPointerUp = (): void => {
@@ -467,28 +460,19 @@ function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | null; slim
             if (Math.abs(spinW) < 0.001) spinW = 0;
             player.rotation.y += spinW * dt;
           }
-          const alpha = (spinW - prevW) / dt;
-          prevW = spinW;
           const stiff = 55;
           const damp = 7;
           const restX = 0.12;
           const flareTarget = Math.min(spinW * spinW * 0.02, 0.6);
           capeVX += (-stiff * (capeX - (restX + flareTarget)) - damp * capeVX) * dt;
           capeX += capeVX * dt;
-          const sweepTarget = Math.max(-0.55, Math.min(0.55, -alpha * 0.1 - spinW * 0.06));
-          const leanTarget = Math.max(-0.18, Math.min(0.18, spinW * 0.035));
-          bodyLeanV += (-40 * (bodyLean - leanTarget) - 7 * bodyLeanV) * dt;
-          bodyLean += bodyLeanV * dt;
-          capeVY += (-stiff * (capeY - sweepTarget) - damp * capeVY) * dt;
-          capeY += capeVY * dt;
           const t = progress * 1.3;
           const sway = Math.sin(t);
           const skin = player?.skin;
-          if (player && player.position) player.position.y = Math.sin(t * 2) * 0.025;
           const body = skin?.body;
           if (body) {
-            body.rotation.x = Math.sin(t) * 0.018;
-            body.rotation.z = bodyLean;
+            body.rotation.x = 0;
+            body.rotation.z = 0;
           }
           const head = skin?.head;
           if (head) {
@@ -514,7 +498,7 @@ function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | null; slim
           const cape = player?.cape;
           if (cape) {
             cape.rotation.x = capeX;
-            cape.rotation.y = capeY;
+            cape.rotation.y = 0;
           }
         } catch {
         }
@@ -807,7 +791,9 @@ export function App() {
   const sectionRef = useRef(section);
   sectionRef.current = section;
   const activeAccount = bootstrap?.accounts.find((item) => item.id === bootstrap.activeAccountId) ?? bootstrap?.accounts[0] ?? null;
-  const canEditSkins = (activeAccount?.status ?? "signed-out") === "signed-in";
+  const canEditSkins = activeAccount?.kind === "microsoft" && (activeAccount?.status ?? "signed-out") === "signed-in";
+  const isElyAccount = activeAccount?.kind === "ely";
+  const [elySkin, setElySkin] = useState<{ dataUrl: string; slim: boolean } | null | undefined>(undefined);
   const activeSkinId = canEditSkins ? (settingsDraft?.activeSkinId ?? bootstrap?.settings.activeSkinId ?? null) : null;
 
   async function refreshSkins(): Promise<void> {
@@ -833,6 +819,23 @@ export function App() {
       setDropActive(false);
     }
   }, [section, canEditSkins]);
+
+  useEffect(() => {
+    if (section !== "skins" || activeAccount?.kind !== "ely") {
+      setElySkin(undefined);
+      return;
+    }
+    let stale = false;
+    setElySkin(undefined);
+    getLauncherApi().elySkin().then((skin) => {
+      if (!stale) setElySkin(skin);
+    }).catch(() => {
+      if (!stale) setElySkin(null);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [section, activeAccount?.id]);
 
   async function uploadSkin(file: File): Promise<void> {
     if (!canEditSkins) {
@@ -905,16 +908,20 @@ export function App() {
     setBusy(true);
     const short = filePath.split(/[\\/]/).pop() ?? filePath;
     setStatus(`Importing ${short}...`);
+    let startedId: string | null = null;
     try {
       const started = await getLauncherApi().importMrpackStart(filePath);
+      startedId = started.instance.id;
       await refresh({ setReadyStatus: false });
       setSelectedId(started.instance.id);
       switchSection("instances");
       setMrpackProgress((current) => ({ ...current, [started.instance.id]: { done: 0, total: started.totalFiles } }));
+      setInstanceStatus({ id: started.instance.id, message: `Importing ${started.instance.name}... 0%` });
       setStatus(`Importing ${started.instance.name}... 0%`);
       try {
         await getLauncherApi().importMrpackFiles(started.instance.id);
         await refresh({ setReadyStatus: false });
+        setInstanceStatus({ id: started.instance.id, message: `Imported ${started.instance.name}` });
         setStatus(`Imported ${started.instance.name}`);
       } finally {
         setMrpackProgress((current) => {
@@ -924,7 +931,11 @@ export function App() {
         });
       }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Modpack import failed");
+      const message = error instanceof Error ? error.message : "Modpack import failed";
+      if (startedId) {
+        setInstanceStatus({ id: startedId, message });
+      }
+      setStatus(message);
     } finally {
       setBusy(false);
     }
@@ -1022,8 +1033,22 @@ export function App() {
     }
   }
   const [offlineName, setOfflineName] = useState("");
+  const [elyName, setElyName] = useState("");
+  const [elyPassword, setElyPassword] = useState("");
+  const [elyTotp, setElyTotp] = useState("");
   const [status, setStatus] = useState("Loading launcher state");
   const [busy, setBusy] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [launchingIds, setLaunchingIds] = useState<string[]>([]);
+  const [instanceStatus, setInstanceStatus] = useState<{ id: string; message: string } | null>(null);
+
+  function assertNotLaunching(): boolean {
+    if (selected && launchingIds.includes(selected.id)) {
+      setStatus(`Cancel the launch of ${selected.name} first`);
+      return false;
+    }
+    return true;
+  }
   const [javaInstalls, setJavaInstalls] = useState<JavaInstallation[] | null>(null);
   const [javaBusy, setJavaBusy] = useState<number | null>(null);
   const [gameVersions, setGameVersions] = useState<string[] | null>(null);
@@ -1080,6 +1105,24 @@ export function App() {
     if (activeAccount?.status === "offline" && activeAccount?.profileName) setOfflineName(activeAccount.profileName);
   }, [activeAccount?.profileName, activeAccount?.status]);
 
+  useEffect(() => {
+    if (!activeAccount || activeAccount.kind !== "microsoft" || activeAccount.status !== "signed-in") return;
+    const exp = activeAccount.expiresAt ? Date.parse(activeAccount.expiresAt) : NaN;
+    if (!Number.isNaN(exp) && exp - Date.now() > 24 * 3600 * 1000) return;
+    let stale = false;
+    void getLauncherApi().refreshSession().then((state) => {
+      if (stale) return;
+      const refreshed = state.accounts.find((item) => item.id === state.activeAccountId);
+      const refreshedExp = refreshed?.expiresAt ? Date.parse(refreshed.expiresAt) : NaN;
+      if (!Number.isNaN(refreshedExp) && refreshedExp - Date.now() > 24 * 3600 * 1000) {
+        void refresh({ setReadyStatus: false });
+      }
+    }).catch(() => undefined);
+    return () => {
+      stale = true;
+    };
+  }, [bootstrap?.activeAccountId]);
+
   const refreshJava = useCallback(async () => {
     try {
       setJavaInstalls(await getLauncherApi().getJavaInstallations());
@@ -1091,10 +1134,6 @@ export function App() {
   useEffect(() => {
     if (section === "launcher") void refreshJava();
   }, [section, refreshJava]);
-
-  useEffect(() => {
-    setStatus("");
-  }, [section]);
 
   useEffect(() => {
     const graceTimers = new WeakMap<HTMLButtonElement, number>();
@@ -1240,6 +1279,14 @@ export function App() {
   const totalPages = Math.max(1, Math.ceil(totalHits / contentLimit));
   const sortLabel = sortOptions.find((option) => option.id === contentSort)?.label ?? "Relevance";
   const isSelectedRunning = selected !== null && runningIds.includes(selected.id);
+  const isLaunching = launchingIds.length > 0 && selected !== null && launchingIds.includes(selected.id);
+  const headerStatus = selected !== null && instanceStatus?.id === selected.id ? instanceStatus.message : "";
+
+  function say(message: string): void {
+    if (selected) {
+      setInstanceStatus({ id: selected.id, message });
+    }
+  }
   const totalMods = useMemo(() => (bootstrap?.instances ?? []).reduce((sum, item) => sum + (item.mods?.length ?? 0), 0), [bootstrap?.instances]);
   const lastActivity = useMemo(() => {
     const stamps = (bootstrap?.instances ?? []).map((item) => item.updatedAt ?? "").filter(Boolean);
@@ -1310,37 +1357,38 @@ export function App() {
   }, [selected?.id, selected?.gameVersion]);
 
   async function createInstance(): Promise<void> {
-    setBusy(true);
+    if (creating) return;
+    setCreating(true);
     try {
       const instance = await getLauncherApi().createInstance(createForm);
       setBootstrap((current) => current ? { ...current, activeInstanceId: instance.id, instances: [instance, ...current.instances] } : current);
       setSelectedId(instance.id);
-      setStatus(`Created ${instance.name}`);
+      say(`Created ${instance.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Failed to create instance");
     } finally {
-      setBusy(false);
+      setCreating(false);
     }
   }
 
   async function updateSelected(patch: Partial<LauncherInstance>): Promise<void> {
-    if (!selected) return;
+    if (!selected || !assertNotLaunching()) return;
     try {
       const updated = await getLauncherApi().updateInstance({ id: selected.id, patch });
       setBootstrap((current) => current ? { ...current, instances: current.instances.map((item) => item.id === updated.id ? updated : item) } : current);
-      setStatus(`Saved ${updated.name}`);
+      say(`Saved ${updated.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Failed to save instance");
     }
   }
   async function removeSelected(): Promise<void> {
-    if (!selected || busy) return;
+    if (!selected || busy || !assertNotLaunching()) return;
     setBusy(true);
     try {
       await getLauncherApi().removeInstance(selected.id);
       setSelectedId(null);
       await refresh();
-      setStatus(`Deleted ${selected.name} with all its files`);
+      say(`Deleted ${selected.name} with all its files`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Failed to delete instance");
     } finally {
@@ -1371,11 +1419,11 @@ export function App() {
   }
 
   async function toggleLocalItem(item: LocalContentItem): Promise<void> {
-    if (!selected) return;
+    if (!selected || !assertNotLaunching()) return;
     setBusy(true);
     try {
       setLocalContent(await getLauncherApi().toggleLocalContent({ instanceId: selected.id, fileName: item.fileName }));
-      setStatus(`${item.enabled ? "Disabled" : "Enabled"} ${item.displayName}`);
+      say(`${item.enabled ? "Disabled" : "Enabled"} ${item.displayName}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Failed to toggle file");
     } finally {
@@ -1384,11 +1432,11 @@ export function App() {
   }
 
   async function removeLocalItem(item: LocalContentItem): Promise<void> {
-    if (!selected) return;
+    if (!selected || !assertNotLaunching()) return;
     setBusy(true);
     try {
       setLocalContent(await getLauncherApi().removeLocalContent({ instanceId: selected.id, fileName: item.fileName }));
-      setStatus(`Deleted ${item.displayName}`);
+      say(`Deleted ${item.displayName}`);
       await refresh();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Failed to delete file");
@@ -1398,18 +1446,28 @@ export function App() {
   }
 
   async function launchSelected(): Promise<void> {
-    if (!selected) return;
-    setBusy(true);
-    setStatus(`Preparing ${selected.gameVersion}...`);
+    if (!selected || launchingIds.includes(selected.id)) return;
+    setLaunchingIds((current) => [...current, selected.id]);
+    say(`Preparing ${selected.gameVersion}...`);
     try {
       const result = await getLauncherApi().launchInstance(selected.id);
-      setStatus(result.message);
+      say(result.message);
       await refresh({ setReadyStatus: false });
       await refreshRunning();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to prepare Java runtime");
+      say(error instanceof Error ? error.message : "Failed to prepare Java runtime");
     } finally {
-      setBusy(false);
+      setLaunchingIds((current) => current.filter((id) => id !== selected.id));
+    }
+  }
+
+  async function cancelSelected(): Promise<void> {
+    if (!selected || !isLaunching) return;
+    say("Cancelling launch...");
+    try {
+      await getLauncherApi().cancelLaunch(selected.id);
+    } catch (error) {
+      say(error instanceof Error ? error.message : "Failed to cancel launch");
     }
   }
 
@@ -1418,10 +1476,10 @@ export function App() {
     setBusy(true);
     try {
       const result = await getLauncherApi().stopInstance(selected.id);
-      setStatus(result.message);
+      say(result.message);
       await refreshRunning();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to stop instance");
+      say(error instanceof Error ? error.message : "Failed to stop instance");
     } finally {
       setBusy(false);
     }
@@ -1525,9 +1583,9 @@ export function App() {
       setContentSort(query.sort);
       setContentLimit(query.limit);
       setSelectedCategories(query.categories);
-      setStatus(`Found ${response.totalHits} ${contentLabel(contentType).toLowerCase()} on Modrinth`);
+      say(`Found ${response.totalHits} ${contentLabel(contentType).toLowerCase()} on Modrinth`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Modrinth search failed");
+      say(error instanceof Error ? error.message : "Modrinth search failed");
     } finally {
       setBusy(false);
     }
@@ -1540,7 +1598,7 @@ export function App() {
 
   async function installContent(result: ModSearchResult): Promise<void> {
     if (!selected) return setStatus("Select an instance first");
-    setBusy(true);
+    if (!assertNotLaunching()) return;
     try {
       const updated = await getLauncherApi().installMod({
         instanceId: selected.id,
@@ -1552,11 +1610,9 @@ export function App() {
         projectType: result.projectType
       });
       setBootstrap((current) => current ? { ...current, instances: current.instances.map((item) => item.id === updated.id ? updated : item) } : current);
-      setStatus(`${result.projectType === "modpack" ? "Downloaded" : "Installed"} ${result.title}`);
+      say(`${result.projectType === "modpack" ? "Downloaded" : "Installed"} ${result.title}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : `Failed to download ${result.title}`);
-    } finally {
-      setBusy(false);
+      say(error instanceof Error ? error.message : `Failed to download ${result.title}`);
     }
   }
 
@@ -1619,6 +1675,23 @@ export function App() {
     }
   }
 
+  async function elyLogin(): Promise<void> {
+    setBusy(true);
+    setStatus("Signing in with Ely.by...");
+    try {
+      await getLauncherApi().elyLogin(elyName, elyPassword, elyTotp || undefined);
+      setElyPassword("");
+      setElyTotp("");
+      setSelectedSkinId(null);
+      await refresh({ setReadyStatus: false });
+      setStatus(`Ely.by as ${elyName}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Ely.by login failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!bootstrap || !settingsDraft) {
     return <main className="loading-screen"><RefreshCw className="spin" size={24} /><span>{status}</span></main>;
   }
@@ -1660,8 +1733,8 @@ export function App() {
 
       {section === "home" && (
         <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}>
-          <header className="workspace-header"><div><span className="eyebrow">Home</span><h2>Welcome back</h2><span className="status-line">{status}</span></div></header>
-          <section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Box size={19} /><div><h3>{selected?.name ?? "No instance yet"}</h3><span>{selected ? `${selected.gameVersion} / ${selected.loader}${selected.loaderVersion ? ` ${selected.loaderVersion}` : ""}` : "Create an instance to start playing."}</span></div></div><div className="button-row"><button className={isSelectedRunning ? "primary-button launch-button running" : "primary-button launch-button"} disabled={!selected || busy} onClick={isSelectedRunning ? stopSelected : launchSelected}>{isSelectedRunning ? <><Square size={16} /> Stop</> : <><Play size={17} /> Launch</>}</button>{selected ? <button onClick={() => switchSection("instances")}><SlidersHorizontal size={16} /> Manage instance</button> : <button className="primary-button" onClick={() => switchSection("instances")}><Plus size={16} /> New instance</button>}</div></div></section>
+          <header className="workspace-header"><div><span className="eyebrow">Home</span><h2>Welcome back</h2><span className="status-line">{selected !== null && instanceStatus?.id === selected.id ? instanceStatus.message : status}</span></div></header>
+          <section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Box size={19} /><div><h3>{selected?.name ?? "No instance yet"}</h3><span>{selected ? `${selected.gameVersion} / ${selected.loader}${selected.loaderVersion ? ` ${selected.loaderVersion}` : ""}` : "Create an instance to start playing."}</span></div></div><div className="button-row">{isLaunching ? <button className="primary-button launch-button running" onClick={cancelSelected}><X size={16} /> Cancel</button> : <button className={isSelectedRunning ? "primary-button launch-button running" : "primary-button launch-button"} disabled={!selected || busy} onClick={isSelectedRunning ? stopSelected : launchSelected}>{isSelectedRunning ? <><Square size={16} /> Stop</> : <><Play size={17} /> Launch</>}</button>}{selected ? <button onClick={() => switchSection("instances")}><SlidersHorizontal size={16} /> Manage instance</button> : <button className="primary-button" onClick={() => switchSection("instances")}><Plus size={16} /> New instance</button>}</div></div></section>
           <div className="stat-grid anim-stagger"><div className="stat-card"><span className="stat-value">{bootstrap.instances.length}</span><span className="stat-label">Instances</span></div><div className="stat-card"><span className="stat-value">{totalMods}</span><span className="stat-label">Mods installed</span></div><div className="stat-card"><span className="stat-value">{runningIds.length}</span><span className="stat-label">Running now</span></div><div className="stat-card"><span className="stat-value">{lastActivity || "—"}</span><span className="stat-label">Last activity</span></div></div>
         </main>
       )}
@@ -1671,25 +1744,25 @@ export function App() {
           <aside className="instance-sidebar">
             <div className="sidebar-heading"><div><span className="eyebrow">Library</span><h1>Instances</h1></div><span className="count-badge">{bootstrap.instances.length}</span></div>
             <div className="instance-list">
-              {bootstrap.instances.map((instance) => { const progress = mrpackProgress[instance.id]; const pct = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0; return <button key={instance.id} className={instance.id === selected?.id ? "instance-button active" : "instance-button"} onClick={() => setSelectedId(instance.id)} disabled={busy || !!progress}>{progress ? <span className="instance-progress"><span style={{ width: `${pct}%` }} /></span> : null}<Box size={18} /><span><strong>{instance.name}</strong><small>{progress ? `Importing... ${pct}%` : `${instance.gameVersion} / ${instance.loader}`}</small></span>{progress ? null : <ChevronRight size={16} />}</button>; })}
+              {bootstrap.instances.map((instance) => { const progress = mrpackProgress[instance.id]; const launching = launchingIds.includes(instance.id); const pct = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0; return <button key={instance.id} className={instance.id === selected?.id ? "instance-button active" : "instance-button"} onClick={() => setSelectedId(instance.id)} disabled={busy || !!progress}>{progress ? <span className="instance-progress"><span style={{ width: `${pct}%` }} /></span> : null}<Box size={18} /><span><strong>{instance.name}</strong><small>{progress ? `Importing... ${pct}%` : launching ? "Launching..." : `${instance.gameVersion} / ${instance.loader}`}</small></span>{progress || launching ? null : <ChevronRight size={16} />}</button>; })}
             </div>
             <form className="new-instance-form anim-stagger" onSubmit={(event) => { event.preventDefault(); void createInstance(); }}>
               <div className="form-caption"><Plus size={15} /> New instance</div>
               <input value={createForm.name} onChange={(event) => setCreateForm({ ...createForm, name: event.target.value })} placeholder="Instance name" />
               <div className="two-col">{gameVersions ? <Dropdown value={createForm.gameVersion} options={withFallback(versionsForLoader(createForm.loader), createForm.gameVersion)} ariaLabel="Minecraft version" onChange={(version) => { const compatible = loadersForVersion(version); setCreateForm((form) => ({ ...createForm, gameVersion: version, loader: compatible.includes(form.loader) ? form.loader : "vanilla" })); }} /> : <input value={createForm.gameVersion} onChange={(event) => setCreateForm({ ...createForm, gameVersion: event.target.value })} placeholder="1.21.1" />}<Dropdown value={createForm.loader} options={withFallback(createLoaders ?? loadersForVersion(createForm.gameVersion), createForm.loader)} ariaLabel="Loader" onChange={(loader) => { const next = loader as ModLoader; const versions = versionsForLoader(next); setCreateForm((form) => ({ ...form, loader: next, gameVersion: versions.includes(form.gameVersion) ? form.gameVersion : versions[0] ?? form.gameVersion })); }} /></div>
-              <button className="primary-button" disabled={busy}><Plus size={16} /> Create</button><span className="muted">or drop a .mrpack anywhere</span>
+              <button className="primary-button" disabled={creating}><Plus size={16} /> Create</button><span className="muted">or drop a .mrpack anywhere</span>
             </form>
           </aside>
 
           <section className="instance-workspace">
-            <header className="workspace-header"><div><span className="eyebrow">Instance</span><h2>{selected?.name ?? "No instance selected"}</h2><span className="status-line">{status}</span></div><button className={isSelectedRunning ? "primary-button launch-button running" : "primary-button launch-button"} disabled={!selected || busy} onClick={isSelectedRunning ? stopSelected : launchSelected}>{isSelectedRunning ? <><Square size={16} /> Stop</> : <><Play size={17} /> Launch</>}</button></header>
+            <header className="workspace-header"><div><span className="eyebrow">{headerStatus.trim() ? (selected?.name ?? "No instance selected") : "Instance"}</span>{headerStatus.trim() ? <h2 key="status-promoted" className="status-promoted">{headerStatus}</h2> : <h2 key="instance-name">{selected?.name ?? "No instance selected"}</h2>}{headerStatus.trim() ? null : <span className="status-line">{headerStatus}</span>}</div>{isLaunching ? <button className="primary-button launch-button running" onClick={cancelSelected}><X size={16} /> Cancel</button> : <button className={isSelectedRunning ? "primary-button launch-button running" : "primary-button launch-button"} disabled={!selected || busy} onClick={isSelectedRunning ? stopSelected : launchSelected}>{isSelectedRunning ? <><Square size={16} /> Stop</> : <><Play size={17} /> Launch</>}</button>}</header>
             {selected ? <>
               <nav className="instance-tabs" aria-label="Instance settings">{instanceTabs.map(({ id, label, icon: Icon }) => <button key={id} className={instanceTab === id ? "tab-button active" : "tab-button"} onClick={() => switchTab(id)}><Icon size={16} />{label}</button>)}</nav>
               <section className={tabExiting ? "settings-surface tab-exiting" : "settings-surface"} key={instanceTab}>
                 {instanceTab === "general" && <div className="settings-content"><div className="surface-heading"><FolderCog size={19} /><div><h3>General</h3><span>Identity and location for this installation.</span></div></div><label>Instance name<input value={selected.name} onChange={(event) => void updateSelected({ name: event.target.value })} /></label><div className="readonly-path"><HardDrive size={16} /><span>{selected.directory}</span><button type="button" className="path-open" onClick={() => void openSelectedFolder()} title="Open instance folder"><FolderOpen size={15} /></button></div><button className="danger-button" onClick={() => setConfirmDelete(true)} disabled={busy || isSelectedRunning} title={isSelectedRunning ? "Stop the instance first" : "Delete the instance and its folder"}><Trash2 size={16} /> Delete instance</button></div>}
                 {instanceTab === "versions" && <div className="settings-content anim-stagger"><div className="surface-heading"><Waypoints size={19} /><div><h3>Versions</h3><span>Minecraft version and loader for this instance.</span></div></div><div className="two-col"><label>Minecraft version{gameVersions ? <Dropdown value={selected.gameVersion} options={withFallback(versionsForLoader(selected.loader), selected.gameVersion)} ariaLabel="Minecraft version" onChange={(version) => { const compatible = loadersForVersion(version); void updateSelected(compatible.includes(selected.loader) ? { gameVersion: version } : { gameVersion: version, loader: "vanilla" }); }} /> : <input value={selected.gameVersion} onChange={(event) => void updateSelected({ gameVersion: event.target.value })} placeholder="1.21.1" />}</label><label>Loader<Dropdown value={selected.loader} options={withFallback(selectedLoaders ?? loadersForVersion(selected.gameVersion), selected.loader)} ariaLabel="Loader" onChange={(loader) => { const next = loader as ModLoader; const versions = versionsForLoader(next); void updateSelected(versions.includes(selected.gameVersion) ? { loader: next } : { loader: next, gameVersion: versions[0] ?? selected.gameVersion }); }} /></label></div><label>Loader version{selected.loader === "vanilla" ? <span className="muted">Not needed for vanilla</span> : loaderVersions ? <Dropdown value={selected.loaderVersion?.trim() || "Latest"} options={(selected.loaderVersion?.trim() ? ["Latest", selected.loaderVersion.trim(), ...loaderVersions.filter((item) => item !== selected.loaderVersion?.trim())] : ["Latest", ...loaderVersions])} ariaLabel="Loader version" onChange={(label) => void updateSelected({ loaderVersion: label === "Latest" ? "" : label })} /> : <input value="" disabled placeholder="Loading versions..." />}</label></div>}
                 {instanceTab === "files" && <div className="settings-content" key={`files-${selected.id}`}><div className="surface-heading"><Folder size={19} /><div><h3>Local files</h3><span>Everything inside this instance folders, including files added by hand.</span></div></div><div className="button-row"><button onClick={() => void refreshLocalContent()} disabled={busy}><RefreshCw size={15} /> Refresh</button><button onClick={() => void openSelectedFolder()}><FolderOpen size={15} /> Open folder</button></div>{localContent === null ? <span className="muted">Reading instance folders...</span> : fileGroups.map((group) => { const rows = localContent.filter((item) => item.kind === group.id); return <div key={group.id} className="file-group"><div className="section-title">{group.label} · {rows.filter((row) => row.enabled).length}/{rows.length}</div>{rows.length ? rows.map((item) => <div key={item.kind + item.fileName} className={item.enabled ? "file-row" : "file-row disabled"}>{item.iconUrl ? <img className="file-icon" src={item.iconUrl} alt="" /> : <div className="file-icon mod-icon">{item.displayName[0] ?? "?"}</div>}<div className="file-main"><strong>{item.displayName}</strong><small className="muted">{item.fileName} · {formatBytes(item.size)}{item.modified ? ` · ${formatDateTime(item.modified)}` : ""}</small></div><div className="file-side">{item.source === "modrinth" ? <span className="tag-chip">Modrinth</span> : item.source === "manual" ? <span className="tag-chip manual">Manual</span> : <span className="tag-chip missing">Missing file</span>}{item.enabled ? null : <span className="tag-chip">Off</span>}{item.source !== "missing" ? <button type="button" title={item.enabled ? "Disable" : "Enable"} onClick={() => void toggleLocalItem(item)} disabled={busy}>{item.enabled ? <EyeOff size={15} /> : <Eye size={15} />}</button> : null}<button type="button" title="Delete" onClick={() => void removeLocalItem(item)} disabled={busy}><Trash2 size={15} /></button></div></div>) : <span className="muted">Empty — drop files into the folder or install from Content.</span>}</div>; })}</div>}
-                {instanceTab === "runtime" && <div className="settings-content"><div className="surface-heading"><Cpu size={19} /><div><h3>RAM</h3><span>Allocated memory for this instance only.</span></div></div><label>Allocated RAM<MemorySlider value={selected.maxMemoryMb ?? bootstrap.settings.maxMemoryMb} onChange={(next) => void updateSelected({ maxMemoryMb: next })} /></label></div>}
+                {instanceTab === "runtime" && <div className="settings-content"><div className="surface-heading"><Cpu size={19} /><div><h3>RAM</h3><span>Allocated memory for this instance only.</span></div></div><label>Allocated RAM<MemorySlider value={selected.maxMemoryMb ?? bootstrap.settings.maxMemoryMb} onChange={(next) => void updateSelected({ maxMemoryMb: next })} /></label><label>Extra JVM flags<textarea value={selected.extraJvmArgs ?? ""} rows={2} spellCheck={false} placeholder={bootstrap.settings.extraJvmArgs || "-XX:+UseG1GC -XX:MaxGCPauseMillis=50"} onChange={(event) => void updateSelected({ extraJvmArgs: event.target.value })} /></label></div>}
                 {instanceTab === "content" && <div className={contentExiting ? "settings-content content-content content-exiting" : "settings-content content-content"} key={`${contentType}-${selected.id}`}><div className="surface-heading"><PackageSearch size={19} /><div><h3>Discover {contentLabel(contentType).toLowerCase()}</h3><span>Browse Modrinth for {selected.gameVersion} / {selected.loader}.</span></div></div><nav className="content-types" aria-label="Content type">{contentTypes.map(({ id, label, icon: Icon }) => <button key={id} className={contentType === id ? "content-type active" : "content-type"} onClick={() => switchContentType(id)}><Icon size={15} /><span>{label}</span></button>)}</nav><div className="content-browser"><div className="content-main"><div className="search-row"><input value={modQuery} onChange={(event) => setModQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void runContentSearch({ page: 1 }); }} placeholder="Search or leave empty to browse" /><button onClick={() => void runContentSearch({ page: 1 })} disabled={busy}><Search size={16} /> Search</button></div><div className="browse-controls"><label className="sort-label">Sort by:<Dropdown value={sortLabel} options={sortOptions.map((option) => option.label)} ariaLabel="Sort by" onChange={(label) => { const found = sortOptions.find((option) => option.label === label); if (found) void runContentSearch({ page: 1, sort: found.id }); }} /></label><label className="sort-label">View:<Dropdown value={String(contentLimit)} options={["10", "20", "50"]} ariaLabel="Results per page" onChange={(label) => void runContentSearch({ page: 1, limit: Number(label) })} /></label>{totalHits > 0 ? <span className="muted">{totalHits} result{totalHits === 1 ? "" : "s"}</span> : null}</div><div className={busy ? "mod-results refreshing" : "mod-results"}>{visibleResults.map((result) => <article key={`${result.projectType}-${result.id}`} className="mod-card">{result.iconUrl ? <img className="mod-card-icon" src={result.iconUrl} alt="" /> : <div className="mod-card-icon mod-icon">{result.title[0]}</div>}<div className="mod-card-main"><div className="mod-card-title"><strong>{result.title}</strong>{result.author ? <span>by {result.author}</span> : null}</div><p>{result.summary}</p>{result.categories.length ? <div className="mod-card-tags">{result.categories.slice(0, 5).map((category) => <span key={category} className="tag-chip">{category}</span>)}</div> : null}</div><div className="mod-card-side">{installedProjectIds.has(result.id) ? <span className="installed-badge"><Check size={14} /> Installed</span> : <button className="install-button" onClick={() => void installContent(result)} disabled={busy || !isInstallable(result)} title={`${result.projectType === "modpack" ? "Download" : "Install"} ${result.title}`}><Plus size={14} /> Install</button>}<div className="mod-card-stats"><span><Download size={13} /> {formatDownloads(result.downloads)}</span>{typeof result.follows === "number" ? <span><Heart size={13} /> {formatDownloads(result.follows)}</span> : null}</div>{result.dateModified ? <small className="muted"><Clock size={12} /> {formatRelative(result.dateModified)}</small> : null}</div></article>)}</div>{totalPages > 1 ? <nav className="pages" aria-label="Result pages"><button className="page-button" disabled={contentPage <= 1 || busy} aria-label="Previous page" onClick={() => void runContentSearch({ page: contentPage - 1 })}><ChevronLeft size={15} /></button>{pageList(contentPage, totalPages).map((page, index) => page === "gap" ? <span key={`gap-${index}`} className="page-gap">…</span> : <button key={page} className={page === contentPage ? "page-button active" : "page-button"} disabled={busy} onClick={() => void runContentSearch({ page })}>{page}</button>)}<button className="page-button" disabled={contentPage >= totalPages || busy} aria-label="Next page" onClick={() => void runContentSearch({ page: contentPage + 1 })}><ChevronRight size={15} /></button></nav> : null}</div><aside className="content-filters"><div className="filter-row"><div><strong>Hide content already installed</strong></div><button type="button" role="switch" aria-checked={hideInstalled} className="switch" onClick={() => setHideInstalled((value) => !value)}><span className="knob" /></button></div><div className="filter-group"><div className="section-title">Game version</div>{versionUnlocked ? <Dropdown value={versionOverride ?? selected.gameVersion} options={gameVersions ?? [selected.gameVersion]} ariaLabel="Game version filter" onChange={(version) => { setVersionOverride(version); void runContentSearch({ page: 1, versions: [version] }); }} /> : <><span className="filter-lock">{selected.gameVersion}</span><p className="muted">Game version is provided by the instance. Unlocking may show incompatible content.</p><button onClick={() => { setVersionUnlocked(true); setVersionOverride(selected.gameVersion); }}><Lock size={14} /> Unlock filter</button></>}</div>{contentType === "mod" ? <div className="filter-group"><div className="section-title">Loader</div>{loaderUnlocked ? <Dropdown value={loaderOverride ?? selected.loader} options={loaderFilterOptions} ariaLabel="Loader filter" onChange={(loader) => { setLoaderOverride(loader); void runContentSearch({ page: 1, loaders: [loader] }); }} /> : <><span className="filter-lock">{selected.loader}</span><button onClick={() => { setLoaderUnlocked(true); setLoaderOverride(selected.loader === "vanilla" ? "fabric" : selected.loader); }}><Lock size={14} /> Unlock filter</button></>}</div> : null}<div className="filter-group"><div className="section-title">Categories</div><div className="filter-checks">{categoryTags.length ? categoryTags.map((tag) => <label key={tag} className="filter-check"><input type="checkbox" checked={selectedCategories.includes(tag)} onChange={() => toggleCategory(tag)} />{tag}</label>) : <span className="muted">No categories</span>}</div></div></aside></div></div>}
               </section>
             </> : <div className="blank-workspace"><Boxes size={34} /><h2>Select an instance</h2></div>}
@@ -1697,13 +1770,13 @@ export function App() {
         </main>
       )}
 
-      {section === "launcher" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">Application</span><h2>Launcher settings</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Settings size={19} /><div><h3>Memory</h3><span>Default allocated RAM for instances.</span></div></div><label>Allocated RAM<MemorySlider value={settingsDraft.maxMemoryMb} onChange={(next) => setSettingsDraft({ ...settingsDraft, maxMemoryMb: next })} /></label></div><button className="primary-button save-button" onClick={saveSettings}><Save size={16} /> Save settings</button></section><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Cpu size={19} /><div><h3>Java installations</h3><span>One runtime per Minecraft requirement. The launcher picks the right one automatically.</span></div></div><div className="java-rows">{javaInstalls ? javaInstalls.map((installation) => <div key={installation.major} className="java-row"><div className="java-row-head"><strong>Java {installation.major} location</strong>{installation.valid ? <CheckCircle2 size={17} className="java-status ok" /> : <XCircle size={17} className="java-status bad" />}</div><input value={installation.path} readOnly placeholder="Not installed" /><div className="java-actions"><button onClick={() => void javaAction(installation.major, "install")} disabled={javaBusy !== null}><Download size={15} /> Install recommended</button><button onClick={() => void javaAction(installation.major, "detect")} disabled={javaBusy !== null}><RefreshCw size={15} /> Detect</button><button onClick={() => void javaAction(installation.major, "browse")} disabled={javaBusy !== null}><FolderOpen size={15} /> Browse</button></div><small className="muted">{javaBusy === installation.major ? "Working..." : installation.message}</small></div>) : <span className="muted">Loading Java installations...</span>}</div></div></section></main>}
+      {section === "launcher" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">Application</span><h2>Launcher settings</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Settings size={19} /><div><h3>Memory</h3><span>Default allocated RAM for instances.</span></div></div><label>Allocated RAM<MemorySlider value={settingsDraft.maxMemoryMb} onChange={(next) => setSettingsDraft({ ...settingsDraft, maxMemoryMb: next })} /></label><label>Extra JVM flags<textarea value={settingsDraft.extraJvmArgs} rows={2} spellCheck={false} placeholder="-XX:+UseG1GC -XX:MaxGCPauseMillis=50" onChange={(event) => setSettingsDraft({ ...settingsDraft, extraJvmArgs: event.target.value })} /></label></div><button className="primary-button save-button" onClick={saveSettings}><Save size={16} /> Save settings</button></section><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Cpu size={19} /><div><h3>Java installations</h3><span>One runtime per Minecraft requirement. The launcher picks the right one automatically.</span></div></div><div className="java-rows">{javaInstalls ? javaInstalls.map((installation) => <div key={installation.major} className="java-row"><div className="java-row-head"><strong>Java {installation.major} location</strong>{installation.valid ? <CheckCircle2 size={17} className="java-status ok" /> : <XCircle size={17} className="java-status bad" />}</div><input value={installation.path} readOnly placeholder="Not installed" /><div className="java-actions"><button onClick={() => void javaAction(installation.major, "install")} disabled={javaBusy !== null}><Download size={15} /> Install recommended</button><button onClick={() => void javaAction(installation.major, "detect")} disabled={javaBusy !== null}><RefreshCw size={15} /> Detect</button><button onClick={() => void javaAction(installation.major, "browse")} disabled={javaBusy !== null}><FolderOpen size={15} /> Browse</button></div><small className="muted">{javaBusy === installation.major ? "Working..." : installation.message}</small></div>) : <span className="muted">Loading Java installations...</span>}</div></div></section></main>}
 
       {section === "visuals" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">Appearance</span><h2>Visuals</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Palette size={19} /><div><h3>Theme</h3><span>Pick a parameter, choose any color. Applied instantly.</span></div></div><div className="visuals-layout"><div className="visuals-main"><div className="preset-row">{THEME_PRESETS.map((item) => <button key={item.id} type="button" onClick={() => applyPreset(item.id)}>{item.label}</button>)}</div><div className="theme-grid">{THEME_GROUPS.map((group) => <div key={group} className="theme-group-block anim-stagger"><span className="theme-group">{group}</span>{THEME_TOKENS.filter((token) => token.group === group).map((token) => { const value = theme[token.id] ?? token.default; return <label key={token.id} className="theme-row" onMouseEnter={() => setPreviewToken(token.id)}><input type="color" value={value} onChange={(event) => setToken(token.id, event.target.value)} aria-label={token.label} /><span className="theme-dot" style={{ background: value }} /><span className="theme-name">{token.label}</span><code>{value}</code></label>; })}</div>)}</div></div>{(() => { const def = THEME_TOKENS.find((item) => item.id === previewToken) ?? THEME_TOKENS[0]; return <div className="preview-pane"><span className="eyebrow">Preview</span><strong>{def.label}</strong><ThemePreview id={previewToken} /></div>; })()}</div></div></section><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Sparkles size={19} /><div><h3>Motion</h3><span>Cursor glow and animations.</span></div></div><div className="filter-row"><strong>Cursor glow</strong><button type="button" className="switch" role="switch" aria-checked={glowOn} aria-label="Cursor glow" onClick={() => setGlowEnabled(!glowOn)}><span className="knob" /></button></div><label>Glow size · {glowSize}%<input type="range" min={10} max={220} step={5} value={glowSize} disabled={!glowOn} onChange={(event) => setGlowSizeValue(Number(event.target.value))} aria-label="Glow size" /></label><label>Glow follow speed · {glowSpeed}%<input type="range" min={20} max={150} step={10} value={glowSpeed} disabled={!glowOn} onChange={(event) => setGlowSpeedValue(Number(event.target.value))} aria-label="Glow follow speed" /></label><div className="filter-row"><strong>Animations</strong><button type="button" className="switch" role="switch" aria-checked={animsOn} aria-label="Animations" onClick={() => setAnimsEnabled(!animsOn)}><span className="knob" /></button></div></div></section></main>}
 
-      {section === "skins" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">Identity</span><h2>Skins</h2><span className="status-line">{status}</span></div></header><section className={dropActive ? "settings-surface skins-surface dragging" : "settings-surface skins-surface"} onDragOver={(event) => { event.preventDefault(); setDropActive(true); }} onDragLeave={() => setDropActive(false)} onDrop={dropSkin}><div className="settings-content"><div className="surface-heading"><Shirt size={19} /><div><h3>Skin selector</h3><span>Playing as {activeAccount?.profileName ?? activeAccount?.status}{activeAccount?.status === "signed-in" ? ". Use uploads to Mojang." : ". Offline profile."}</span></div></div>{(() => { const list = canEditSkins ? (skins ?? []) : []; const preview = list.find((item) => item.id === (selectedSkinId ?? activeSkinId)) ?? list.find((item) => item.id === activeSkinId) ?? list[0] ?? null; const cape = (capes ?? []).find((item) => item.active) ?? null; return <div className="skins-layout"><div className="skin-stage"><SkinViewer3D dataUrl={preview?.dataUrl ?? null} slim={preview?.slim ?? false} capeUrl={cape?.url ?? null} /><strong>{preview?.name ?? "No skin yet"}</strong><span className="muted">{canEditSkins ? "Drag to rotate · scroll to zoom · drop a PNG anywhere" : "Drag to rotate · scroll to zoom"}</span></div><div className="skins-side"><span className="section-title">Saved skins</span>{skins === null ? <span className="muted">Loading skins...</span> : skins.length ? <div className="skin-grid">{skins.map((skin) => <div key={skin.id} role="button" tabIndex={0} onClick={() => setSelectedSkinId(skin.id)} onKeyDown={(event) => { if (event.key === "Enter") setSelectedSkinId(skin.id); }} className={skin.id === activeSkinId ? "skin-card active" : skin.id === (selectedSkinId ?? activeSkinId) ? "skin-card selected" : "skin-card"}><SkinPreview dataUrl={skin.dataUrl} slim={skin.slim} /><strong>{skin.name}</strong><div className="button-row skin-arms"><button type="button" className={skin.slim ? "" : "content-type active"} onClick={(event) => { event.stopPropagation(); void setSkinModel(skin.id, false); }} disabled={skinBusy || !canEditSkins}>Wide</button><button type="button" className={skin.slim ? "content-type active" : ""} onClick={(event) => { event.stopPropagation(); void setSkinModel(skin.id, true); }} disabled={skinBusy || !canEditSkins}>Slim</button></div><div className="button-row skin-actions"><button type="button" className={skin.id === activeSkinId ? "primary-button" : ""} onClick={(event) => { event.stopPropagation(); void activateSkin(skin.id, skin.name); }} disabled={skinBusy || !canEditSkins || skin.id === activeSkinId}>{skin.id === activeSkinId ? <><Check size={15} /> Active</> : "Use skin"}</button><button type="button" onClick={(event) => { event.stopPropagation(); void removeSkin(skin.id, skin.name); }} disabled={skinBusy || !canEditSkins} title="Delete skin"><Trash2 size={15} /></button></div></div>)}</div> : canEditSkins ? <span className="muted">No skins yet. Upload a 64x64 PNG texture.</span> : <span className="muted">Sign in with Microsoft to see your skins.</span>}<div className="button-row"><label className={canEditSkins ? "file-pick" : "file-pick disabled"}><Plus size={16} /> Upload skin<input type="file" accept=".png,image/png" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadSkin(file); }} /></label></div>{canEditSkins ? null : <span className="muted">Skins are locked for offline profiles. Sign in with Microsoft to change them.</span>}<span className="section-title">Cape</span>{capes === null ? <span className="muted">Loading capes...</span> : activeAccount?.status !== "signed-in" ? <span className="muted">Sign in with Microsoft to use capes.</span> : capes.length ? <div className="cape-row"><button type="button" className={capes.some((item) => item.active) ? "cape-pick" : "cape-pick active"} onClick={() => void equipCape(null)} disabled={skinBusy} title="No cape">None</button>{capes.map((item) => <button key={item.id} type="button" className={item.active ? "cape-pick active" : "cape-pick"} onClick={() => void equipCape(item.id)} disabled={skinBusy} title={item.alias}><CapeThumb url={item.url} /></button>)}</div> : <span className="muted">No capes on this account. Custom capes cannot be uploaded to Mojang.</span>}</div></div>; })()}</div></section></main>}
+      {section === "skins" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">Identity</span><h2>Skins</h2><span className="status-line">{status}</span></div></header><section className={dropActive ? "settings-surface skins-surface dragging" : "settings-surface skins-surface"} onDragOver={(event) => { event.preventDefault(); setDropActive(true); }} onDragLeave={() => setDropActive(false)} onDrop={dropSkin}><div className="settings-content"><div className="surface-heading"><Shirt size={19} /><div><h3>Skin selector</h3><span>Playing as {activeAccount?.profileName ?? activeAccount?.status}{activeAccount?.kind === "ely" ? ". Ely.by skin below." : activeAccount?.status === "signed-in" ? ". Use uploads to Mojang." : ". Offline profile."}</span></div></div>{(() => { const list = canEditSkins ? (skins ?? []) : []; const preview = list.find((item) => item.id === (selectedSkinId ?? activeSkinId)) ?? list.find((item) => item.id === activeSkinId) ?? list[0] ?? null; const cape = (capes ?? []).find((item) => item.active) ?? null; return <div className="skins-layout"><div className="skin-stage"><SkinViewer3D dataUrl={isElyAccount ? (elySkin?.dataUrl ?? null) : (preview?.dataUrl ?? null)} slim={isElyAccount ? (elySkin?.slim ?? false) : (preview?.slim ?? false)} capeUrl={cape?.url ?? null} /><strong>{isElyAccount ? `${activeAccount?.profileName ?? "Ely"} · Ely.by` : (preview?.name ?? "No skin yet")}</strong><span className="muted">{canEditSkins ? "Drag to rotate · scroll to zoom · drop a PNG anywhere" : "Drag to rotate · scroll to zoom"}</span></div><div className="skins-side"><span className="section-title">Saved skins</span>{skins === null ? <span className="muted">Loading skins...</span> : skins.length ? <div className="skin-grid">{skins.map((skin) => <div key={skin.id} role="button" tabIndex={0} onClick={() => setSelectedSkinId(skin.id)} onKeyDown={(event) => { if (event.key === "Enter") setSelectedSkinId(skin.id); }} className={skin.id === activeSkinId ? "skin-card active" : skin.id === (selectedSkinId ?? activeSkinId) ? "skin-card selected" : "skin-card"}><SkinPreview dataUrl={skin.dataUrl} slim={skin.slim} /><strong>{skin.name}</strong><div className="button-row skin-arms"><button type="button" className={skin.slim ? "" : "content-type active"} onClick={(event) => { event.stopPropagation(); void setSkinModel(skin.id, false); }} disabled={skinBusy || !canEditSkins}>Wide</button><button type="button" className={skin.slim ? "content-type active" : ""} onClick={(event) => { event.stopPropagation(); void setSkinModel(skin.id, true); }} disabled={skinBusy || !canEditSkins}>Slim</button></div><div className="button-row skin-actions"><button type="button" className={skin.id === activeSkinId ? "primary-button" : ""} onClick={(event) => { event.stopPropagation(); void activateSkin(skin.id, skin.name); }} disabled={skinBusy || !canEditSkins || skin.id === activeSkinId}>{skin.id === activeSkinId ? <><Check size={15} /> Active</> : "Use skin"}</button><button type="button" onClick={(event) => { event.stopPropagation(); void removeSkin(skin.id, skin.name); }} disabled={skinBusy || !canEditSkins} title="Delete skin"><Trash2 size={15} /></button></div></div>)}</div> : canEditSkins ? <span className="muted">No skins yet. Upload a 64x64 PNG texture.</span> : isElyAccount ? (elySkin === undefined ? <span className="muted">Loading Ely.by skin...</span> : elySkin ? <span className="muted">Ely.by skin is shown in the preview.</span> : <span className="muted">No skin on this Ely.by account.</span>) : <span className="muted">Sign in with Microsoft to see your skins.</span>}<div className="button-row"><label className={canEditSkins ? "file-pick" : "file-pick disabled"}><Plus size={16} /> Upload skin<input type="file" accept=".png,image/png" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadSkin(file); }} /></label></div>{canEditSkins ? null : <span className="muted">Skins are locked for offline profiles. Sign in with Microsoft to change them.</span>}<span className="section-title">Cape</span>{capes === null ? <span className="muted">Loading capes...</span> : activeAccount?.status !== "signed-in" ? <span className="muted">Sign in with Microsoft to use capes.</span> : capes.length ? <div className="cape-row"><button type="button" className={capes.some((item) => item.active) ? "cape-pick" : "cape-pick active"} onClick={() => void equipCape(null)} disabled={skinBusy} title="No cape">None</button>{capes.map((item) => <button key={item.id} type="button" className={item.active ? "cape-pick active" : "cape-pick"} onClick={() => void equipCape(item.id)} disabled={skinBusy} title={item.alias}><CapeThumb url={item.url} /></button>)}</div> : <span className="muted">No capes on this account. Custom capes cannot be uploaded to Mojang.</span>}</div></div>; })()}</div></section></main>}
 
-      {section === "accounts" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">Identity</span><h2>Account settings</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><User size={19} /><div><h3>Playing as</h3><span>Click an account to switch, no re-login needed.</span></div></div><div className="account-list">{bootstrap.accounts.map((item) => <div key={item.id} role="button" tabIndex={0} onClick={() => void switchAccount(item.id)} onKeyDown={(event) => { if (event.key === "Enter") void switchAccount(item.id); }} className={item.id === activeAccount?.id ? "account-row active" : "account-row"}>{item.id === activeAccount?.id ? <span className="account-dot on" /> : <span className="account-dot" />}{item.kind === "microsoft" ? <KeyRound size={20} /> : <User size={20} />}<div><strong>{item.profileName ?? item.kind}</strong><span>{item.kind === "microsoft" ? "Minecraft account" : "Offline"}</span></div><button type="button" title="Remove account" onClick={(event) => { event.stopPropagation(); void removeAccount(item.id, item.profileName ?? item.kind); }} disabled={busy}><Trash2 size={15} /></button></div>)}{bootstrap.accounts.length ? null : <span className="muted">No accounts yet. Add one below.</span>}</div><div className="button-row"><button className="primary-button" onClick={beginLogin} disabled={busy}><Plus size={16} /> Add account</button></div></div><div className="settings-content bordered-top"><div className="surface-heading"><UserRoundCog size={19} /><div><h3>Offline profile</h3><span>No Microsoft account needed.</span></div></div><label>Username<input value={offlineName} maxLength={16} onChange={(event) => setOfflineName(event.target.value)} placeholder="Player" /></label><button onClick={useOfflineProfile} disabled={busy}><User size={16} /> Add offline profile</button><div className="readonly-path"><HardDrive size={16} /><span>{bootstrap.storagePath}</span></div></div></section></main>}
+      {section === "accounts" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">Identity</span><h2>Account settings</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><User size={19} /><div><h3>Playing as</h3><span>Click an account to switch, no re-login needed.</span></div></div><div className="account-list">{bootstrap.accounts.map((item) => <div key={item.id} role="button" tabIndex={0} onClick={() => void switchAccount(item.id)} onKeyDown={(event) => { if (event.key === "Enter") void switchAccount(item.id); }} className={item.id === activeAccount?.id ? "account-row active" : "account-row"}>{item.id === activeAccount?.id ? <span className="account-dot on" /> : <span className="account-dot" />}{item.kind === "microsoft" ? <KeyRound size={20} /> : <User size={20} />}<div><strong>{item.profileName ?? item.kind}</strong><span>{item.kind === "microsoft" ? "Minecraft account" : item.kind === "ely" ? "Ely.by" : "Offline"}</span></div><button type="button" title="Remove account" onClick={(event) => { event.stopPropagation(); void removeAccount(item.id, item.profileName ?? item.kind); }} disabled={busy}><Trash2 size={15} /></button></div>)}{bootstrap.accounts.length ? null : <span className="muted">No accounts yet. Add one below.</span>}</div><div className="button-row"><button className="primary-button" onClick={beginLogin} disabled={busy}><Plus size={16} /> Add account</button></div></div><div className="settings-content bordered-top"><div className="surface-heading"><UserRoundCog size={19} /><div><h3>Offline profile</h3><span>No Microsoft account needed.</span></div></div><label>Username<input value={offlineName} maxLength={16} onChange={(event) => setOfflineName(event.target.value)} placeholder="Player" /></label><button onClick={useOfflineProfile} disabled={busy}><User size={16} /> Add offline profile</button></div><div className="settings-content bordered-top"><div className="surface-heading"><KeyRound size={19} /><div><h3>Ely.by account</h3><span>Login, skins and Ely servers.</span></div></div><label>Username or e-mail<input value={elyName} onChange={(event) => setElyName(event.target.value)} placeholder="nickname" /></label><label>Password<input type="password" value={elyPassword} onChange={(event) => setElyPassword(event.target.value)} placeholder="••••••••" /></label><label>2FA token (if enabled)<input value={elyTotp} inputMode="numeric" onChange={(event) => setElyTotp(event.target.value.replace(/[^0-9]/g, ""))} placeholder="123456" /></label><button className="primary-button" onClick={elyLogin} disabled={busy}><KeyRound size={16} /> Add Ely account</button></div><div className="settings-content bordered-top"><div className="readonly-path"><HardDrive size={16} /><span>{bootstrap.storagePath}</span></div></div></section></main>}
       </div>
       {confirmDelete && selected ? <div className="modal-backdrop" onClick={() => setConfirmDelete(false)}><div className="modal-card" role="alertdialog" aria-label="Delete instance" onClick={(event) => event.stopPropagation()}><h3>Delete {selected.name}?</h3><p className="muted">The instance folder and ALL its files — worlds, mods, configs — will be permanently removed. This cannot be undone.</p><div className="button-row modal-actions"><button onClick={() => setConfirmDelete(false)}>Cancel</button><button className="danger-button" onClick={() => { setConfirmDelete(false); void removeSelected(); }} disabled={busy}><Trash2 size={15} /> Delete</button></div></div></div> : null}
     </div>

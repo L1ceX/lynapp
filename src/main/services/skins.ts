@@ -57,7 +57,8 @@ export class SkinService {
 
   async list(): Promise<SkinInfo[]> {
     const data = await this.store.getData();
-    if (getActiveAccount(data)?.status !== "signed-in") {
+    const active = getActiveAccount(data);
+    if (!active || active.kind !== "microsoft" || active.status !== "signed-in") {
       return [];
     }
     const dir = skinsDir();
@@ -75,7 +76,8 @@ export class SkinService {
 
   private async requirePremium(): Promise<void> {
     const data = await this.store.getData();
-    if (getActiveAccount(data)?.status !== "signed-in") {
+    const active = getActiveAccount(data);
+    if (!active || active.kind !== "microsoft" || active.status !== "signed-in") {
       throw new Error("Sign in with Microsoft to change skins");
     }
   }
@@ -155,14 +157,50 @@ export class SkinService {
   private async accountToken(): Promise<string> {
     const data = await this.store.getData();
     const active = getActiveAccount(data);
-    if (active?.status !== "signed-in" || !active.minecraftAccessToken) {
+    if (!active || active.kind !== "microsoft" || active.status !== "signed-in" || !active.minecraftAccessToken) {
       throw new Error("Sign in with Microsoft to manage capes");
     }
     return active.minecraftAccessToken;
   }
 
-  async listCapes(): Promise<CapeInfo[]> {
-    const token = await this.accountToken();
+  async elySkin(): Promise<{ dataUrl: string; slim: boolean } | null> {
+    const data = await this.store.getData();
+    const active = getActiveAccount(data);
+    if (!active || active.kind !== "ely" || active.status !== "signed-in" || !active.profileName) {
+      return null;
+    }
+
+    try {
+      const response = await fetch(`http://skinsystem.ely.by/textures/${encodeURIComponent(active.profileName)}?version=2`, {
+        headers: { "user-agent": "lynapp/1.0.1" }
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const body = (await response.json()) as { SKIN?: { url?: string; metadata?: { model?: string } } };
+      const url = body.SKIN?.url;
+      if (!url) {
+        return null;
+      }
+      const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.0.1" } });
+      if (!texture.ok) {
+        return null;
+      }
+      const png = Buffer.from(await texture.arrayBuffer());
+      const parsed = parsePng(png);
+      if (!parsed || parsed.width !== 64 || parsed.height !== 64) {
+        return null;
+      }
+      return {
+        dataUrl: `data:image/png;base64,${png.toString("base64")}`,
+        slim: body.SKIN?.metadata?.model === "slim"
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async listCapes(): Promise<CapeInfo[]> {    const token = await this.accountToken();
     const response = await fetch("https://api.minecraftservices.com/minecraft/profile", {
       headers: { Authorization: `Bearer ${token}` }
     });

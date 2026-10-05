@@ -20,11 +20,11 @@ export function registerIpcHandlers(): void {
   const store = new JsonStore();
   const java = new JavaService();
   const minecraft = new MinecraftService();
-  const instances = new InstanceService(store, java, minecraft);
+  const auth = new AuthService(store);
+  const instances = new InstanceService(store, java, minecraft, auth);
   const mods = new ModService(store);
   const skins = new SkinService(store);
   const content = new ContentService(store);
-  const auth = new AuthService(store);
   const modpacks = new ModpackService(store, instances, minecraft);
 
   void instances.pruneRunning().catch(() => undefined);
@@ -50,7 +50,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.launchInstance, (_event, id: string) => instances.launch(id));
   ipcMain.handle(IPC.getRunningInstances, () => instances.getRunning());
   ipcMain.handle(IPC.stopInstance, (_event, id: string) => instances.stop(id));
+  ipcMain.handle(IPC.cancelLaunch, (_event, id: string) => instances.cancelLaunch(id));
   ipcMain.handle(IPC.listSkins, () => skins.list());
+  ipcMain.handle(IPC.elySkin, () => skins.elySkin());
   ipcMain.handle(IPC.addSkin, (_event, payload: SkinAddPayload) => skins.add(payload));
   ipcMain.handle(IPC.updateSkin, (_event, payload: SkinUpdatePayload) => skins.update(payload));
   ipcMain.handle(IPC.removeSkin, (_event, id: string) => skins.remove(id));
@@ -102,6 +104,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.getCategoryTags, (_event, projectType: ModrinthProjectType) => mods.getCategoryTags(projectType));
   ipcMain.handle(IPC.installMod, (_event, payload: InstallModPayload) => mods.install(payload));
   ipcMain.handle(IPC.beginMicrosoftLogin, (event) => auth.beginMicrosoftLogin(BrowserWindow.fromWebContents(event.sender)));
+  ipcMain.handle(IPC.refreshSession, () => auth.trySilentRefresh());
+  ipcMain.handle(IPC.elyLogin, (_event, username: string, password: string, totp?: string) => auth.elyLogin(username, password, totp));
   ipcMain.handle(IPC.useOfflineProfile, (_event, username: string) => auth.useOfflineProfile(username));
   ipcMain.handle(IPC.setActiveAccount, (_event, id: string) => auth.setActiveAccount(id));
   ipcMain.handle(IPC.removeAccount, (_event, id: string) => auth.removeAccount(id));

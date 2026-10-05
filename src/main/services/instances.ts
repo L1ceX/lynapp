@@ -4,9 +4,10 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import type { CreateInstancePayload, UpdateInstancePayload } from "@shared/ipc";
-import type { LaunchResult, LauncherInstance } from "@shared/types";
+import type { AccountState, LaunchResult, LauncherInstance } from "@shared/types";
 import { getInstancesRoot } from "../paths";
-import { JsonStore, getActiveAccount } from "../store";
+import { JsonStore, getActiveAccount, type LauncherData } from "../store";
+import type { AuthService } from "./auth";
 import { JavaService } from "./java";
 import { MinecraftService } from "./minecraft";
 
@@ -30,8 +31,16 @@ function buildInstanceFolderName(payload: CreateInstancePayload, uniqueSuffix: s
   return `${name}-${loader}-${version}${loaderVersion}-${uniqueSuffix}`.slice(0, 80);
 }
 
-function redactLaunchArgs(args: string[]): string[] {
-  const secretKeys = new Set(["--accessToken", "--clientId", "--xuid"]);
+function parseJvmFlags(input: string | undefined): string[] {
+  if (!input?.trim()) {
+    return [];
+  }
+  return [...input.matchAll(/(?:[^\s"]+|"[^"]*")+/g)]
+    .map((match) => match[0].replace(/^"|"$/g, "").trim())
+    .filter(Boolean);
+}
+
+function redactLaunchArgs(args: string[]): string[] {  const secretKeys = new Set(["--accessToken", "--clientId", "--xuid"]);
   return args.map((arg, index) => (secretKeys.has(args[index - 1]) ? "<redacted>" : arg));
 }
 
@@ -45,8 +54,11 @@ export class InstanceService {
   constructor(
     private readonly store: JsonStore,
     private readonly java: JavaService,
-    private readonly minecraft: MinecraftService
+    private readonly minecraft: MinecraftService,
+    private readonly auth?: AuthService
   ) {}
+
+  private readonly launchAborts = new Map<string, AbortController>();
 
   async list(): Promise<LauncherInstance[]> {
     const data = await this.store.getData();
@@ -187,12 +199,22 @@ export class InstanceService {
       }
     }
 
-    const activeAccount = getActiveAccount(data);
+    let activeAccount = getActiveAccount(data);
     if (!activeAccount) {
       return {
         ok: false,
         message: "Add an account first (Microsoft login or offline profile)"
       };
+    }
+    if (this.auth && activeAccount.kind !== "offline") {
+      const exp = activeAccount.expiresAt ? Date.parse(activeAccount.expiresAt) : NaN;
+      const needsMicrosoftRefresh = activeAccount.kind === "microsoft" && (Number.isNaN(exp) || exp - Date.now() < 5 * 60 * 1000);
+      if (needsMicrosoftRefresh || activeAccount.kind === "ely") {
+        const fresh = await this.auth.ensureFreshSession().catch(() => null);
+        if (fresh) {
+          activeAccount = fresh;
+        }
+      }
     }
     if (
       activeAccount.kind === "microsoft" &&
@@ -206,15 +228,84 @@ export class InstanceService {
       };
     }
 
+    const controller = new AbortController();
+    this.launchAborts.set(id, controller);
+    const signal = controller.signal;
+
+    try {
+      return await this.runLaunch(id, instance, data, activeAccount, signal);
+    } catch (error) {
+      if (signal.aborted) {
+        return {
+          ok: false,
+          message: `${instance.name}: launch cancelled`
+        };
+      }
+      throw error;
+    } finally {
+      if (this.launchAborts.get(id) === controller) {
+        this.launchAborts.delete(id);
+      }
+    }
+  }
+
+  async cancelLaunch(id: string): Promise<LaunchResult> {
+    const data = await this.store.getData();
+    const instance = data.instances.find((item) => item.id === id);
+
+    if (!instance) {
+      return {
+        ok: false,
+        message: "Instance not found"
+      };
+    }
+
+    const controller = this.launchAborts.get(id);
+    if (controller) {
+      controller.abort();
+    }
+
+    const pid = data.runningProcesses[id];
+    if (pid !== undefined) {
+      let alive = false;
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
+      if (alive) {
+        try {
+          process.kill(pid);
+        } catch {
+        }
+        await this.store.update((current) => {
+          delete current.runningProcesses[id];
+        });
+        return {
+          ok: true,
+          message: `${instance.name} stopped`
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      message: `${instance.name}: launch cancelled`
+    };
+  }
+
+  private async runLaunch(id: string, instance: LauncherInstance, data: LauncherData, activeAccount: AccountState, signal: AbortSignal): Promise<LaunchResult> {
     const requiredMajor = await this.minecraft.getRequiredJavaMajor(instance.gameVersion);
     const javaRuntime = await this.java.ensureRuntime(requiredMajor, [
       instance.javaPath,
       data.settings.javaPaths?.[String(requiredMajor)],
       data.settings.javaPath
-    ]);
+    ], signal);
     const javaPath = javaRuntime.path;
     const rawMemory = instance.maxMemoryMb || data.settings.maxMemoryMb;
     const maxMemoryMb = Math.min(65536, Math.max(512, Math.round(rawMemory) || 4096));
+    const extraJvmArgs = parseJvmFlags(instance.extraJvmArgs ?? data.settings.extraJvmArgs);
 
     const updatedInstance = await this.store.update((current) => {
       const target = current.instances.find((item) => item.id === id);
@@ -231,8 +322,9 @@ export class InstanceService {
     await writeInstanceManifest(updatedInstance);
 
     const launch = await this.minecraft.prepareLaunch(updatedInstance, activeAccount, {
-      memoryMb: maxMemoryMb
-    }, javaPath);
+      memoryMb: maxMemoryMb,
+      extraJvmArgs
+    }, javaPath, signal);
     const launchPlanPath = path.join(instance.directory, ".launcher", "logs", "latest-launch-plan.log");
     await mkdir(path.dirname(launchPlanPath), { recursive: true });
     await writeFile(

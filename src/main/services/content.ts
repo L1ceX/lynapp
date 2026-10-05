@@ -396,7 +396,7 @@ export class ContentService {
 
     try {
       const response = await fetch(`https://api.modrinth.com/v2/project/${ref}`, {
-        headers: { "User-Agent": "lynapp/1.0.1" }
+        headers: { "User-Agent": "lynapp/1.0.2" }
       });
 
       if (!response.ok) {
