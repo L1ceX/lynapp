@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, openSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { closeSync, existsSync, openSync } from "node:fs";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import type { CreateInstancePayload, UpdateInstancePayload } from "@shared/ipc";
@@ -28,7 +28,9 @@ function buildInstanceFolderName(payload: CreateInstancePayload, uniqueSuffix: s
   const loader = toFolderPart(payload.loader || "vanilla").toLowerCase();
   const version = toFolderPart(payload.gameVersion || "1.21.1");
   const loaderVersion = payload.loaderVersion?.trim() ? `-${toFolderPart(payload.loaderVersion)}` : "";
-  return `${name}-${loader}-${version}${loaderVersion}-${uniqueSuffix}`.slice(0, 80);
+  const suffix = `-${uniqueSuffix}`;
+  const base = `${name}-${loader}-${version}${loaderVersion}`;
+  return `${base.slice(0, Math.max(1, 80 - suffix.length))}${suffix}`;
 }
 
 function parseJvmFlags(input: string | undefined): string[] {
@@ -40,7 +42,7 @@ function parseJvmFlags(input: string | undefined): string[] {
     .filter(Boolean);
 }
 
-function redactLaunchArgs(args: string[]): string[] {  const secretKeys = new Set(["--accessToken", "--clientId", "--xuid"]);
+function redactLaunchArgs(args: string[]): string[] {  const secretKeys = new Set(["--accessToken", "--clientId", "--xuid", "--uuid"]);
   return args.map((arg, index) => (secretKeys.has(args[index - 1]) ? "<redacted>" : arg));
 }
 
@@ -73,8 +75,15 @@ export class InstanceService {
     const now = new Date().toISOString();
     const id = randomUUID();
     const name = sanitizeFilePart(payload.name || `${payload.loader} ${gameVersion}`);
-    const folderName = buildInstanceFolderName({ ...payload, gameVersion }, id.slice(0, 6));
-    const directory = path.join(getInstancesRoot(), folderName);
+    let folderName = buildInstanceFolderName({ ...payload, gameVersion }, id.slice(0, 6));
+    let directory = path.join(getInstancesRoot(), folderName);
+    for (let n = 2; n < 100 && existsSync(directory); n += 1) {
+      folderName = buildInstanceFolderName({ ...payload, gameVersion }, `${id.slice(0, 6)}-${n}`);
+      directory = path.join(getInstancesRoot(), folderName);
+    }
+    if (existsSync(directory)) {
+      throw new Error("Could not pick a free folder for the instance");
+    }
 
     const instance: LauncherInstance = {
       id,
@@ -148,17 +157,18 @@ export class InstanceService {
       try {
         process.kill(pid, 0);
         alive = true;
-      } catch {
-        alive = false;
+      } catch (error) {
+        alive = (error as NodeJS.ErrnoException)?.code === "EPERM";
       }
       if (alive) {
         throw new Error(`${target.name} is running. Stop it before deleting.`);
       }
     }
 
-    const root = getInstancesRoot();
     const directory = target.directory;
-    if (directory === root || !directory.startsWith(root + path.sep)) {
+    const root = await realpath(getInstancesRoot()).catch(() => getInstancesRoot());
+    const resolvedDir = await realpath(directory).catch(() => directory);
+    if (resolvedDir === root || !resolvedDir.startsWith(root + path.sep)) {
       throw new Error("Refusing to delete a folder outside the instances directory");
     }
     await rm(directory, { recursive: true, force: true });
@@ -193,10 +203,16 @@ export class InstanceService {
         process.kill(existingPid, 0);
         return {
           ok: false,
-          message: `${instance.name} is already running`
+          message: "already running"
         };
       } catch {
       }
+    }
+
+    try {
+      await mkdir(path.join(instance.directory, ".launcher", "logs"), { recursive: true });
+      await writeFile(path.join(instance.directory, ".launcher", "logs", "latest.log"), `lynapp Minecraft log\nStarted: ${new Date().toISOString()}\nInstance: ${instance.name}\n`, "utf8");
+    } catch {
     }
 
     let activeAccount = getActiveAccount(data);
@@ -238,7 +254,7 @@ export class InstanceService {
       if (signal.aborted) {
         return {
           ok: false,
-          message: `${instance.name}: launch cancelled`
+          message: "launch cancelled"
         };
       }
       throw error;
@@ -271,8 +287,8 @@ export class InstanceService {
       try {
         process.kill(pid, 0);
         alive = true;
-      } catch {
-        alive = false;
+      } catch (error) {
+        alive = (error as NodeJS.ErrnoException)?.code === "EPERM";
       }
       if (alive) {
         try {
@@ -284,14 +300,14 @@ export class InstanceService {
         });
         return {
           ok: true,
-          message: `${instance.name} stopped`
+          message: "stopped"
         };
       }
     }
 
     return {
       ok: true,
-      message: `${instance.name}: launch cancelled`
+      message: "launch cancelled"
     };
   }
 
@@ -402,7 +418,10 @@ export class InstanceService {
       try {
         process.kill(pid, 0);
         alive.push(id);
-      } catch {
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "EPERM") {
+          alive.push(id);
+        }
       }
     }
 
@@ -433,12 +452,19 @@ export class InstanceService {
     if (pid === undefined) {
       return {
         ok: false,
-        message: `${instance.name} is not running`
+        message: "not running"
       };
     }
 
     try {
-      process.kill(pid);
+      const { execFile: execFileCb } = await import("node:child_process");
+      await new Promise<void>((resolve) => {
+        execFileCb("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => resolve());
+      });
+      try {
+        process.kill(pid);
+      } catch {
+      }
     } catch {
     }
 
@@ -448,11 +474,39 @@ export class InstanceService {
 
     return {
       ok: true,
-      message: `${instance.name} stopped`
+      message: "stopped"
     };
   }
 
   async pruneRunning(): Promise<void> {
     await this.getRunning();
+  }
+
+  async getLogs(id: string): Promise<{ log: string; plan: string; hasLog: boolean }> {
+    const data = await this.store.getData();
+    const instance = data.instances.find((item) => item.id === id);
+    if (!instance) {
+      throw new Error("Instance not found");
+    }
+    const tailKb = 200 * 1024;
+    const readTail = async (file: string): Promise<{ text: string; found: boolean }> => {
+      try {
+        const buf = await readFile(file);
+        const slice = buf.length > tailKb ? buf.subarray(buf.length - tailKb) : buf;
+        let text = slice.toString("utf8");
+        if (buf.length > tailKb) {
+          const cut = text.indexOf("\n");
+          text = cut >= 0 ? text.slice(cut + 1) : text;
+        }
+        return { text, found: true };
+      } catch {
+        return { text: "", found: false };
+      }
+    };
+    const logPath = path.join(instance.directory, ".launcher", "logs", "latest.log");
+    const planPath = path.join(instance.directory, ".launcher", "logs", "latest-launch-plan.log");
+    const log = await readTail(logPath);
+    const plan = await readTail(planPath);
+    return { log: log.text, plan: plan.text, hasLog: log.found };
   }
 }

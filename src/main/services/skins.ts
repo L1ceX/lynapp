@@ -171,8 +171,8 @@ export class SkinService {
     }
 
     try {
-      const response = await fetch(`http://skinsystem.ely.by/textures/${encodeURIComponent(active.profileName)}?version=2`, {
-        headers: { "user-agent": "lynapp/1.0.1" }
+      const response = await fetch(`https://skinsystem.ely.by/textures/${encodeURIComponent(active.profileName)}?version=2`, {
+        headers: { "user-agent": "lynapp/1.0.3" }
       });
       if (!response.ok) {
         return null;
@@ -182,13 +182,13 @@ export class SkinService {
       if (!url) {
         return null;
       }
-      const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.0.1" } });
+      const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.0.3" } });
       if (!texture.ok) {
         return null;
       }
       const png = Buffer.from(await texture.arrayBuffer());
       const parsed = parsePng(png);
-      if (!parsed || parsed.width !== 64 || parsed.height !== 64) {
+      if (!parsed || parsed.width !== 64 || (parsed.height !== 64 && parsed.height !== 32)) {
         return null;
       }
       return {

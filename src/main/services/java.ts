@@ -77,7 +77,8 @@ function parseJavaMajor(output: string): number | null {
     return Number.isFinite(legacy) ? legacy : null;
   }
 
-  const major = Number(version.split(".")[0]);
+  const majorMatch = version.match(/^(\d+)/);
+  const major = majorMatch ? Number(majorMatch[1]) : NaN;
   return Number.isFinite(major) ? major : null;
 }
 
@@ -106,7 +107,8 @@ async function readJavaMajor(javawPath: string): Promise<number | null> {
     });
     return parseJavaMajor(`${result.stdout}\n${result.stderr}`);
   } catch (error) {
-    const output = error && typeof error === "object" && "stderr" in error ? String((error as { stderr?: unknown }).stderr) : "";
+    const err = error && typeof error === "object" ? (error as { stdout?: unknown; stderr?: unknown }) : null;
+    const output = `${String(err?.stdout ?? "")}\n${String(err?.stderr ?? "")}`;
     return parseJavaMajor(output);
   }
 }
@@ -270,7 +272,7 @@ async function downloadRuntimeZip(major: number, signal?: AbortSignal): Promise<
   const response = await fetch(getAdoptiumDownloadUrl(major), {
     signal,
     headers: {
-      "user-agent": "lynapp/1.0.2"
+      "user-agent": "lynapp/1.0.3"
     }
   });
 

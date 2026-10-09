@@ -19,6 +19,7 @@ const api: LauncherApi = {
   getRunningInstances: () => ipcRenderer.invoke(IPC.getRunningInstances),
   stopInstance: (id) => ipcRenderer.invoke(IPC.stopInstance, id),
   cancelLaunch: (id) => ipcRenderer.invoke(IPC.cancelLaunch, id),
+  getInstanceLogs: (id) => ipcRenderer.invoke(IPC.getInstanceLogs, id),
   listSkins: () => ipcRenderer.invoke(IPC.listSkins),
   elySkin: () => ipcRenderer.invoke(IPC.elySkin),
   addSkin: (payload) => ipcRenderer.invoke(IPC.addSkin, payload),

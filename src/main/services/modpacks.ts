@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import type { WebContents } from "electron";
 import path from "node:path";
@@ -116,7 +116,7 @@ function verifyBuffer(buffer: Buffer, hashes: MrpackIndexFile["hashes"], entryPa
 }
 
 async function downloadBuffer(url: string): Promise<Buffer> {
-  const response = await fetch(url, { headers: { "User-Agent": "lynapp" } });
+  const response = await fetch(url, { headers: { "User-Agent": "lynapp" }, signal: AbortSignal.timeout(60000) });
   if (!response.ok) throw new Error(`Modpack file download failed with HTTP ${response.status}`);
   return Buffer.from(await response.arrayBuffer());
 }
@@ -140,7 +140,7 @@ export class ModpackService {
     private readonly minecraft: MinecraftService
   ) {}
 
-  private readonly pending = new Map<string, { tmp: string; files: MrpackIndexFile[] }>();
+  private readonly pending = new Map<string, { tmp: string; files: MrpackIndexFile[]; at: number }>();
 
   async beginImport(filePath: string): Promise<{ instance: LauncherInstance; totalFiles: number }> {
     if (!/\.mrpack$/i.test(filePath) || !existsSync(filePath)) {
@@ -193,12 +193,23 @@ export class ModpackService {
         (file) => file?.path && file.downloads?.length && (file.env?.client ?? "required") !== "unsupported"
       );
 
-      this.pending.set(instance.id, { tmp, files: wanted });
+      this.sweepPending();
+      this.pending.set(instance.id, { tmp, files: wanted, at: Date.now() });
       return { instance, totalFiles: wanted.length };
     } catch (error) {
       if (createdId) this.pending.delete(createdId);
       await rm(tmp, { recursive: true, force: true });
       throw error;
+    }
+  }
+
+  private sweepPending(): void {
+    const now = Date.now();
+    for (const [id, job] of this.pending) {
+      if (now - job.at > 30 * 60 * 1000) {
+        this.pending.delete(id);
+        void rm(job.tmp, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 
@@ -244,7 +255,7 @@ export class ModpackService {
 
       const overrides = path.join(job.tmp, "overrides");
       if (existsSync(overrides)) {
-        await cp(overrides, instance.directory, { recursive: true });
+        await this.copyOverrides(overrides, instance.directory);
       }
 
       await this.linkModrinthEntries(instance.id, downloaded);
@@ -254,6 +265,22 @@ export class ModpackService {
       return fresh.instances.find((item) => item.id === instanceId) ?? instance;
     } finally {
       await rm(job.tmp, { recursive: true, force: true });
+    }
+  }
+
+  private async copyOverrides(from: string, instanceDir: string): Promise<void> {
+    const entries = await readdir(from, { withFileTypes: true });
+    for (const entry of entries) {
+      const rel = entry.name;
+      const target = resolveTarget(instanceDir, rel);
+      const src = path.join(from, rel);
+      if (entry.isDirectory()) {
+        await mkdir(target, { recursive: true });
+        await this.copyOverrides(src, path.join(instanceDir, rel));
+      } else {
+        await mkdir(path.dirname(target), { recursive: true });
+        await cp(src, target);
+      }
     }
   }
 

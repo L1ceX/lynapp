@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -140,7 +140,11 @@ async function isValidDownload(filePath: string, expectedSha1?: string): Promise
   }
 
   if (!expectedSha1) {
-    return true;
+    try {
+      return (await stat(filePath)).size > 0;
+    } catch {
+      return false;
+    }
   }
 
   return (await sha1File(filePath)).toLowerCase() === expectedSha1.toLowerCase();
@@ -154,10 +158,12 @@ async function downloadFile(url: string, filePath: string, expectedSha1?: string
 
   await mkdir(path.dirname(filePath), { recursive: true });
 
+  const timeout = AbortSignal.timeout(30000);
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const response = await fetch(url, {
-    signal,
+    signal: combined,
     headers: {
-      "user-agent": "lynapp/1.0.2"
+      "user-agent": "lynapp/1.0.3"
     }
   });
 
@@ -166,7 +172,9 @@ async function downloadFile(url: string, filePath: string, expectedSha1?: string
   }
 
   const buffer = Buffer.from(await response.arrayBuffer());
-  await writeFile(filePath, buffer);
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  await writeFile(tmpPath, buffer);
+  await rename(tmpPath, filePath);
 
   if (!(await isValidDownload(filePath, expectedSha1))) {
     throw new Error(`Downloaded file checksum mismatch: ${filePath}`);
@@ -183,7 +191,7 @@ async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
   const response = await fetch(url, {
     signal,
     headers: {
-      "user-agent": "lynapp/1.0.2"
+      "user-agent": "lynapp/1.0.3"
     }
   });
 
@@ -218,7 +226,7 @@ async function getCachedLoaderVersions(key: string, loader: () => Promise<string
 
 async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.0.2" }
+    headers: { "user-agent": "lynapp/1.0.3" }
   });
   if (!response.ok) {
     throw new Error(`Fabric loader versions returned ${response.status}`);
@@ -229,7 +237,7 @@ async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> 
 
 async function listQuiltLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.0.2" }
+    headers: { "user-agent": "lynapp/1.0.3" }
   });
   if (!response.ok) {
     throw new Error(`Quilt loader versions returned ${response.status}`);
@@ -268,7 +276,7 @@ function isGameVersionAtLeast(version: string, major: number, minor: number, pat
 async function getFabricGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.fabricmc.net/v2/versions/game", {
-      headers: { "user-agent": "lynapp/1.0.2" }
+      headers: { "user-agent": "lynapp/1.0.3" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -281,7 +289,7 @@ async function getFabricGameVersions(): Promise<string[]> {
 async function getQuiltGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.quiltmc.org/v3/versions/game", {
-      headers: { "user-agent": "lynapp/1.0.2" }
+      headers: { "user-agent": "lynapp/1.0.3" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -485,7 +493,8 @@ function getNativesClassifier(template?: string): string | null {
     return null;
   }
 
-  return template.replace("${arch}", process.arch === "ia32" ? "32" : "64");
+  const arch = process.arch === "ia32" ? "32" : process.arch === "arm64" ? "arm64" : "64";
+  return template.replace("${arch}", arch);
 }
 
 async function extractNativeJar(jarPath: string, destination: string): Promise<void> {
@@ -576,7 +585,7 @@ async function getManifest(): Promise<VersionManifest> {
   try {
     const response = await fetch(versionManifestUrl, {
       headers: {
-        "user-agent": "lynapp/1.0.2"
+        "user-agent": "lynapp/1.0.3"
       }
     });
     if (!response.ok) {
@@ -704,7 +713,7 @@ async function getFabricLoaderVersion(requested?: string, signal?: AbortSignal):
 
   const response = await fetch("https://meta.fabricmc.net/v2/versions/loader", {
     signal,
-    headers: { "user-agent": "lynapp/1.0.2" }
+    headers: { "user-agent": "lynapp/1.0.3" }
   });
   if (!response.ok) {
     throw new Error(`Fabric loader versions returned ${response.status}`);
@@ -735,7 +744,7 @@ async function getQuiltLoaderVersion(gameVersion: string, requested?: string, si
 
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
     signal,
-    headers: { "user-agent": "lynapp/1.0.2" }
+    headers: { "user-agent": "lynapp/1.0.3" }
   });
   if (!response.ok) {
     throw new Error(`Quilt loader versions returned ${response.status}`);
@@ -1042,7 +1051,7 @@ function buildLaunchArgs(
     version_type: version.type,
     natives_directory: paths.nativesDir,
     launcher_name: "lynapp",
-    launcher_version: "1.0.2",
+        launcher_version: "1.0.3",
     classpath: paths.classpath,
     classpath_separator: ";",
     library_directory: getLibrariesRoot(),
@@ -1073,7 +1082,7 @@ async function ensureAuthlibInjector(signal?: AbortSignal): Promise<string> {
   }
   const response = await fetch("https://api.github.com/repos/yushijinhun/authlib-injector/releases/latest", {
     signal,
-    headers: { "user-agent": "lynapp/1.0.2", accept: "application/vnd.github+json" }
+    headers: { "user-agent": "lynapp/1.0.3", accept: "application/vnd.github+json" }
   });
   if (!response.ok) {
     throw new Error(`authlib-injector release lookup failed (HTTP ${response.status})`);
@@ -1163,7 +1172,7 @@ export class MinecraftService {
     const libraryClasspath = await prepareLibraries(version, nativesDir, signal);
     await prepareAssets(version, signal);
 
-    const classpath = [...libraryClasspath, clientJar].join(";");
+    const classpath = [...new Set([...libraryClasspath, clientJar])].join(";");
     const args = buildLaunchArgs(version, instance, account, javaMemory, {
       classpath,
       nativesDir

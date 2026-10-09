@@ -51,6 +51,7 @@ export const IPC = {
   getRunningInstances: "instances:running",
   stopInstance: "instances:stop",
   cancelLaunch: "instances:cancel-launch",
+  getInstanceLogs: "instances:logs",
   windowMinimize: "window:minimize",
   windowToggleMaximize: "window:toggle-maximize",
   windowClose: "window:close",
@@ -137,6 +138,12 @@ export interface MrpackProgressUpdate {
   fileName: string;
 }
 
+export interface InstanceLogsResult {
+  log: string;
+  plan: string;
+  hasLog: boolean;
+}
+
 export interface SkinRemoveResult {
   skins: SkinInfo[];
   activeSkinId: string | null;
@@ -182,6 +189,7 @@ export interface LauncherApi {
   getRunningInstances(): Promise<string[]>;
   stopInstance(id: string): Promise<LaunchResult>;
   cancelLaunch(id: string): Promise<LaunchResult>;
+  getInstanceLogs(id: string): Promise<InstanceLogsResult>;
   listSkins(): Promise<SkinInfo[]>;
   elySkin(): Promise<ElySkinResult | null>;
   addSkin(payload: SkinAddPayload): Promise<SkinInfo[]>;

@@ -396,7 +396,7 @@ export class ContentService {
 
     try {
       const response = await fetch(`https://api.modrinth.com/v2/project/${ref}`, {
-        headers: { "User-Agent": "lynapp/1.0.2" }
+        headers: { "User-Agent": "lynapp/1.0.3" }
       });
 
       if (!response.ok) {
@@ -424,9 +424,15 @@ export class ContentService {
   }
 
   private async findEntry(instanceDir: string, fileName: string): Promise<{ kind: LocalContentKind; dir: string; name: string } | null> {
+    if (!fileName || fileName.includes("..") || fileName.includes("/") || fileName.includes("\\") || fileName.includes(":") || path.isAbsolute(fileName)) {
+      throw new Error(`Unsafe file name: ${fileName}`);
+    }
     for (const kind of kindOrder) {
       const dir = path.join(instanceDir, kindDirs[kind]);
       const direct = path.join(dir, fileName);
+      if (path.resolve(direct) !== direct || !direct.startsWith(dir + path.sep)) {
+        throw new Error(`Unsafe file name: ${fileName}`);
+      }
 
       try {
         await stat(direct);

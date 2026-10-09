@@ -51,6 +51,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.getRunningInstances, () => instances.getRunning());
   ipcMain.handle(IPC.stopInstance, (_event, id: string) => instances.stop(id));
   ipcMain.handle(IPC.cancelLaunch, (_event, id: string) => instances.cancelLaunch(id));
+  ipcMain.handle(IPC.getInstanceLogs, (_event, id: string) => instances.getLogs(id));
   ipcMain.handle(IPC.listSkins, () => skins.list());
   ipcMain.handle(IPC.elySkin, () => skins.elySkin());
   ipcMain.handle(IPC.addSkin, (_event, payload: SkinAddPayload) => skins.add(payload));

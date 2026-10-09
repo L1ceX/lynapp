@@ -64,7 +64,11 @@ function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "EPERM") {
+      return true;
+    }
     return false;
   }
 }
@@ -140,6 +144,8 @@ export function getActiveAccount(data: Pick<LauncherData, "accounts" | "activeAc
 
 export class JsonStore {
   private data: LauncherData | null = null;
+  private saveQueue: Promise<void> = Promise.resolve();
+  private tmpCounter = 0;
 
   constructor(private readonly filePath = getStorePath()) {}
 
@@ -171,14 +177,21 @@ export class JsonStore {
     const data = await this.load();
     const result = await mutator(data);
     data.updatedAt = new Date().toISOString();
-    await this.save(data);
+    const snapshot = JSON.stringify(data, null, 2);
+    const run = this.saveQueue.then(() => this.saveSnapshot(snapshot));
+    this.saveQueue = run.catch(() => undefined);
+    await run;
     return result;
   }
 
-  private async save(data: LauncherData): Promise<void> {
+  private async saveSnapshot(snapshot: string): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
-    const tmpPath = `${this.filePath}.tmp`;
-    await writeFile(tmpPath, JSON.stringify(data, null, 2), "utf8");
+    const tmpPath = `${this.filePath}.${process.pid}.${(this.tmpCounter += 1)}.tmp`;
+    await writeFile(tmpPath, snapshot, "utf8");
     await rename(tmpPath, this.filePath);
+  }
+
+  private async save(data: LauncherData): Promise<void> {
+    await this.saveSnapshot(JSON.stringify(data, null, 2));
   }
 }

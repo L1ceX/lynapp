@@ -66,6 +66,14 @@ function toFormBody(values: Record<string, string>): URLSearchParams {
   return body;
 }
 
+function offlineUuid(name: string): string {
+  const hash = createHash("md5").update(`OfflinePlayer:${name}`).digest();
+  hash[6] = (hash[6] & 0x0f) | 0x30;
+  hash[8] = (hash[8] & 0x3f) | 0x80;
+  const hex = hash.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -274,7 +282,7 @@ async function refreshMicrosoftToken(clientId: string, refreshToken: string): Pr
 }
 
 async function authenticateXbox(microsoftAccessToken: string): Promise<XboxAuthResponse> {
-  let lastError: unknown = null;
+  let firstError: unknown = null;
 
   for (const rpsTicket of [`d=${microsoftAccessToken}`, microsoftAccessToken]) {
     try {
@@ -294,17 +302,23 @@ async function authenticateXbox(microsoftAccessToken: string): Promise<XboxAuthR
 
       return result;
     } catch (error) {
-      lastError = error;
+      if (!firstError) {
+        firstError = error;
+      }
     }
   }
 
-  throw new Error(`Xbox Live authentication failed: ${errorMessage(lastError)}`);
+  throw new Error(`Xbox Live authentication failed: ${errorMessage(firstError)}`);
 }
 
 function describeXstsError(payload: XstsErrorResponse, status: number): string {
   switch (payload.XErr) {
+    case 2148916229:
+      return "This Microsoft account is banned from Xbox Live.";
     case 2148916233:
       return "This Microsoft account has no Xbox profile. Open xbox.com once and create a profile.";
+    case 2148916234:
+      return "This Microsoft account is blocked from Xbox Live.";
     case 2148916235:
       return "Xbox Live is not available in this account region.";
     case 2148916236:
@@ -385,6 +399,8 @@ async function fetchMinecraftProfile(accessToken: string): Promise<MinecraftProf
 export class AuthService {
   constructor(private readonly store: JsonStore) {}
 
+  private refreshFlight: Promise<AccountState | null> | null = null;
+
   private getClientId(data: { settings: { microsoftClientId?: string } }): string {
     return (bundledMicrosoftClientId || process.env.LIAN_MICROSOFT_CLIENT_ID || data.settings.microsoftClientId || "").trim();
   }
@@ -406,6 +422,10 @@ export class AuthService {
 
   private async storeMicrosoftSession(profile: MinecraftProfileResponse, minecraft: MinecraftLoginResponse, expiresAt: string, refreshToken: string): Promise<void> {
     await this.store.update((current) => {
+      const prevActive = current.accounts.find((item) => item.id === current.activeAccountId) ?? null;
+      if (prevActive && prevActive.kind === "microsoft") {
+        prevActive.activeSkinId = current.settings.activeSkinId ?? prevActive.activeSkinId ?? null;
+      }
       const existing = current.accounts.find((item) => item.kind === "microsoft" && item.minecraftUuid === profile.id);
       if (existing) {
         existing.status = "signed-in";
@@ -415,7 +435,7 @@ export class AuthService {
         existing.microsoftRefreshToken = refreshToken;
         existing.message = `Signed in as ${profile.name}`;
         current.activeAccountId = existing.id;
-        current.settings.activeSkinId = existing.activeSkinId ?? current.settings.activeSkinId ?? null;
+        current.settings.activeSkinId = existing.activeSkinId ?? null;
       } else {
         const entry: AccountState = {
           id: profile.id,
@@ -469,6 +489,15 @@ export class AuthService {
   }
 
   async ensureFreshSession(): Promise<AccountState | null> {
+    if (!this.refreshFlight) {
+      this.refreshFlight = this.doEnsureFreshSession().finally(() => {
+        this.refreshFlight = null;
+      });
+    }
+    return this.refreshFlight;
+  }
+
+  private async doEnsureFreshSession(): Promise<AccountState | null> {
     const data = await this.store.getData();
     const active = getActiveAccount(data);
     if (!active || active.status !== "signed-in") {
@@ -533,10 +562,14 @@ export class AuthService {
       throw new Error("Enter your Ely.by password.");
     }
     const code = String(totp ?? "").trim();
-    const clientToken = randomUUID();
+    const clientToken = randomUUID().replace(/-/g, "");
     const profile = await this.authenticateEly(name, code ? `${password}:${code}` : password, clientToken);
 
     return this.store.update((data) => {
+      const prevActive = data.accounts.find((item) => item.id === data.activeAccountId) ?? null;
+      if (prevActive && prevActive.kind === "microsoft") {
+        prevActive.activeSkinId = data.settings.activeSkinId ?? prevActive.activeSkinId ?? null;
+      }
       const id = profile.id.replace(/-/g, "");
       const existing = data.accounts.find((item) => item.kind === "ely" && item.minecraftUuid === id);
       if (existing) {
@@ -637,6 +670,10 @@ export class AuthService {
     }
 
     return this.store.update((data) => {
+      const prevActive = data.accounts.find((item) => item.id === data.activeAccountId) ?? null;
+      if (prevActive && prevActive.kind === "microsoft") {
+        prevActive.activeSkinId = data.settings.activeSkinId ?? prevActive.activeSkinId ?? null;
+      }
       const existing = data.accounts.find((item) => item.kind === "offline" && item.profileName?.toLowerCase() === name.toLowerCase());
       if (existing) {
         existing.status = "offline";
@@ -644,7 +681,7 @@ export class AuthService {
         data.activeAccountId = existing.id;
       } else {
         const entry: AccountState = {
-          id: randomUUID(),
+          id: offlineUuid(name),
           kind: "offline",
           status: "offline",
           profileName: name,
@@ -652,6 +689,9 @@ export class AuthService {
           activeSkinId: null,
           addedAt: new Date().toISOString()
         };
+        if (data.accounts.some((item) => item.id === entry.id)) {
+          entry.id = randomUUID();
+        }
         data.accounts.push(entry);
         data.activeAccountId = entry.id;
       }
@@ -662,6 +702,10 @@ export class AuthService {
 
   async setActiveAccount(id: string): Promise<AccountsState> {
     return this.store.update((data) => {
+      const prevActive = data.accounts.find((item) => item.id === data.activeAccountId) ?? null;
+      if (prevActive && prevActive.kind === "microsoft") {
+        prevActive.activeSkinId = data.settings.activeSkinId ?? prevActive.activeSkinId ?? null;
+      }
       const target = data.accounts.find((item) => item.id === id);
       if (!target) {
         throw new Error("Account not found");
@@ -674,6 +718,10 @@ export class AuthService {
 
   async removeAccount(id: string): Promise<AccountsState> {
     return this.store.update((data) => {
+      const prevActive = data.accounts.find((item) => item.id === data.activeAccountId) ?? null;
+      if (prevActive && prevActive.id !== id && prevActive.kind === "microsoft") {
+        prevActive.activeSkinId = data.settings.activeSkinId ?? prevActive.activeSkinId ?? null;
+      }
       data.accounts = data.accounts.filter((item) => item.id !== id);
       if (data.activeAccountId === id) {
         data.activeAccountId = data.accounts[0]?.id ?? null;

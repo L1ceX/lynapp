@@ -35,6 +35,7 @@ import {
   Search,
   Settings,
   Shirt,
+  ScrollText,
   SlidersHorizontal,
   Sparkles,
   Square,
@@ -65,7 +66,7 @@ import type {
 } from "@shared/types";
 
 type AppSection = "home" | "instances" | "launcher" | "visuals" | "skins" | "accounts";
-type InstanceTab = "general" | "versions" | "content" | "files" | "runtime";
+type InstanceTab = "general" | "versions" | "content" | "files" | "runtime" | "logs";
 
 const loaders: ModLoader[] = ["vanilla", "fabric", "forge", "quilt", "neoforge"];
 const defaultCreateForm = { name: "New Instance", gameVersion: "1.21.1", loader: "fabric" as ModLoader, loaderVersion: "" };
@@ -156,19 +157,79 @@ function contentLabel(type?: ModrinthProjectType): string {
   return contentTypes.find((item) => item.id === (type ?? "mod"))?.label ?? "Content";
 }
 
-function MemorySlider({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+function MemorySlider({ value, onChange, onCommit }: { value: number; onChange: (value: number) => void; onCommit?: (value: number) => void }) {
   const safe = Math.min(32768, Math.max(512, Math.round(value / 256) * 256 || 2048));
-  const gb = (safe / 1024).toFixed(safe % 1024 === 0 ? 0 : 1);
+  const [local, setLocal] = useState(safe);
+  useEffect(() => {
+    setLocal(safe);
+  }, [safe]);
+  const gb = (local / 1024).toFixed(local % 1024 === 0 ? 0 : 1);
+  const commit = (next: number): void => {
+    onChange(next);
+    onCommit?.(next);
+  };
   return (
     <div className="memory-slider">
-      <input type="range" min={512} max={32768} step={256} value={safe} onChange={(event) => onChange(Number(event.target.value))} aria-label="Allocated RAM" />
-      <span className="muted">{safe} MB · {gb} GB</span>
+      <input type="range" min={512} max={32768} step={256} value={local} onChange={(event) => setLocal(Number(event.target.value))} onPointerUp={() => commit(local)} onKeyUp={() => commit(local)} onBlur={() => { if (local !== safe) commit(local); }} aria-label="Allocated RAM" />
+      <span className="muted">{local} MB · {gb} GB</span>
     </div>
   );
 }
 
 function isInstallable(result: ModSearchResult): boolean {
   return !result.id.includes("error") && !result.categories.includes("error");
+}
+
+function detectCrash(log: string): { title: string; hint: string } | null {
+  const text = log.slice(-30000);
+  const lower = text.toLowerCase();
+  if (!lower.trim()) return null;
+  if (lower.includes("outofmemoryerror") || lower.includes("java heap space")) {
+    return { title: "Out of memory", hint: "Close other apps or raise RAM in the RAM tab." };
+  }
+  if (lower.includes("unsupportedclassversionerror")) {
+    return { title: "Wrong Java version", hint: "Install the Java version the instance asks for in Launcher settings." };
+  }
+  if (lower.includes("unsatisfiedlinkerror")) {
+    return { title: "Broken natives", hint: "Delete the game version and launch again to redownload libraries." };
+  }
+  if (lower.includes("modules minecraft and") && lower.includes("export package")) {
+    return { title: "Forge client conflict", hint: "Reinstall the instance version or loader." };
+  }
+  if (lower.includes("invalid_grant") || lower.includes("xsts") || (lower.includes("minecraft profile") && lower.includes("401"))) {
+    return { title: "Login expired", hint: "Sign in again in the Accounts tab." };
+  }
+  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0).slice(-40);
+  if (lower.includes("mod resolution failed") || lower.includes("incompatible mods found") || lower.includes("formattedexception")) {
+    const installs = [...text.matchAll(/Install ([A-Za-z0-9_'.+ -]+?), (?:version ([\d.]+) or later|any version)/gi)].map((m) => ({ name: m[1].trim(), version: m[2] ?? "" }));
+    const api = installs.find((i) => i.name.toLowerCase().includes("fabric-api")) ?? installs[0];
+    if (api) {
+      return { title: `Missing ${api.name}`, hint: api.version ? `Install ${api.name}, version ${api.version} or later, from the Content tab.` : `Install ${api.name} from the Content tab.` };
+    }
+    const javaNeed = text.match(/requires version (\d+) or later of[^]*?java/i);
+    const javaHave = text.match(/but only the wrong version is present:\s*(\d+)/i);
+    if (javaNeed) {
+      return { title: `Needs Java ${javaNeed[1]}`, hint: javaHave ? `Running Java ${javaHave[1]}. Install Java ${javaNeed[1]} in Launcher settings.` : `Install Java ${javaNeed[1]} in Launcher settings.` };
+    }
+    return { title: "Mod mismatch", hint: "Remove recently added mods or match loader and game version." };
+  }
+  const benign = (l: string): boolean => l.includes("reference map") || l.includes("error loading class") || l.includes("force-disabling mixin") || l.includes("workaround") || l.includes("pdh counter") || l.includes("invalid query") || l.includes("disabling further attempts");
+  for (const line of lines) {
+    const l = line.toLowerCase();
+    if (benign(l)) continue;
+    if (l.includes("mod resolution") || l.includes("missing mods") || l.includes("incompatible mods") || l.includes("requires mod") || l.includes("mixin apply failed") || l.includes("failed to launch")) {
+      return { title: "Mod mismatch", hint: "Remove recently added mods or match loader and game version." };
+    }
+  }
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i];
+    const l = line.toLowerCase();
+    if (benign(l)) continue;
+    if (l.includes("exception in thread") || l.includes("caused by:") || l.includes("a fatal error") || l.includes("crash report") || l.includes("process crashed") || (l.includes("exit code") && !l.includes("exit code 0"))) {
+      return { title: "Crashed", hint: line.trim().slice(0, 180) };
+    }
+  }
+  return null;
 }
 
 interface DropdownProps {
@@ -350,6 +411,9 @@ function CapeThumb({ url }: { url: string }) {
 function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | null; slim: boolean; capeUrl: string | null }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewerRef = useRef<SkinViewer | null>(null);
+  const loadSeq = useRef(0);
+  const latestReq = useRef<{ dataUrl: string | null; slim: boolean; capeUrl: string | null }>({ dataUrl, slim, capeUrl });
+  latestReq.current = { dataUrl, slim, capeUrl };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -519,19 +583,45 @@ function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | null; slim
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer) return;
-    try {
-      if (dataUrl) {
-        void Promise.resolve(viewer.loadSkin(dataUrl, { model: slim ? "slim" : "default" })).catch(() => undefined);
-      } else {
-        viewer.loadSkin(null);
+    const seq = (loadSeq.current += 1);
+    const apply = async (): Promise<void> => {
+      try {
+        if (dataUrl) {
+          await viewer.loadSkin(dataUrl, { model: slim ? "slim" : "default" });
+        } else {
+          viewer.loadSkin(null);
+        }
+        if (seq !== loadSeq.current) {
+          return;
+        }
+        if (capeUrl) {
+          await viewer.loadCape(capeUrl);
+        } else {
+          viewer.resetCape();
+        }
+      } catch {
       }
-      if (capeUrl) {
-        void Promise.resolve(viewer.loadCape(capeUrl)).catch(() => undefined);
-      } else {
-        viewer.resetCape();
+      if (seq !== loadSeq.current) {
+        const latest = latestReq.current;
+        const v = viewerRef.current;
+        if (v) {
+          try {
+            if (latest.dataUrl) {
+              await v.loadSkin(latest.dataUrl, { model: latest.slim ? "slim" : "default" });
+            } else {
+              v.loadSkin(null);
+            }
+            if (latest.capeUrl) {
+              await v.loadCape(latest.capeUrl);
+            } else {
+              v.resetCape();
+            }
+          } catch {
+          }
+        }
       }
-    } catch {
-    }
+    };
+    void apply();
   }, [dataUrl, slim, capeUrl]);
 
   return <canvas ref={canvasRef} className="skin-stage-canvas" />;
@@ -764,6 +854,9 @@ export function App() {
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [localContent, setLocalContent] = useState<LocalContentItem[] | null>(null);
   const [runningIds, setRunningIds] = useState<string[]>([]);
+  const [instanceLogs, setInstanceLogs] = useState<{ log: string; plan: string; hasLog: boolean } | null>(null);
+  const [logsFollow, setLogsFollow] = useState(true);
+  const logPreRef = useRef<HTMLPreElement | null>(null);
   const contentAutoKey = useRef("");
   const [skins, setSkins] = useState<SkinInfo[] | null>(null);
   const [skinBusy, setSkinBusy] = useState(false);
@@ -1281,6 +1374,15 @@ export function App() {
   const isSelectedRunning = selected !== null && runningIds.includes(selected.id);
   const isLaunching = launchingIds.length > 0 && selected !== null && launchingIds.includes(selected.id);
   const headerStatus = selected !== null && instanceStatus?.id === selected.id ? instanceStatus.message : "";
+  const isVanillaSelected = selected?.loader === "vanilla";
+  const visibleContentTypes = isVanillaSelected ? contentTypes.filter((item) => item.id === "resourcepack" || item.id === "datapack") : contentTypes;
+  useEffect(() => {
+    if (isVanillaSelected && contentType !== "resourcepack" && contentType !== "datapack") {
+      setContentType("resourcepack");
+      setModResults([]);
+      setTotalHits(0);
+    }
+  }, [isVanillaSelected]);
 
   function say(message: string): void {
     if (selected) {
@@ -1448,6 +1550,7 @@ export function App() {
   async function launchSelected(): Promise<void> {
     if (!selected || launchingIds.includes(selected.id)) return;
     setLaunchingIds((current) => [...current, selected.id]);
+    setInstanceLogs(null);
     say(`Preparing ${selected.gameVersion}...`);
     try {
       const result = await getLauncherApi().launchInstance(selected.id);
@@ -1518,6 +1621,63 @@ export function App() {
     setLocalContent(null);
     void refreshLocalContent();
   }, [instanceTab, selectedId]);
+
+  async function refreshInstanceLogs(silent: boolean): Promise<void> {
+    if (!selectedId) return;
+    const live = runningIds.includes(selectedId) || launchingIds.includes(selectedId);
+    if (!live) {
+      setInstanceLogs(null);
+      return;
+    }
+    try {
+      const logs = await getLauncherApi().getInstanceLogs(selectedId);
+      setInstanceLogs((prev) => (prev && prev.log === logs.log && prev.plan === logs.plan && prev.hasLog === logs.hasLog ? prev : logs));
+    } catch (error) {
+      if (!silent) say(error instanceof Error ? error.message : "Failed to read logs");
+    }
+  }
+
+  useEffect(() => {
+    setInstanceLogs(null);
+  }, [instanceTab, selectedId]);
+
+  const logsLive = selectedId !== null && instanceTab === "logs" && (runningIds.includes(selectedId) || launchingIds.includes(selectedId));
+  const crashAssist = useMemo(() => (instanceLogs && instanceLogs.hasLog ? detectCrash(instanceLogs.log) : null), [instanceLogs]);
+
+  async function copyCrashAssist(): Promise<void> {
+    if (!instanceLogs || !crashAssist) return;
+    try {
+      await navigator.clipboard.writeText(`${crashAssist.title}\n${crashAssist.hint}\n\n${instanceLogs.log.slice(-8000)}`);
+      say("Crash info copied");
+    } catch {
+      say("Failed to copy crash info");
+    }
+  }
+
+  useEffect(() => {
+    if (!logsLive || !selectedId) return;
+    let stale = false;
+    const apply = (logs: { log: string; plan: string; hasLog: boolean }): void => {
+      if (stale) return;
+      setInstanceLogs((prev) => (prev && prev.log === logs.log && prev.plan === logs.plan && prev.hasLog === logs.hasLog ? prev : logs));
+    };
+    void getLauncherApi().getInstanceLogs(selectedId).then(apply).catch(() => {
+      if (!stale) setInstanceLogs({ log: "", plan: "", hasLog: false });
+    });
+    const timer = window.setInterval(() => {
+      void getLauncherApi().getInstanceLogs(selectedId).then(apply).catch(() => undefined);
+    }, 1500);
+    return () => {
+      stale = true;
+      window.clearInterval(timer);
+    };
+  }, [logsLive, selectedId]);
+
+  useEffect(() => {
+    if (instanceTab !== "logs" || !logsFollow) return;
+    const el = logPreRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [instanceTab, instanceLogs, logsFollow]);
 
   useEffect(() => {
     if (instanceTab !== "versions" || !selected || selected.loader === "vanilla") {
@@ -1701,7 +1861,8 @@ export function App() {
     { id: "versions" as const, label: "Versions", icon: Waypoints },
     { id: "content" as const, label: "Content", icon: PackageSearch },
     { id: "files" as const, label: "Files", icon: Folder },
-    { id: "runtime" as const, label: "RAM", icon: Cpu }
+    { id: "runtime" as const, label: "RAM", icon: Cpu },
+    { id: "logs" as const, label: "Logs", icon: ScrollText }
   ];
 
   return (
@@ -1763,7 +1924,8 @@ export function App() {
                 {instanceTab === "versions" && <div className="settings-content anim-stagger"><div className="surface-heading"><Waypoints size={19} /><div><h3>Versions</h3><span>Minecraft version and loader for this instance.</span></div></div><div className="two-col"><label>Minecraft version{gameVersions ? <Dropdown value={selected.gameVersion} options={withFallback(versionsForLoader(selected.loader), selected.gameVersion)} ariaLabel="Minecraft version" onChange={(version) => { const compatible = loadersForVersion(version); void updateSelected(compatible.includes(selected.loader) ? { gameVersion: version } : { gameVersion: version, loader: "vanilla" }); }} /> : <input value={selected.gameVersion} onChange={(event) => void updateSelected({ gameVersion: event.target.value })} placeholder="1.21.1" />}</label><label>Loader<Dropdown value={selected.loader} options={withFallback(selectedLoaders ?? loadersForVersion(selected.gameVersion), selected.loader)} ariaLabel="Loader" onChange={(loader) => { const next = loader as ModLoader; const versions = versionsForLoader(next); void updateSelected(versions.includes(selected.gameVersion) ? { loader: next } : { loader: next, gameVersion: versions[0] ?? selected.gameVersion }); }} /></label></div><label>Loader version{selected.loader === "vanilla" ? <span className="muted">Not needed for vanilla</span> : loaderVersions ? <Dropdown value={selected.loaderVersion?.trim() || "Latest"} options={(selected.loaderVersion?.trim() ? ["Latest", selected.loaderVersion.trim(), ...loaderVersions.filter((item) => item !== selected.loaderVersion?.trim())] : ["Latest", ...loaderVersions])} ariaLabel="Loader version" onChange={(label) => void updateSelected({ loaderVersion: label === "Latest" ? "" : label })} /> : <input value="" disabled placeholder="Loading versions..." />}</label></div>}
                 {instanceTab === "files" && <div className="settings-content" key={`files-${selected.id}`}><div className="surface-heading"><Folder size={19} /><div><h3>Local files</h3><span>Everything inside this instance folders, including files added by hand.</span></div></div><div className="button-row"><button onClick={() => void refreshLocalContent()} disabled={busy}><RefreshCw size={15} /> Refresh</button><button onClick={() => void openSelectedFolder()}><FolderOpen size={15} /> Open folder</button></div>{localContent === null ? <span className="muted">Reading instance folders...</span> : fileGroups.map((group) => { const rows = localContent.filter((item) => item.kind === group.id); return <div key={group.id} className="file-group"><div className="section-title">{group.label} · {rows.filter((row) => row.enabled).length}/{rows.length}</div>{rows.length ? rows.map((item) => <div key={item.kind + item.fileName} className={item.enabled ? "file-row" : "file-row disabled"}>{item.iconUrl ? <img className="file-icon" src={item.iconUrl} alt="" /> : <div className="file-icon mod-icon">{item.displayName[0] ?? "?"}</div>}<div className="file-main"><strong>{item.displayName}</strong><small className="muted">{item.fileName} · {formatBytes(item.size)}{item.modified ? ` · ${formatDateTime(item.modified)}` : ""}</small></div><div className="file-side">{item.source === "modrinth" ? <span className="tag-chip">Modrinth</span> : item.source === "manual" ? <span className="tag-chip manual">Manual</span> : <span className="tag-chip missing">Missing file</span>}{item.enabled ? null : <span className="tag-chip">Off</span>}{item.source !== "missing" ? <button type="button" title={item.enabled ? "Disable" : "Enable"} onClick={() => void toggleLocalItem(item)} disabled={busy}>{item.enabled ? <EyeOff size={15} /> : <Eye size={15} />}</button> : null}<button type="button" title="Delete" onClick={() => void removeLocalItem(item)} disabled={busy}><Trash2 size={15} /></button></div></div>) : <span className="muted">Empty — drop files into the folder or install from Content.</span>}</div>; })}</div>}
                 {instanceTab === "runtime" && <div className="settings-content"><div className="surface-heading"><Cpu size={19} /><div><h3>RAM</h3><span>Allocated memory for this instance only.</span></div></div><label>Allocated RAM<MemorySlider value={selected.maxMemoryMb ?? bootstrap.settings.maxMemoryMb} onChange={(next) => void updateSelected({ maxMemoryMb: next })} /></label><label>Extra JVM flags<textarea value={selected.extraJvmArgs ?? ""} rows={2} spellCheck={false} placeholder={bootstrap.settings.extraJvmArgs || "-XX:+UseG1GC -XX:MaxGCPauseMillis=50"} onChange={(event) => void updateSelected({ extraJvmArgs: event.target.value })} /></label></div>}
-                {instanceTab === "content" && <div className={contentExiting ? "settings-content content-content content-exiting" : "settings-content content-content"} key={`${contentType}-${selected.id}`}><div className="surface-heading"><PackageSearch size={19} /><div><h3>Discover {contentLabel(contentType).toLowerCase()}</h3><span>Browse Modrinth for {selected.gameVersion} / {selected.loader}.</span></div></div><nav className="content-types" aria-label="Content type">{contentTypes.map(({ id, label, icon: Icon }) => <button key={id} className={contentType === id ? "content-type active" : "content-type"} onClick={() => switchContentType(id)}><Icon size={15} /><span>{label}</span></button>)}</nav><div className="content-browser"><div className="content-main"><div className="search-row"><input value={modQuery} onChange={(event) => setModQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void runContentSearch({ page: 1 }); }} placeholder="Search or leave empty to browse" /><button onClick={() => void runContentSearch({ page: 1 })} disabled={busy}><Search size={16} /> Search</button></div><div className="browse-controls"><label className="sort-label">Sort by:<Dropdown value={sortLabel} options={sortOptions.map((option) => option.label)} ariaLabel="Sort by" onChange={(label) => { const found = sortOptions.find((option) => option.label === label); if (found) void runContentSearch({ page: 1, sort: found.id }); }} /></label><label className="sort-label">View:<Dropdown value={String(contentLimit)} options={["10", "20", "50"]} ariaLabel="Results per page" onChange={(label) => void runContentSearch({ page: 1, limit: Number(label) })} /></label>{totalHits > 0 ? <span className="muted">{totalHits} result{totalHits === 1 ? "" : "s"}</span> : null}</div><div className={busy ? "mod-results refreshing" : "mod-results"}>{visibleResults.map((result) => <article key={`${result.projectType}-${result.id}`} className="mod-card">{result.iconUrl ? <img className="mod-card-icon" src={result.iconUrl} alt="" /> : <div className="mod-card-icon mod-icon">{result.title[0]}</div>}<div className="mod-card-main"><div className="mod-card-title"><strong>{result.title}</strong>{result.author ? <span>by {result.author}</span> : null}</div><p>{result.summary}</p>{result.categories.length ? <div className="mod-card-tags">{result.categories.slice(0, 5).map((category) => <span key={category} className="tag-chip">{category}</span>)}</div> : null}</div><div className="mod-card-side">{installedProjectIds.has(result.id) ? <span className="installed-badge"><Check size={14} /> Installed</span> : <button className="install-button" onClick={() => void installContent(result)} disabled={busy || !isInstallable(result)} title={`${result.projectType === "modpack" ? "Download" : "Install"} ${result.title}`}><Plus size={14} /> Install</button>}<div className="mod-card-stats"><span><Download size={13} /> {formatDownloads(result.downloads)}</span>{typeof result.follows === "number" ? <span><Heart size={13} /> {formatDownloads(result.follows)}</span> : null}</div>{result.dateModified ? <small className="muted"><Clock size={12} /> {formatRelative(result.dateModified)}</small> : null}</div></article>)}</div>{totalPages > 1 ? <nav className="pages" aria-label="Result pages"><button className="page-button" disabled={contentPage <= 1 || busy} aria-label="Previous page" onClick={() => void runContentSearch({ page: contentPage - 1 })}><ChevronLeft size={15} /></button>{pageList(contentPage, totalPages).map((page, index) => page === "gap" ? <span key={`gap-${index}`} className="page-gap">…</span> : <button key={page} className={page === contentPage ? "page-button active" : "page-button"} disabled={busy} onClick={() => void runContentSearch({ page })}>{page}</button>)}<button className="page-button" disabled={contentPage >= totalPages || busy} aria-label="Next page" onClick={() => void runContentSearch({ page: contentPage + 1 })}><ChevronRight size={15} /></button></nav> : null}</div><aside className="content-filters"><div className="filter-row"><div><strong>Hide content already installed</strong></div><button type="button" role="switch" aria-checked={hideInstalled} className="switch" onClick={() => setHideInstalled((value) => !value)}><span className="knob" /></button></div><div className="filter-group"><div className="section-title">Game version</div>{versionUnlocked ? <Dropdown value={versionOverride ?? selected.gameVersion} options={gameVersions ?? [selected.gameVersion]} ariaLabel="Game version filter" onChange={(version) => { setVersionOverride(version); void runContentSearch({ page: 1, versions: [version] }); }} /> : <><span className="filter-lock">{selected.gameVersion}</span><p className="muted">Game version is provided by the instance. Unlocking may show incompatible content.</p><button onClick={() => { setVersionUnlocked(true); setVersionOverride(selected.gameVersion); }}><Lock size={14} /> Unlock filter</button></>}</div>{contentType === "mod" ? <div className="filter-group"><div className="section-title">Loader</div>{loaderUnlocked ? <Dropdown value={loaderOverride ?? selected.loader} options={loaderFilterOptions} ariaLabel="Loader filter" onChange={(loader) => { setLoaderOverride(loader); void runContentSearch({ page: 1, loaders: [loader] }); }} /> : <><span className="filter-lock">{selected.loader}</span><button onClick={() => { setLoaderUnlocked(true); setLoaderOverride(selected.loader === "vanilla" ? "fabric" : selected.loader); }}><Lock size={14} /> Unlock filter</button></>}</div> : null}<div className="filter-group"><div className="section-title">Categories</div><div className="filter-checks">{categoryTags.length ? categoryTags.map((tag) => <label key={tag} className="filter-check"><input type="checkbox" checked={selectedCategories.includes(tag)} onChange={() => toggleCategory(tag)} />{tag}</label>) : <span className="muted">No categories</span>}</div></div></aside></div></div>}
+                {instanceTab === "logs" && <div className="settings-content"><div className="surface-heading"><ScrollText size={19} /><div><h3>Logs</h3><span>{isSelectedRunning ? "Live tail · running" : "Launch the instance to see live logs."}</span></div></div><div className="button-row"><button onClick={() => void refreshInstanceLogs(false)} disabled={busy}><RefreshCw size={15} /> Refresh</button><button onClick={() => void openSelectedFolder()}><FolderOpen size={15} /> Open folder</button><button type="button" onClick={() => setLogsFollow((v) => !v)} title="Auto-scroll to bottom on new lines">{logsFollow ? "Follow: on" : "Follow: off"}</button></div>{instanceLogs === null ? <span className="muted">No live logs. Launch the instance.</span> : !instanceLogs.hasLog ? <span className="muted">Starting... waiting for log.</span> : <>{crashAssist && !isSelectedRunning && !isLaunching ? <div className="crash-banner" role="alert"><XCircle size={17} /><div><strong>{crashAssist.title}</strong><span>{crashAssist.hint}</span></div><button onClick={() => void copyCrashAssist()} title="Copy reason and log tail"><Copy size={14} /> Copy</button></div> : null}<pre ref={logPreRef} className="log-view">{instanceLogs.log || "(empty log)"}</pre>{instanceLogs.plan ? <details className="log-plan"><summary>Launch plan</summary><pre className="log-view small">{instanceLogs.plan}</pre></details> : null}</>}</div>}
+                {instanceTab === "content" && <div className={contentExiting ? "settings-content content-content content-exiting" : "settings-content content-content"} key={`${contentType}-${selected.id}`}><div className="surface-heading"><PackageSearch size={19} /><div><h3>Discover {contentLabel(contentType).toLowerCase()}</h3><span>Browse Modrinth for {selected.gameVersion} / {selected.loader}.</span></div></div><nav className="content-types" aria-label="Content type">{visibleContentTypes.map(({ id, label, icon: Icon }) => <button key={id} className={contentType === id ? "content-type active" : "content-type"} onClick={() => switchContentType(id)}><Icon size={15} /><span>{label}</span></button>)}</nav><div className="content-browser"><div className="content-main"><div className="search-row"><input value={modQuery} onChange={(event) => setModQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void runContentSearch({ page: 1 }); }} placeholder="Search or leave empty to browse" /><button onClick={() => void runContentSearch({ page: 1 })} disabled={busy}><Search size={16} /> Search</button></div><div className="browse-controls"><label className="sort-label">Sort by:<Dropdown value={sortLabel} options={sortOptions.map((option) => option.label)} ariaLabel="Sort by" onChange={(label) => { const found = sortOptions.find((option) => option.label === label); if (found) void runContentSearch({ page: 1, sort: found.id }); }} /></label><label className="sort-label">View:<Dropdown value={String(contentLimit)} options={["10", "20", "50"]} ariaLabel="Results per page" onChange={(label) => void runContentSearch({ page: 1, limit: Number(label) })} /></label>{totalHits > 0 ? <span className="muted">{totalHits} result{totalHits === 1 ? "" : "s"}</span> : null}</div><div className={busy ? "mod-results refreshing" : "mod-results"}>{visibleResults.map((result) => <article key={`${result.projectType}-${result.id}`} className="mod-card">{result.iconUrl ? <img className="mod-card-icon" src={result.iconUrl} alt="" /> : <div className="mod-card-icon mod-icon">{result.title[0]}</div>}<div className="mod-card-main"><div className="mod-card-title"><strong>{result.title}</strong>{result.author ? <span>by {result.author}</span> : null}</div><p>{result.summary}</p>{result.categories.length ? <div className="mod-card-tags">{result.categories.slice(0, 5).map((category) => <span key={category} className="tag-chip">{category}</span>)}</div> : null}</div><div className="mod-card-side">{installedProjectIds.has(result.id) ? <span className="installed-badge"><Check size={14} /> Installed</span> : <button className="install-button" onClick={() => void installContent(result)} disabled={busy || !isInstallable(result)} title={`${result.projectType === "modpack" ? "Download" : "Install"} ${result.title}`}><Plus size={14} /> Install</button>}<div className="mod-card-stats"><span><Download size={13} /> {formatDownloads(result.downloads)}</span>{typeof result.follows === "number" ? <span><Heart size={13} /> {formatDownloads(result.follows)}</span> : null}</div>{result.dateModified ? <small className="muted"><Clock size={12} /> {formatRelative(result.dateModified)}</small> : null}</div></article>)}</div>{totalPages > 1 ? <nav className="pages" aria-label="Result pages"><button className="page-button" disabled={contentPage <= 1 || busy} aria-label="Previous page" onClick={() => void runContentSearch({ page: contentPage - 1 })}><ChevronLeft size={15} /></button>{pageList(contentPage, totalPages).map((page, index) => page === "gap" ? <span key={`gap-${index}`} className="page-gap">…</span> : <button key={page} className={page === contentPage ? "page-button active" : "page-button"} disabled={busy} onClick={() => void runContentSearch({ page })}>{page}</button>)}<button className="page-button" disabled={contentPage >= totalPages || busy} aria-label="Next page" onClick={() => void runContentSearch({ page: contentPage + 1 })}><ChevronRight size={15} /></button></nav> : null}</div><aside className="content-filters"><div className="filter-row"><div><strong>Hide content already installed</strong></div><button type="button" role="switch" aria-checked={hideInstalled} className="switch" onClick={() => setHideInstalled((value) => !value)}><span className="knob" /></button></div><div className="filter-group"><div className="section-title">Game version</div>{versionUnlocked ? <Dropdown value={versionOverride ?? selected.gameVersion} options={gameVersions ?? [selected.gameVersion]} ariaLabel="Game version filter" onChange={(version) => { setVersionOverride(version); void runContentSearch({ page: 1, versions: [version] }); }} /> : <><span className="filter-lock">{selected.gameVersion}</span><p className="muted">Game version is provided by the instance. Unlocking may show incompatible content.</p><button onClick={() => { setVersionUnlocked(true); setVersionOverride(selected.gameVersion); }}><Lock size={14} /> Unlock filter</button></>}</div>{contentType === "mod" ? <div className="filter-group"><div className="section-title">Loader</div>{loaderUnlocked ? <Dropdown value={loaderOverride ?? selected.loader} options={loaderFilterOptions} ariaLabel="Loader filter" onChange={(loader) => { setLoaderOverride(loader); void runContentSearch({ page: 1, loaders: [loader] }); }} /> : <><span className="filter-lock">{selected.loader}</span><button onClick={() => { setLoaderUnlocked(true); setLoaderOverride(selected.loader === "vanilla" ? "fabric" : selected.loader); }}><Lock size={14} /> Unlock filter</button></>}</div> : null}<div className="filter-group"><div className="section-title">Categories</div><div className="filter-checks">{categoryTags.length ? categoryTags.map((tag) => <label key={tag} className="filter-check"><input type="checkbox" checked={selectedCategories.includes(tag)} onChange={() => toggleCategory(tag)} />{tag}</label>) : <span className="muted">No categories</span>}</div></div></aside></div></div>}
               </section>
             </> : <div className="blank-workspace"><Boxes size={34} /><h2>Select an instance</h2></div>}
           </section>
