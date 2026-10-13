@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { JavaInstallation, JavaRuntimeState } from "@shared/types";
 import { getLauncherRoot, getWindowsJavaCandidates } from "../paths";
+import { readUrlBytes, type BytesCallback } from "./transfer";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,7 +30,15 @@ function parseMinecraftVersion(version: string): { minor: number; patch: number 
 }
 
 export function getRequiredJavaMajor(gameVersion: string): number {
-  const parsed = parseMinecraftVersion(gameVersion);
+  const trimmed = gameVersion.trim();
+  const modern = /^(\d+)\.(\d+)/.exec(trimmed);
+  if (modern && !trimmed.startsWith("1.")) {
+    if (Number(modern[1]) >= 26) {
+      return 25;
+    }
+    return 21;
+  }
+  const parsed = parseMinecraftVersion(trimmed);
 
   if (parsed.minor > 20 || (parsed.minor === 20 && parsed.patch >= 5)) {
     return 21;
@@ -258,29 +267,25 @@ function getExecErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function downloadRuntimeZip(major: number, signal?: AbortSignal): Promise<string> {
+async function downloadRuntimeZip(major: number, signal?: AbortSignal, onBytes?: BytesCallback): Promise<string> {
   signal?.throwIfAborted();
   await mkdir(getCacheDir(), { recursive: true });
 
   const zipPath = path.join(getCacheDir(), `temurin-jre-${major}.zip`);
 
-  if (await pathExists(zipPath)) {
-    return zipPath;
+  try {
+    const existing = await stat(zipPath);
+    if (existing.size > 0) {
+      return zipPath;
+    }
+    await rm(zipPath, { force: true }).catch(() => undefined);
+  } catch {
   }
 
   const tempPath = `${zipPath}.tmp`;
-  const response = await fetch(getAdoptiumDownloadUrl(major), {
-    signal,
-    headers: {
-      "user-agent": "lynapp/1.0.3"
-    }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Java ${major} download failed with HTTP ${response.status}`);
-  }
-
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const { buffer } = await readUrlBytes(getAdoptiumDownloadUrl(major), { "user-agent": "lynapp/1.1.0-beta.0" }, signal, (received, total) =>
+    onBytes?.(received, total), 15 * 60 * 1000
+  );
   await writeFile(tempPath, buffer);
   await rm(zipPath, { force: true });
   await rename(tempPath, zipPath);
@@ -338,7 +343,7 @@ export class JavaService {
     return collectCandidatePaths(preferredPaths);
   }
 
-  async ensureRuntime(requiredMajor: number, preferredPaths: Array<string | undefined> = [], signal?: AbortSignal): Promise<JavaRuntimeState> {
+  async ensureRuntime(requiredMajor: number, preferredPaths: Array<string | undefined> = [], signal?: AbortSignal, onBytes?: BytesCallback): Promise<JavaRuntimeState> {
     const candidates = await collectCandidatePaths(preferredPaths);
     const preferred = preferredPaths.filter(Boolean) as string[];
 
@@ -376,7 +381,7 @@ export class JavaService {
       }
     }
 
-    const installed = await this.installFresh(downloadMajor, signal);
+    const installed = await this.installFresh(downloadMajor, signal, onBytes);
 
     if (!isCompatibleJavaMajor(installed.major, requiredMajor)) {
       throw new Error(`Downloaded Java ${downloadMajor}, but archive contains Java ${installed.major}.`);
@@ -478,15 +483,16 @@ export class JavaService {
     return { javawPath, major: await readJavaMajor(javawPath) };
   }
 
-  private async installFresh(downloadMajor: number, signal?: AbortSignal): Promise<{ javawPath: string; major: number }> {
+  private async installFresh(downloadMajor: number, signal?: AbortSignal, onBytes?: BytesCallback): Promise<{ javawPath: string; major: number }> {
     const runtimeDir = getRuntimeInstallDir(downloadMajor);
-    const zipPath = await downloadRuntimeZip(downloadMajor, signal);
+    const zipPath = await downloadRuntimeZip(downloadMajor, signal, onBytes);
     const tempDir = `${runtimeDir}.tmp-${Date.now()}`;
 
     try {
       await expandZip(zipPath, tempDir);
     } catch (error) {
       await rm(tempDir, { recursive: true, force: true });
+      await rm(zipPath, { force: true }).catch(() => undefined);
       throw error;
     }
 

@@ -402,10 +402,10 @@ export class AuthService {
   private refreshFlight: Promise<AccountState | null> | null = null;
 
   private getClientId(data: { settings: { microsoftClientId?: string } }): string {
-    return (bundledMicrosoftClientId || process.env.LIAN_MICROSOFT_CLIENT_ID || data.settings.microsoftClientId || "").trim();
+    return ((data.settings.microsoftClientId || "").trim() || bundledMicrosoftClientId || process.env.LIAN_MICROSOFT_CLIENT_ID || "").trim();
   }
 
-  private async performMicrosoftLogin(microsoftAccessToken: string): Promise<{ profile: MinecraftProfileResponse; minecraft: MinecraftLoginResponse; expiresAt: string }> {
+  private async performMicrosoftLogin(microsoftAccessToken: string): Promise<{ profile: MinecraftProfileResponse; minecraft: MinecraftLoginResponse; expiresAt: string; uhs: string }> {
     const xbox = await authenticateXbox(microsoftAccessToken);
     const xsts = await authorizeXsts(xbox.Token);
     const uhs = xsts.DisplayClaims?.xui?.[0]?.uhs;
@@ -417,10 +417,10 @@ export class AuthService {
     const minecraft = await authenticateMinecraft(uhs, xsts.Token);
     const profile = await fetchMinecraftProfile(minecraft.access_token);
     const expiresAt = new Date(Date.now() + minecraft.expires_in * 1000).toISOString();
-    return { profile, minecraft, expiresAt };
+    return { profile, minecraft, expiresAt, uhs };
   }
 
-  private async storeMicrosoftSession(profile: MinecraftProfileResponse, minecraft: MinecraftLoginResponse, expiresAt: string, refreshToken: string): Promise<void> {
+  private async storeMicrosoftSession(profile: MinecraftProfileResponse, minecraft: MinecraftLoginResponse, expiresAt: string, refreshToken: string, uhs: string): Promise<void> {
     await this.store.update((current) => {
       const prevActive = current.accounts.find((item) => item.id === current.activeAccountId) ?? null;
       if (prevActive && prevActive.kind === "microsoft") {
@@ -433,6 +433,7 @@ export class AuthService {
         existing.expiresAt = expiresAt;
         existing.minecraftAccessToken = minecraft.access_token;
         existing.microsoftRefreshToken = refreshToken;
+        existing.xboxUhs = uhs;
         existing.message = `Signed in as ${profile.name}`;
         current.activeAccountId = existing.id;
         current.settings.activeSkinId = existing.activeSkinId ?? null;
@@ -446,6 +447,7 @@ export class AuthService {
           expiresAt,
           minecraftAccessToken: minecraft.access_token,
           microsoftRefreshToken: refreshToken,
+          xboxUhs: uhs,
           message: `Signed in as ${profile.name}`,
           activeSkinId: null,
           addedAt: new Date().toISOString()
@@ -471,8 +473,8 @@ export class AuthService {
     try {
       const { code, verifier } = await openMicrosoftLoginWindow(parentWindow, clientId);
       const tokens = await exchangeCodeForTokens(clientId, code, verifier);
-      const { profile, minecraft, expiresAt } = await this.performMicrosoftLogin(tokens.accessToken);
-      await this.storeMicrosoftSession(profile, minecraft, expiresAt, tokens.refreshToken);
+      const { profile, minecraft, expiresAt, uhs } = await this.performMicrosoftLogin(tokens.accessToken);
+      await this.storeMicrosoftSession(profile, minecraft, expiresAt, tokens.refreshToken, uhs);
 
       return {
         status: "signed-in",
@@ -538,8 +540,8 @@ export class AuthService {
 
     try {
       const tokens = await refreshMicrosoftToken(clientId, active.microsoftRefreshToken);
-      const { profile, minecraft, expiresAt } = await this.performMicrosoftLogin(tokens.accessToken);
-      await this.storeMicrosoftSession(profile, minecraft, expiresAt, tokens.refreshToken);
+      const { profile, minecraft, expiresAt, uhs } = await this.performMicrosoftLogin(tokens.accessToken);
+      await this.storeMicrosoftSession(profile, minecraft, expiresAt, tokens.refreshToken, uhs);
       const fresh = await this.store.getData();
       return getActiveAccount(fresh);
     } catch {

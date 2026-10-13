@@ -23,9 +23,10 @@ function defaultSettings(): LauncherSettings {
     maxMemoryMb: 4096,
     extraJvmArgs: "",
     launcherDataDir: getLauncherRoot(),
-    concurrentDownloads: 4,
+    concurrentDownloads: 8,
     closeOnLaunch: false,
     microsoftClientId: "",
+    language: "en",
     theme: { ...THEME_DEFAULTS },
     glowEnabled: true,
     glowSize: 100,
@@ -164,8 +165,23 @@ export class JsonStore {
       return this.data;
     }
 
-    const raw = await readFile(this.filePath, "utf8");
-    this.data = mergeData(JSON.parse(raw) as Partial<LauncherData>);
+    let raw: string;
+    try {
+      raw = await readFile(this.filePath, "utf8");
+    } catch {
+      this.data = createDefaultData();
+      return this.data;
+    }
+    try {
+      this.data = mergeData(JSON.parse(raw) as Partial<LauncherData>);
+    } catch {
+      try {
+        await rename(this.filePath, `${this.filePath}.corrupt-${Date.now()}`);
+      } catch {
+      }
+      this.data = createDefaultData();
+      await this.save(this.data);
+    }
     return this.data;
   }
 

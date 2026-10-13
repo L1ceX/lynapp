@@ -43,6 +43,7 @@ export interface LauncherSettings {
   concurrentDownloads: number;
   closeOnLaunch: boolean;
   microsoftClientId: string;
+  language: "en" | "ru";
   theme: Record<string, string>;
   glowEnabled: boolean;
   glowSize: number;
@@ -84,6 +85,7 @@ export interface AccountState {
   microsoftRefreshToken?: string;
   elyAccessToken?: string;
   elyClientToken?: string;
+  xboxUhs?: string;
   activeSkinId?: string | null;
   addedAt?: string;
 }

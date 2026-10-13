@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { InstallModPayload, ModSearchPayload } from "@shared/ipc";
 import type { LauncherInstance, ModrinthProjectType, ModSearchResponse } from "@shared/types";
 import { JsonStore } from "../store";
+import { getLauncherRoot } from "../paths";
+import { readUrlBytes, type BytesCallback } from "./transfer";
 
 interface ModrinthVersion {
   id: string;
@@ -46,10 +48,29 @@ function targetDirectory(instance: LauncherInstance, projectType: ModrinthProjec
   return path.join(instance.directory, folders[projectType]);
 }
 
-async function downloadFile(url: string, target: string): Promise<void> {
-  const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.0.3" } });
-  if (!response.ok) throw new Error(`Modrinth download failed with HTTP ${response.status}`);
-  await writeFile(target, Buffer.from(await response.arrayBuffer()));
+async function targetDirectories(instance: LauncherInstance, projectType: ModrinthProjectType): Promise<string[]> {
+  if (projectType !== "datapack") {
+    return [targetDirectory(instance, projectType)];
+  }
+  const worlds: string[] = [];
+  try {
+    const entries = await readdir(path.join(instance.directory, "saves"), { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        worlds.push(entry.name);
+      }
+    }
+  } catch {
+  }
+  if (!worlds.length) {
+    return [targetDirectory(instance, projectType)];
+  }
+  return worlds.map((world) => path.join(instance.directory, "saves", world, "datapacks"));
+}
+
+async function downloadFile(url: string, target: string, onBytes?: BytesCallback): Promise<void> {
+  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp/1.1.0-beta.0" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
+  await writeFile(target, buffer);
 }
 
 export class ModService {
@@ -60,7 +81,7 @@ export class ModService {
   async getCategoryTags(projectType: ModrinthProjectType): Promise<string[]> {
     if (!this.categoryCache) {
       const response = await fetch("https://api.modrinth.com/v2/tag/category", {
-        headers: { "User-Agent": "lynapp/1.0.3" }
+        headers: { "User-Agent": "lynapp/1.1.0-beta.0" }
       });
 
       if (!response.ok) {
@@ -95,7 +116,7 @@ export class ModService {
         facets.push(versions.map((version) => `versions:${version}`));
       }
 
-      if (payload.projectType === "mod") {
+      if (payload.projectType === "mod" || payload.projectType === "modpack") {
         const loaders = payload.loaders?.length
           ? payload.loaders
           : instance && instance.loader !== "vanilla"
@@ -112,7 +133,7 @@ export class ModService {
 
       url.searchParams.set("facets", JSON.stringify(facets));
 
-      const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.0.3" } });
+      const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.1.0-beta.0" } });
       if (!response.ok) throw new Error(`Modrinth returned ${response.status}`);
       const body = (await response.json()) as { hits: ModrinthHit[]; total_hits?: number };
       return {
@@ -147,7 +168,7 @@ export class ModService {
     }
   }
 
-  async install(payload: InstallModPayload): Promise<LauncherInstance> {
+  async install(payload: InstallModPayload, onBytes?: BytesCallback): Promise<LauncherInstance> {
     const data = await this.store.getData();
     const instance = data.instances.find((item) => item.id === payload.instanceId);
     if (!instance) throw new Error("Instance not found");
@@ -159,25 +180,45 @@ export class ModService {
       throw new Error("Shaders and modpacks need Fabric, Forge, Quilt, or NeoForge. Vanilla supports resource and data packs.");
     }
 
-    const destination = targetDirectory(instance, payload.projectType);
+    const destinations = await targetDirectories(instance, payload.projectType);
     const launcherDir = path.join(instance.directory, ".launcher");
-    await mkdir(destination, { recursive: true });
+    for (const destination of destinations) {
+      await mkdir(destination, { recursive: true });
+    }
     await mkdir(launcherDir, { recursive: true });
 
     const versions = await this.getVersions(payload.projectId, instance, payload.projectType);
-    const version = versions.find((item) => item.files.length) ?? versions[0];
+    const version = (payload.versionId ? versions.find((item) => item.id === payload.versionId) : undefined)
+      ?? versions.find((item) => item.files.length)
+      ?? versions[0];
     const file = version?.files.find((item) => item.primary) ?? version?.files[0];
     if (!file) throw new Error(`No compatible Modrinth file for ${payload.name} (${instance.gameVersion})`);
 
-    const installedFile = path.join(destination, sanitizeFilePart(file.filename));
-    await downloadFile(file.url, installedFile);
+    const fileName = sanitizeFilePart(file.filename);
+    for (const destination of destinations) {
+      await downloadFile(file.url, path.join(destination, fileName), onBytes);
+    }
 
     const updated = await this.store.update((current) => {
       const target = current.instances.find((item) => item.id === payload.instanceId);
       if (!target) throw new Error("Instance not found");
       const existing = target.mods.find((item) => item.provider === "modrinth" && item.projectId === payload.projectId && (item.projectType ?? "mod") === payload.projectType);
-      if (!existing) {
-        target.mods.push({ id: randomUUID(), provider: "modrinth", projectId: payload.projectId, versionId: version.id, name: payload.name, slug: payload.slug, fileName: path.basename(installedFile), iconUrl: payload.iconUrl, installedAt: new Date().toISOString(), status: "installed", projectType: payload.projectType });
+      if (existing) {
+        if (existing.fileName && existing.fileName !== fileName) {
+          for (const destination of destinations) {
+            void rm(path.join(destination, existing.fileName), { force: true }).catch(() => undefined);
+            void rm(path.join(destination, `${existing.fileName}.disabled`), { force: true }).catch(() => undefined);
+          }
+        }
+        existing.versionId = version.id;
+        existing.fileName = fileName;
+        existing.name = payload.name;
+        existing.slug = payload.slug;
+        existing.iconUrl = payload.iconUrl;
+        existing.installedAt = new Date().toISOString();
+        existing.status = "installed";
+      } else {
+        target.mods.push({ id: randomUUID(), provider: "modrinth", projectId: payload.projectId, versionId: version.id, name: payload.name, slug: payload.slug, fileName, iconUrl: payload.iconUrl, installedAt: new Date().toISOString(), status: "installed", projectType: payload.projectType });
       }
       target.updatedAt = new Date().toISOString();
       return target;
@@ -187,11 +228,26 @@ export class ModService {
     return updated;
   }
 
+  async downloadModpackFile(instanceId: string, projectId: string, name: string, onBytes?: BytesCallback): Promise<string> {
+    const data = await this.store.getData();
+    const instance = data.instances.find((item) => item.id === instanceId);
+    if (!instance) throw new Error("Instance not found");
+    const versions = await this.getVersions(projectId, instance, "modpack");
+    const files = versions.flatMap((v) => v.files.map((f) => ({ version: v, file: f })));
+    const picked = files.find((e) => e.file.primary && /\.mrpack$/i.test(e.file.filename)) ?? files.find((e) => /\.mrpack$/i.test(e.file.filename));
+    if (!picked) throw new Error(`No .mrpack file for ${name} (${instance.gameVersion})`);
+    const dir = path.join(getLauncherRoot(), "cache", "modpacks");
+    await mkdir(dir, { recursive: true });
+    const target = path.join(dir, `download-${randomUUID()}.mrpack`);
+    await downloadFile(picked.file.url, target, onBytes);
+    return target;
+  }
+
   private async getVersions(projectId: string, instance: LauncherInstance, projectType: ModrinthProjectType): Promise<ModrinthVersion[]> {
     const url = new URL(`https://api.modrinth.com/v2/project/${projectId}/version`);
     url.searchParams.set("game_versions", JSON.stringify([instance.gameVersion]));
-    if (projectType === "mod" && instance.loader !== "vanilla") url.searchParams.set("loaders", JSON.stringify([instance.loader]));
-    const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.0.3" } });
+    if ((projectType === "mod" || projectType === "modpack") && instance.loader !== "vanilla") url.searchParams.set("loaders", JSON.stringify([instance.loader]));
+    const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.1.0-beta.0" } });
     if (!response.ok) return [];
     return (await response.json()) as ModrinthVersion[];
   }

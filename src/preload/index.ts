@@ -9,11 +9,20 @@ const api: LauncherApi = {
   updateInstance: (payload) => ipcRenderer.invoke(IPC.updateInstance, payload),
   removeInstance: (id) => ipcRenderer.invoke(IPC.removeInstance, id),
   importMrpackStart: (filePath) => ipcRenderer.invoke(IPC.importMrpackStart, filePath),
+  importMrpackStartToInstance: (filePath, instanceId) => ipcRenderer.invoke(IPC.importMrpackStartToInstance, filePath, instanceId),
+  importMrpackCancel: (instanceId) => ipcRenderer.invoke(IPC.importMrpackCancel, instanceId),
+  exportMrpack: (instanceId, include) => ipcRenderer.invoke(IPC.exportMrpack, instanceId, include),
+  listExportEntries: (instanceId) => ipcRenderer.invoke(IPC.listExportEntries, instanceId),
   importMrpackFiles: (instanceId) => ipcRenderer.invoke(IPC.importMrpackFiles, instanceId),
   onMrpackProgress: (listener) => {
     const handler = (_event: unknown, update: { instanceId: string; done: number; total: number; fileName: string }) => listener(update);
     ipcRenderer.on(IPC.mrpackProgress, handler);
     return () => ipcRenderer.removeListener(IPC.mrpackProgress, handler);
+  },
+  onDownloadProgress: (listener) => {
+    const handler = (_event: unknown, update: { key: string; fileName: string; received: number; total: number | null; phase?: string; doneFiles?: number; totalFiles?: number }) => listener(update);
+    ipcRenderer.on(IPC.transferProgress, handler);
+    return () => ipcRenderer.removeListener(IPC.transferProgress, handler);
   },
   launchInstance: (id) => ipcRenderer.invoke(IPC.launchInstance, id),
   getRunningInstances: () => ipcRenderer.invoke(IPC.getRunningInstances),
@@ -48,6 +57,7 @@ const api: LauncherApi = {
   searchMods: (payload) => ipcRenderer.invoke(IPC.searchMods, payload),
   getCategoryTags: (projectType) => ipcRenderer.invoke(IPC.getCategoryTags, projectType),
   installMod: (payload) => ipcRenderer.invoke(IPC.installMod, payload),
+  downloadModpack: (payload) => ipcRenderer.invoke(IPC.downloadModpack, payload),
   beginMicrosoftLogin: () => ipcRenderer.invoke(IPC.beginMicrosoftLogin),
   refreshSession: () => ipcRenderer.invoke(IPC.refreshSession),
   elyLogin: (username, password, totp) => ipcRenderer.invoke(IPC.elyLogin, username, password, totp),

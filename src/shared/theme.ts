@@ -18,25 +18,27 @@ export type ThemeGroup = "Backgrounds" | "Accents" | "Text";
 export interface ThemeTokenDef {
   id: ThemeTokenId;
   label: string;
+  labelRu: string;
   group: ThemeGroup;
+  groupRu: string;
   vars: string[];
   default: string;
 }
 
 export const THEME_TOKENS: ThemeTokenDef[] = [
-  { id: "background", label: "Background", group: "Backgrounds", vars: ["--t-bg", "--t-page", "--t-workspace"], default: "#0b111d" },
-  { id: "sidebar", label: "Sidebar", group: "Backgrounds", vars: ["--t-rail", "--t-sidebar"], default: "#0d1522" },
-  { id: "cards", label: "Cards", group: "Backgrounds", vars: ["--t-surface", "--t-card", "--t-popup"], default: "#101d2e" },
-  { id: "inputs", label: "Inputs", group: "Backgrounds", vars: ["--t-field"], default: "#0b1524" },
-  { id: "borders", label: "Borders", group: "Accents", vars: ["--t-border"], default: "#21364e" },
-  { id: "buttons", label: "Buttons", group: "Accents", vars: ["--t-button"], default: "#132137" },
-  { id: "accent", label: "Accent", group: "Accents", vars: ["--t-accent"], default: "#4e8cc5" },
-  { id: "active", label: "Active tabs", group: "Accents", vars: ["--t-accentbg"], default: "#1c4973" },
-  { id: "primary", label: "Main buttons", group: "Accents", vars: ["--t-primary"], default: "#224e78" },
-  { id: "danger", label: "Danger", group: "Accents", vars: ["--t-danger"], default: "#b96b82" },
-  { id: "glow", label: "Cursor glow", group: "Accents", vars: [], default: "#ffffff" },
-  { id: "text", label: "Text", group: "Text", vars: ["--t-text"], default: "#e8f0fb" },
-  { id: "muted", label: "Secondary text", group: "Text", vars: ["--t-muted"], default: "#8ba2ba" }
+  { id: "background", label: "Background", labelRu: "Фон", group: "Backgrounds", groupRu: "Фон", vars: ["--t-bg", "--t-page", "--t-workspace"], default: "#0b111d" },
+  { id: "sidebar", label: "Sidebar", labelRu: "Боковая панель", group: "Backgrounds", groupRu: "Фон", vars: ["--t-rail", "--t-sidebar"], default: "#0d1522" },
+  { id: "cards", label: "Cards", labelRu: "Карточки", group: "Backgrounds", groupRu: "Фон", vars: ["--t-surface", "--t-card", "--t-popup"], default: "#101d2e" },
+  { id: "inputs", label: "Inputs", labelRu: "Поля", group: "Backgrounds", groupRu: "Фон", vars: ["--t-field"], default: "#0b1524" },
+  { id: "borders", label: "Borders", labelRu: "Рамки", group: "Accents", groupRu: "Акценты", vars: ["--t-border"], default: "#21364e" },
+  { id: "buttons", label: "Buttons", labelRu: "Кнопки", group: "Accents", groupRu: "Акценты", vars: ["--t-button"], default: "#132137" },
+  { id: "accent", label: "Accent", labelRu: "Акцент", group: "Accents", groupRu: "Акценты", vars: ["--t-accent"], default: "#4e8cc5" },
+  { id: "active", label: "Active tabs", labelRu: "Активные вкладки", group: "Accents", groupRu: "Акценты", vars: ["--t-accentbg"], default: "#1c4973" },
+  { id: "primary", label: "Main buttons", labelRu: "Основные кнопки", group: "Accents", groupRu: "Акценты", vars: ["--t-primary"], default: "#224e78" },
+  { id: "danger", label: "Danger", labelRu: "Опасность", group: "Accents", groupRu: "Акценты", vars: ["--t-danger"], default: "#b96b82" },
+  { id: "glow", label: "Cursor glow", labelRu: "Свечение курсора", group: "Accents", groupRu: "Акценты", vars: [], default: "#ffffff" },
+  { id: "text", label: "Text", labelRu: "Текст", group: "Text", groupRu: "Текст", vars: ["--t-text"], default: "#e8f0fb" },
+  { id: "muted", label: "Secondary text", labelRu: "Дополнительный текст", group: "Text", groupRu: "Текст", vars: ["--t-muted"], default: "#8ba2ba" }
 ];
 
 export const THEME_GROUPS: ThemeGroup[] = ["Backgrounds", "Accents", "Text"];
@@ -50,18 +52,20 @@ export const THEME_DEFAULTS: ThemeValues = Object.fromEntries(
 export interface ThemePreset {
   id: string;
   label: string;
+  labelRu: string;
   values: ThemeValues;
 }
 
-const preset = (id: string, label: string, values: Partial<ThemeValues>): ThemePreset => ({
+const preset = (id: string, label: string, labelRu: string, values: Partial<ThemeValues>): ThemePreset => ({
   id,
   label,
+  labelRu,
   values: { ...THEME_DEFAULTS, ...values }
 });
 
 export const THEME_PRESETS: ThemePreset[] = [
-  preset("default", "Default", {}),
-  preset("abyss", "Abyss", {
+  preset("default", "Default", "Стандартная", {}),
+  preset("abyss", "Abyss", "Бездна", {
     background: "#05070c",
     sidebar: "#070c15",
     cards: "#0a1220",
@@ -76,7 +80,7 @@ export const THEME_PRESETS: ThemePreset[] = [
     danger: "#b96b82",
     glow: "#ffffff"
   }),
-  preset("ember", "Ember", {
+  preset("ember", "Ember", "Эмбер", {
     background: "#140f0d",
     sidebar: "#181210",
     cards: "#221715",
@@ -91,7 +95,7 @@ export const THEME_PRESETS: ThemePreset[] = [
     danger: "#e05c5c",
     glow: "#ffb066"
   }),
-  preset("forest", "Forest", {
+  preset("forest", "Forest", "Лес", {
     background: "#0b120d",
     sidebar: "#0f1a12",
     cards: "#15211a",
@@ -106,7 +110,7 @@ export const THEME_PRESETS: ThemePreset[] = [
     danger: "#e05c5c",
     glow: "#a8f0bc"
   }),
-  preset("violet", "Violet", {
+  preset("violet", "Violet", "Вайолет", {
     background: "#100d18",
     sidebar: "#150f22",
     cards: "#1e1530",
@@ -121,7 +125,7 @@ export const THEME_PRESETS: ThemePreset[] = [
     danger: "#f0607e",
     glow: "#c4b2ff"
   }),
-  preset("arctic", "Arctic", {
+  preset("arctic", "Arctic", "Арктика", {
     background: "#e9eef5",
     sidebar: "#dde4ee",
     cards: "#ffffff",

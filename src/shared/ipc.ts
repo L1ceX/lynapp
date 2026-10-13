@@ -7,6 +7,7 @@ import type {
   LauncherInstance,
   LauncherSettings,
   LocalContentItem,
+  LocalContentKind,
   LoginStartResult,
   ModLoader,
   ModProvider,
@@ -23,12 +24,18 @@ export const IPC = {
   updateInstance: "instances:update",
   removeInstance: "instances:remove",
   importMrpackStart: "instances:import-mrpack-start",
+  importMrpackStartToInstance: "instances:import-mrpack-start-to",
+  importMrpackCancel: "instances:import-mrpack-cancel",
+  exportMrpack: "instances:export-mrpack",
+  listExportEntries: "instances:export-entries",
   importMrpackFiles: "instances:import-mrpack-files",
   mrpackProgress: "instances:mrpack-progress",
+  transferProgress: "transfer:progress",
   launchInstance: "instances:launch",
   updateSettings: "settings:update",
   searchMods: "mods:search",
   installMod: "mods:install",
+  downloadModpack: "mods:download-modpack",
   beginMicrosoftLogin: "auth:microsoft:begin",
   refreshSession: "auth:refresh",
   elyLogin: "auth:ely",
@@ -108,6 +115,13 @@ export interface InstallModPayload {
 export interface LocalContentPayload {
   instanceId: string;
   fileName: string;
+  kind?: LocalContentKind;
+}
+
+export interface DownloadModpackPayload {
+  instanceId: string;
+  projectId: string;
+  name: string;
 }
 
 export interface SkinAddPayload {
@@ -131,6 +145,13 @@ export interface MrpackBeginResult {
   totalFiles: number;
 }
 
+export interface MrpackTargetResult {
+  totalFiles: number;
+  packName: string;
+  packGameVersion: string;
+  packLoader: string;
+}
+
 export interface MrpackProgressUpdate {
   instanceId: string;
   done: number;
@@ -138,15 +159,33 @@ export interface MrpackProgressUpdate {
   fileName: string;
 }
 
+export interface TransferProgressUpdate {
+  key: string;
+  fileName: string;
+  received: number;
+  total: number | null;
+  phase?: string;
+  doneFiles?: number;
+  totalFiles?: number;
+}
+
 export interface InstanceLogsResult {
   log: string;
   plan: string;
   hasLog: boolean;
+  crash: { file: string; description: string } | null;
 }
 
 export interface SkinRemoveResult {
   skins: SkinInfo[];
   activeSkinId: string | null;
+}
+
+export interface ExportEntry {
+  name: string;
+  isDir: boolean;
+  size: number;
+  modified: string | null;
 }
 
 export interface ElySkinResult {
@@ -161,13 +200,19 @@ export interface LauncherApi {
   updateInstance(payload: UpdateInstancePayload): Promise<LauncherInstance>;
   removeInstance(id: string): Promise<boolean>;
   importMrpackStart(filePath: string): Promise<MrpackBeginResult>;
+  importMrpackStartToInstance(filePath: string, instanceId: string): Promise<MrpackTargetResult>;
+  importMrpackCancel(instanceId: string): Promise<void>;
+  exportMrpack(instanceId: string, include?: string[]): Promise<string | null>;
+  listExportEntries(instanceId: string): Promise<ExportEntry[]>;
   importMrpackFiles(instanceId: string): Promise<LauncherInstance>;
   onMrpackProgress(listener: (update: MrpackProgressUpdate) => void): () => void;
+  onDownloadProgress(listener: (update: TransferProgressUpdate) => void): () => void;
   launchInstance(id: string): Promise<LaunchResult>;
   updateSettings(patch: Partial<LauncherSettings>): Promise<LauncherSettings>;
   searchMods(payload: ModSearchPayload): Promise<ModSearchResponse>;
   getCategoryTags(projectType: ModrinthProjectType): Promise<string[]>;
   installMod(payload: InstallModPayload): Promise<LauncherInstance>;
+  downloadModpack(payload: DownloadModpackPayload): Promise<string>;
   beginMicrosoftLogin(): Promise<LoginStartResult>;
   refreshSession(): Promise<AccountsState>;
   elyLogin(username: string, password: string, totp?: string): Promise<AccountsState>;

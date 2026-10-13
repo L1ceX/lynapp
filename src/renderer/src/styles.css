@@ -414,3 +414,18 @@ input[type="range"]:disabled { opacity: .4; cursor: not-allowed; }
 .crash-banner strong { display: block; font-size: 13px; }
 .crash-banner span { display: block; color: var(--t-muted); font-size: 12px; }
 .crash-banner button { margin-left: auto; flex-shrink: 0; }
+.modal-card.export-modal { width: min(560px, 94vw); }
+.export-head { display: flex; align-items: center; gap: 10px; color: var(--t-accent); }
+.export-head > div { min-width: 0; flex: 1; }
+.export-head h3 { color: var(--t-text); margin: 0; }
+.export-head .titlebar-button { margin-left: auto; }
+.export-quick { margin-top: 4px; }
+.export-quick button { border: none; background: none; color: var(--t-muted); font-size: 12px; padding: 4px 2px; }
+.export-rows { display: grid; gap: 6px; max-height: 440px; overflow: auto; margin: 6px 0 2px; }
+.export-row { display: flex; align-items: center; gap: 10px; border: 1px solid var(--t-border); border-radius: 11px; background: var(--t-card); color: var(--t-muted); padding: 9px 12px; text-align: left; }
+.export-row.on { border-color: var(--t-accent); color: var(--t-text); background: var(--t-accentbg); }
+.export-check { display: grid; place-items: center; width: 20px; height: 20px; flex-shrink: 0; border: 1px solid var(--t-border); border-radius: 7px; color: transparent; }
+.export-row.on .export-check { border-color: var(--t-accent); background: var(--t-accent); color: #fff; }
+.export-name { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 1; }
+.export-name strong { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.export-name small { flex-shrink: 0; font-size: 11px; white-space: nowrap; }

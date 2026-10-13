@@ -5,6 +5,7 @@ import type { SkinAddPayload, SkinUpdatePayload } from "@shared/ipc";
 import type { CapeInfo, SkinInfo } from "@shared/types";
 import { getLauncherRoot } from "../paths";
 import { JsonStore, getActiveAccount } from "../store";
+import type { AuthService } from "./auth";
 
 function skinsDir(): string {
   return path.join(getLauncherRoot(), "skins");
@@ -53,7 +54,13 @@ async function uploadMojangSkin(png: Buffer, slim: boolean, token: string): Prom
 }
 
 export class SkinService {
-  constructor(private readonly store: JsonStore) {}
+  constructor(private readonly store: JsonStore, private readonly auth?: AuthService) {}
+
+  private async refreshMicrosoftSession(): Promise<void> {
+    if (this.auth) {
+      await this.auth.ensureFreshSession().catch(() => null);
+    }
+  }
 
   async list(): Promise<SkinInfo[]> {
     const data = await this.store.getData();
@@ -132,6 +139,7 @@ export class SkinService {
 
   async activate(id: string): Promise<{ activeSkinId: string; uploaded: boolean }> {
     await this.requirePremium();
+    await this.refreshMicrosoftSession();
     const data = await this.store.getData();
     const meta = data.skins.find((item) => item.id === id);
     if (!meta) {
@@ -155,6 +163,7 @@ export class SkinService {
   }
 
   private async accountToken(): Promise<string> {
+    await this.refreshMicrosoftSession();
     const data = await this.store.getData();
     const active = getActiveAccount(data);
     if (!active || active.kind !== "microsoft" || active.status !== "signed-in" || !active.minecraftAccessToken) {
@@ -172,7 +181,7 @@ export class SkinService {
 
     try {
       const response = await fetch(`https://skinsystem.ely.by/textures/${encodeURIComponent(active.profileName)}?version=2`, {
-        headers: { "user-agent": "lynapp/1.0.3" }
+        headers: { "user-agent": "lynapp/1.1.0-beta.0" }
       });
       if (!response.ok) {
         return null;
@@ -182,7 +191,7 @@ export class SkinService {
       if (!url) {
         return null;
       }
-      const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.0.3" } });
+      const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.1.0-beta.0" } });
       if (!texture.ok) {
         return null;
       }

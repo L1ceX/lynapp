@@ -229,6 +229,36 @@ export class ContentService {
       }
     }
 
+    for (const { world, dir } of await this.worldDatapackDirs(instance.directory)) {
+      const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const { base, enabled } = stripDisabled(entry.name);
+        const lowerBase = base.toLowerCase();
+        if (seen.has(`datapack:${lowerBase}`)) {
+          continue;
+        }
+        if (!entry.isDirectory() && !lowerBase.endsWith(".zip")) {
+          continue;
+        }
+        const fullPath = path.join(dir, entry.name);
+        const fileStat = await stat(fullPath);
+        const record = instance.mods.find(
+          (mod) => (mod.projectType ?? "mod") === "datapack" && mod.fileName !== undefined && normalizeName(mod.fileName) === lowerBase
+        );
+        seen.add(`datapack:${lowerBase}`);
+        items.push({
+          kind: "datapack",
+          fileName: entry.name,
+          displayName: `${record?.name ?? base} (${world})`,
+          iconUrl: undefined,
+          size: await entrySize(fullPath).catch(() => fileStat.size),
+          modified: fileStat.mtime.toISOString(),
+          enabled,
+          source: record ? "modrinth" : "manual"
+        });
+      }
+    }
+
     for (const mod of instance.mods) {
       const kind = (mod.projectType ?? "mod") as LocalContentKind;
 
@@ -250,7 +280,7 @@ export class ContentService {
     return items.sort((a, b) => kindOrder.indexOf(a.kind) - kindOrder.indexOf(b.kind) || a.displayName.localeCompare(b.displayName));
   }
 
-  async toggle(instanceId: string, fileName: string): Promise<LocalContentItem[]> {
+  async toggle(instanceId: string, fileName: string, kind?: LocalContentKind): Promise<LocalContentItem[]> {
     const data = await this.store.getData();
     const instance = data.instances.find((item) => item.id === instanceId);
 
@@ -258,7 +288,7 @@ export class ContentService {
       throw new Error("Instance not found");
     }
 
-    const location = await this.findEntry(instance.directory, fileName);
+    const location = await this.findEntry(instance.directory, fileName, kind);
 
     if (!location) {
       throw new Error(`File not found: ${fileName}`);
@@ -290,7 +320,7 @@ export class ContentService {
     return this.list(instanceId);
   }
 
-  async remove(instanceId: string, fileName: string): Promise<LocalContentItem[]> {
+  async remove(instanceId: string, fileName: string, kind?: LocalContentKind): Promise<LocalContentItem[]> {
     const data = await this.store.getData();
     const instance = data.instances.find((item) => item.id === instanceId);
 
@@ -298,10 +328,33 @@ export class ContentService {
       throw new Error("Instance not found");
     }
 
-    const location = await this.findEntry(instance.directory, fileName);
+    const location = await this.findEntry(instance.directory, fileName, kind);
 
     if (!location) {
-      throw new Error(`File not found: ${fileName}`);
+      const wanted = fileName.toLowerCase().replace(/\.disabled$/, "");
+      await this.store.update((current) => {
+        const target = current.instances.find((item) => item.id === instanceId);
+        if (!target) {
+          throw new Error("Instance not found");
+        }
+        const before = target.mods.length;
+        target.mods = target.mods.filter((mod) => {
+          if (mod.fileName === undefined || normalizeName(mod.fileName) !== wanted) {
+            return true;
+          }
+          if (kind && (mod.projectType ?? "mod") !== kind) {
+            return true;
+          }
+          return false;
+        });
+        if (target.mods.length === before) {
+          throw new Error(`File not found: ${fileName}`);
+        }
+        target.updatedAt = new Date().toISOString();
+      });
+
+      await this.writeContentManifest(instanceId);
+      return this.list(instanceId);
     }
 
     const targetPath = path.join(location.dir, location.name);
@@ -396,7 +449,7 @@ export class ContentService {
 
     try {
       const response = await fetch(`https://api.modrinth.com/v2/project/${ref}`, {
-        headers: { "User-Agent": "lynapp/1.0.3" }
+        headers: { "User-Agent": "lynapp/1.1.0-beta.0" }
       });
 
       if (!response.ok) {
@@ -423,11 +476,33 @@ export class ContentService {
     }
   }
 
-  private async findEntry(instanceDir: string, fileName: string): Promise<{ kind: LocalContentKind; dir: string; name: string } | null> {
+  private async worldDatapackDirs(instanceDir: string): Promise<Array<{ world: string; dir: string }>> {
+    const out: Array<{ world: string; dir: string }> = [];
+    let worlds: string[] = [];
+    try {
+      worlds = await readdir(path.join(instanceDir, "saves"));
+    } catch {
+      return out;
+    }
+    for (const world of worlds) {
+      const dir = path.join(instanceDir, "saves", world, "datapacks");
+      try {
+        const fileStat = await stat(dir);
+        if (fileStat.isDirectory()) {
+          out.push({ world, dir });
+        }
+      } catch {
+      }
+    }
+    return out;
+  }
+
+  private async findEntry(instanceDir: string, fileName: string, onlyKind?: LocalContentKind): Promise<{ kind: LocalContentKind; dir: string; name: string } | null> {
     if (!fileName || fileName.includes("..") || fileName.includes("/") || fileName.includes("\\") || fileName.includes(":") || path.isAbsolute(fileName)) {
       throw new Error(`Unsafe file name: ${fileName}`);
     }
-    for (const kind of kindOrder) {
+    const kinds = onlyKind ? [onlyKind] : kindOrder;
+    for (const kind of kinds) {
       const dir = path.join(instanceDir, kindDirs[kind]);
       const direct = path.join(dir, fileName);
       if (path.resolve(direct) !== direct || !direct.startsWith(dir + path.sep)) {
@@ -448,7 +523,21 @@ export class ContentService {
         await stat(variantPath);
         return { kind, dir, name: variant };
       } catch {
-        continue;
+      }
+
+      if (kind === "datapack" && (!onlyKind || onlyKind === "datapack")) {
+        for (const { dir: worldDir } of await this.worldDatapackDirs(instanceDir)) {
+          for (const candidate of [fileName, variant]) {
+            const candidatePath = path.join(worldDir, candidate);
+            if (path.resolve(candidatePath) === candidatePath && candidatePath.startsWith(worldDir + path.sep)) {
+              try {
+                await stat(candidatePath);
+                return { kind, dir: worldDir, name: candidate };
+              } catch {
+              }
+            }
+          }
+        }
       }
     }
 

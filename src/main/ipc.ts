@@ -2,8 +2,8 @@ import { BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import { IPC } from "@shared/ipc";
-import type { CreateInstancePayload, InstallModPayload, LocalContentPayload, ModSearchPayload, SkinAddPayload, SkinUpdatePayload, UpdateInstancePayload } from "@shared/ipc";
-import type { LauncherSettings, ModLoader, ModrinthProjectType } from "@shared/types";
+import type { CreateInstancePayload, DownloadModpackPayload, InstallModPayload, LocalContentPayload, ModSearchPayload, SkinAddPayload, SkinUpdatePayload, UpdateInstancePayload } from "@shared/ipc";
+import type { AccountsState, LauncherSettings, ModLoader, ModrinthProjectType } from "@shared/types";
 import { getLauncherRoot, getStorePath } from "./paths";
 import { AuthService } from "./services/auth";
 import { ContentService } from "./services/content";
@@ -15,6 +15,7 @@ import { ModService } from "./services/mods";
 import { SkinService } from "./services/skins";
 import { JsonStore } from "./store";
 import { downloadUpdate, installUpdate } from "./updater";
+import { createThrottledEmitter } from "./services/transfer";
 
 export function registerIpcHandlers(): void {
   const store = new JsonStore();
@@ -23,12 +24,19 @@ export function registerIpcHandlers(): void {
   const auth = new AuthService(store);
   const instances = new InstanceService(store, java, minecraft, auth);
   const mods = new ModService(store);
-  const skins = new SkinService(store);
+  const skins = new SkinService(store, auth);
   const content = new ContentService(store);
   const modpacks = new ModpackService(store, instances, minecraft);
 
   void instances.pruneRunning().catch(() => undefined);
   void rm(path.join(getLauncherRoot(), "cache", "modpacks"), { recursive: true, force: true }).catch(() => undefined);
+
+  function publicAccounts(state: AccountsState): AccountsState {
+    return {
+      activeAccountId: state.activeAccountId,
+      accounts: state.accounts.map(({ minecraftAccessToken, microsoftRefreshToken, elyAccessToken, elyClientToken, xboxUhs, ...rest }) => rest)
+    };
+  }
 
   ipcMain.handle(IPC.bootstrap, async () => {
     const data = await store.getData();
@@ -36,8 +44,7 @@ export function registerIpcHandlers(): void {
       settings: data.settings,
       instances: data.instances,
       activeInstanceId: data.activeInstanceId,
-      accounts: data.accounts,
-      activeAccountId: data.activeAccountId,
+      ...publicAccounts({ accounts: data.accounts, activeAccountId: data.activeAccountId }),
       storagePath: getStorePath(),
       javaCandidates: await java.listCandidatePaths([data.settings.javaPath])
     };
@@ -46,8 +53,53 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.createInstance, (_event, payload: CreateInstancePayload) => instances.create(payload));  ipcMain.handle(IPC.updateInstance, (_event, payload: UpdateInstancePayload) => instances.updateInstance(payload));
   ipcMain.handle(IPC.removeInstance, (_event, id: string) => instances.remove(id));
   ipcMain.handle(IPC.importMrpackStart, (_event, filePath: string) => modpacks.beginImport(filePath));
+  ipcMain.handle(IPC.importMrpackStartToInstance, (_event, filePath: string, instanceId: string) => modpacks.beginImportToInstance(filePath, instanceId));
+  ipcMain.handle(IPC.importMrpackCancel, (_event, instanceId: string) => modpacks.cancelImport(instanceId));
+  ipcMain.handle(IPC.exportMrpack, async (event, instanceId: string, include?: string[]) => {
+    const data = await store.getData();
+    const instance = data.instances.find((item) => item.id === instanceId);
+    if (!instance) {
+      throw new Error("Instance not found");
+    }
+    const parent = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const saveOptions = {
+      title: "Export modpack",
+      defaultPath: `${instance.name}.mrpack`,
+      filters: [{ name: "Modrinth modpack", extensions: ["mrpack"] }]
+    };
+    const picked = parent
+      ? await dialog.showSaveDialog(parent, saveOptions)
+      : await dialog.showSaveDialog(saveOptions);
+    if (picked.canceled || !picked.filePath) {
+      return null;
+    }
+    return modpacks.exportInstance(instanceId, picked.filePath, include);
+  });
+  ipcMain.handle(IPC.listExportEntries, (_event, instanceId: string) => modpacks.listExportEntries(instanceId));
   ipcMain.handle(IPC.importMrpackFiles, (event, instanceId: string) => modpacks.finishImport(instanceId, event.sender));
-  ipcMain.handle(IPC.launchInstance, (_event, id: string) => instances.launch(id));
+  ipcMain.handle(IPC.launchInstance, (event, id: string) => {
+    const sender = event.sender;
+    const emit = createThrottledEmitter((update) => {
+      if (!sender.isDestroyed()) {
+        sender.send(IPC.transferProgress, update);
+      }
+    });
+    return instances.launch(id, (progress) => {
+      if (progress.phase === "java") {
+        emit(`launch:${id}`, "Java", progress.received ?? 0, progress.totalBytes ?? null, {
+          phase: "java",
+          doneFiles: 0,
+          totalFiles: 0
+        });
+        return;
+      }
+      emit(`launch:${id}`, progress.phase === "assets" ? "assets" : progress.phase === "loader" ? "loader" : "libraries", progress.done, progress.total, {
+        phase: progress.phase,
+        doneFiles: progress.done,
+        totalFiles: progress.total
+      });
+    });
+  });
   ipcMain.handle(IPC.getRunningInstances, () => instances.getRunning());
   ipcMain.handle(IPC.stopInstance, (_event, id: string) => instances.stop(id));
   ipcMain.handle(IPC.cancelLaunch, (_event, id: string) => instances.cancelLaunch(id));
@@ -88,8 +140,8 @@ export function registerIpcHandlers(): void {
     return shell.openPath(instance.directory);
   });
   ipcMain.handle(IPC.getLocalContent, (_event, instanceId: string) => content.list(instanceId));
-  ipcMain.handle(IPC.toggleLocalContent, (_event, payload: LocalContentPayload) => content.toggle(payload.instanceId, payload.fileName));
-  ipcMain.handle(IPC.removeLocalContent, (_event, payload: LocalContentPayload) => content.remove(payload.instanceId, payload.fileName));
+  ipcMain.handle(IPC.toggleLocalContent, (_event, payload: LocalContentPayload) => content.toggle(payload.instanceId, payload.fileName, payload.kind));
+  ipcMain.handle(IPC.removeLocalContent, (_event, payload: LocalContentPayload) => content.remove(payload.instanceId, payload.fileName, payload.kind));
 
   ipcMain.handle(IPC.updateSettings, (_event, patch: Partial<LauncherSettings>) => {
     return store.update((data) => {
@@ -103,13 +155,32 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.searchMods, (_event, payload: ModSearchPayload) => mods.search(payload));
   ipcMain.handle(IPC.getCategoryTags, (_event, projectType: ModrinthProjectType) => mods.getCategoryTags(projectType));
-  ipcMain.handle(IPC.installMod, (_event, payload: InstallModPayload) => mods.install(payload));
+  ipcMain.handle(IPC.installMod, (event, payload: InstallModPayload) => {
+    const sender = event.sender;
+    const emit = createThrottledEmitter((update) => {
+      if (!sender.isDestroyed()) {
+        sender.send(IPC.transferProgress, update);
+      }
+    });
+    return mods.install(payload, (received, total) => emit(`mod:${payload.projectId}`, payload.name, received, total));
+  });
+  ipcMain.handle(IPC.downloadModpack, (event, payload: DownloadModpackPayload) => {
+    const sender = event.sender;
+    const emit = createThrottledEmitter((update) => {
+      if (!sender.isDestroyed()) {
+        sender.send(IPC.transferProgress, update);
+      }
+    });
+    return mods.downloadModpackFile(payload.instanceId, payload.projectId, payload.name, (received, total) =>
+      emit(`modpack:${payload.projectId}`, payload.name, received, total)
+    );
+  });
   ipcMain.handle(IPC.beginMicrosoftLogin, (event) => auth.beginMicrosoftLogin(BrowserWindow.fromWebContents(event.sender)));
-  ipcMain.handle(IPC.refreshSession, () => auth.trySilentRefresh());
-  ipcMain.handle(IPC.elyLogin, (_event, username: string, password: string, totp?: string) => auth.elyLogin(username, password, totp));
-  ipcMain.handle(IPC.useOfflineProfile, (_event, username: string) => auth.useOfflineProfile(username));
-  ipcMain.handle(IPC.setActiveAccount, (_event, id: string) => auth.setActiveAccount(id));
-  ipcMain.handle(IPC.removeAccount, (_event, id: string) => auth.removeAccount(id));
+  ipcMain.handle(IPC.refreshSession, async () => publicAccounts(await auth.trySilentRefresh()));
+  ipcMain.handle(IPC.elyLogin, async (_event, username: string, password: string, totp?: string) => publicAccounts(await auth.elyLogin(username, password, totp)));
+  ipcMain.handle(IPC.useOfflineProfile, async (_event, username: string) => publicAccounts(await auth.useOfflineProfile(username)));
+  ipcMain.handle(IPC.setActiveAccount, async (_event, id: string) => publicAccounts(await auth.setActiveAccount(id)));
+  ipcMain.handle(IPC.removeAccount, async (_event, id: string) => publicAccounts(await auth.removeAccount(id)));
 
   ipcMain.handle(IPC.getJavaInstallations, async () => {
     const data = await store.getData();

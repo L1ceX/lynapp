@@ -13,6 +13,20 @@ app.setName("lynapp");
 app.setPath("userData", getElectronUserDataDir());
 void cleanupLegacyRootFiles();
 
+const singleInstance = app.requestSingleInstanceLock();
+
+if (!singleInstance) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    const window = BrowserWindow.getAllWindows()[0] ?? mainWindow;
+    if (window) {
+      if (window.isMinimized()) window.restore();
+      window.focus();
+    }
+  });
+}
+
 
 function isRunningInsideDataDir(): boolean {
   try {

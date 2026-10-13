@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import type { WebContents } from "electron";
 import path from "node:path";
@@ -11,6 +11,7 @@ import { getLauncherRoot } from "../paths";
 import { JsonStore } from "../store";
 import { InstanceService } from "./instances";
 import { MinecraftService } from "./minecraft";
+import { readUrlBytes, createThrottledEmitter, type BytesCallback } from "./transfer";
 
 const execFileAsync = promisify(execFile);
 
@@ -72,6 +73,26 @@ const dirProjectType: Record<string, "mod" | "resourcepack" | "shader" | "datapa
   datapacks: "datapack"
 };
 
+const dirKindFolder: Record<string, string> = {
+  mod: "mods",
+  resourcepack: "resourcepacks",
+  shader: "shaderpacks",
+  datapack: "datapacks"
+};
+
+interface ExportVersionFile {
+  url: string;
+  filename: string;
+  primary?: boolean;
+  size?: number;
+  hashes?: { sha1?: string; sha512?: string };
+}
+
+interface ExportVersion {
+  id: string;
+  files: ExportVersionFile[];
+}
+
 function pickLoader(dependencies: Record<string, string>, gameVersion: string): { loader: ModLoader; loaderVersion?: string } {
   const fabric = (dependencies["fabric-loader"] ?? "").trim();
   if (fabric) return { loader: "fabric", loaderVersion: fabric };
@@ -115,10 +136,9 @@ function verifyBuffer(buffer: Buffer, hashes: MrpackIndexFile["hashes"], entryPa
   }
 }
 
-async function downloadBuffer(url: string): Promise<Buffer> {
-  const response = await fetch(url, { headers: { "User-Agent": "lynapp" }, signal: AbortSignal.timeout(60000) });
-  if (!response.ok) throw new Error(`Modpack file download failed with HTTP ${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
+async function downloadBuffer(url: string, onBytes?: BytesCallback): Promise<Buffer> {
+  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
+  return buffer;
 }
 
 async function pool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
@@ -140,15 +160,13 @@ export class ModpackService {
     private readonly minecraft: MinecraftService
   ) {}
 
-  private readonly pending = new Map<string, { tmp: string; files: MrpackIndexFile[]; at: number }>();
+  private readonly pending = new Map<string, { tmp: string; files: MrpackIndexFile[]; at: number; created: boolean }>();
 
-  async beginImport(filePath: string): Promise<{ instance: LauncherInstance; totalFiles: number }> {
+  private async unpackIndex(filePath: string): Promise<{ tmp: string; index: MrpackIndex }> {
     if (!/\.mrpack$/i.test(filePath) || !existsSync(filePath)) {
       throw new Error("Drop a Modrinth .mrpack file to import it");
     }
-
     const tmp = path.join(getLauncherRoot(), "cache", "modpacks", `import-${randomUUID()}`);
-    let createdId: string | null = null;
     try {
       await mkdir(tmp, { recursive: true });
       try {
@@ -160,7 +178,6 @@ export class ModpackService {
       } catch {
         throw new Error("Could not unpack the .mrpack file (corrupt archive?)");
       }
-
       let index: MrpackIndex;
       try {
         index = JSON.parse(await readFile(path.join(tmp, "modrinth.index.json"), "utf8")) as MrpackIndex;
@@ -170,7 +187,23 @@ export class ModpackService {
       if (index.formatVersion !== 1 || index.game !== "minecraft") {
         throw new Error("Unsupported .mrpack format (need formatVersion 1 for Minecraft)");
       }
+      return { tmp, index };
+    } catch (error) {
+      await rm(tmp, { recursive: true, force: true });
+      throw error;
+    }
+  }
 
+  private wantedFiles(index: MrpackIndex): MrpackIndexFile[] {
+    return (index.files ?? []).filter(
+      (file) => file?.path && file.downloads?.length && (file.env?.client ?? "required") !== "unsupported"
+    );
+  }
+
+  async beginImport(filePath: string): Promise<{ instance: LauncherInstance; totalFiles: number }> {
+    const { tmp, index } = await this.unpackIndex(filePath);
+    let createdId: string | null = null;
+    try {
       const dependencies = index.dependencies ?? {};
       const gameVersion = (dependencies.minecraft ?? "").trim();
       if (!gameVersion) {
@@ -189,17 +222,245 @@ export class ModpackService {
       });
       createdId = instance.id;
 
-      const wanted = (index.files ?? []).filter(
-        (file) => file?.path && file.downloads?.length && (file.env?.client ?? "required") !== "unsupported"
-      );
-
+      const wanted = this.wantedFiles(index);
       this.sweepPending();
-      this.pending.set(instance.id, { tmp, files: wanted, at: Date.now() });
+      this.pending.set(instance.id, { tmp, files: wanted, at: Date.now(), created: true });
       return { instance, totalFiles: wanted.length };
     } catch (error) {
       if (createdId) this.pending.delete(createdId);
       await rm(tmp, { recursive: true, force: true });
       throw error;
+    }
+  }
+
+  async beginImportToInstance(filePath: string, instanceId: string): Promise<{ totalFiles: number; packName: string; packGameVersion: string; packLoader: string }> {
+    const { tmp, index } = await this.unpackIndex(filePath);
+    try {
+      const data = await this.store.getData();
+      const instance = data.instances.find((item) => item.id === instanceId);
+      if (!instance) {
+        throw new Error("Instance not found");
+      }
+      const dependencies = index.dependencies ?? {};
+      const packGameVersion = (dependencies.minecraft ?? "").trim() || instance.gameVersion;
+      const picked = pickLoader(dependencies, packGameVersion);
+      const packLoader = dependencies.minecraft ? picked.loader : instance.loader;
+      const old = this.pending.get(instanceId);
+      if (old) {
+        this.pending.delete(instanceId);
+        await rm(old.tmp, { recursive: true, force: true }).catch(() => undefined);
+      }
+      const wanted = this.wantedFiles(index);
+      this.sweepPending();
+      this.pending.set(instanceId, { tmp, files: wanted, at: Date.now(), created: false });
+      return { totalFiles: wanted.length, packName: (index.name ?? "").trim() || path.basename(filePath, path.extname(filePath)), packGameVersion, packLoader };
+    } catch (error) {
+      await rm(tmp, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  async cancelImport(instanceId: string): Promise<void> {
+    const job = this.pending.get(instanceId);
+    if (!job) return;
+    this.pending.delete(instanceId);
+    await rm(job.tmp, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  async listExportEntries(instanceId: string): Promise<Array<{ name: string; isDir: boolean; size: number; modified: string | null }>> {
+    const data = await this.store.getData();
+    const instance = data.instances.find((item) => item.id === instanceId);
+    if (!instance) {
+      throw new Error("Instance not found");
+    }
+    const out: Array<{ name: string; isDir: boolean; size: number; modified: string | null }> = [];
+    let names: string[] = [];
+    try {
+      names = await readdir(instance.directory);
+    } catch {
+      return out;
+    }
+    for (const name of names) {
+      if (name === ".launcher") {
+        continue;
+      }
+      const full = path.join(instance.directory, name);
+      try {
+        const fileStat = await stat(full);
+        out.push({
+          name,
+          isDir: fileStat.isDirectory(),
+          size: fileStat.isDirectory() ? await this.dirSize(full).catch(() => 0) : fileStat.size,
+          modified: fileStat.mtime.toISOString()
+        });
+      } catch {
+      }
+    }
+    out.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name));
+    return out;
+  }
+
+  private async dirSize(target: string): Promise<number> {
+    let total = 0;
+    const entries = await readdir(target, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(target, entry.name);
+      if (entry.isDirectory()) {
+        total += await this.dirSize(full);
+      } else {
+        try {
+          total += (await stat(full)).size;
+        } catch {
+        }
+      }
+    }
+    return total;
+  }
+
+  async exportInstance(instanceId: string, outPath: string, include?: string[]): Promise<string> {
+    const data = await this.store.getData();
+    const instance = data.instances.find((item) => item.id === instanceId);
+    if (!instance) {
+      throw new Error("Instance not found");
+    }
+    const included = include ? new Set(include) : null;
+    const dependencies: Record<string, string> = { minecraft: instance.gameVersion };
+    let loaderVersion = (instance.loaderVersion ?? "").trim();
+    if (!loaderVersion && instance.loader !== "vanilla") {
+      const available = await this.minecraft.listLoaderVersions(instance.loader, instance.gameVersion).catch(() => [] as string[]);
+      loaderVersion = instance.loader === "forge" || instance.loader === "neoforge"
+        ? available[available.length - 1] ?? ""
+        : available.find((item) => !item.includes("-")) ?? available[0] ?? "";
+    }
+    if (instance.loader === "fabric" && loaderVersion) {
+      dependencies["fabric-loader"] = loaderVersion;
+    } else if (instance.loader === "quilt" && loaderVersion) {
+      dependencies["quilt-loader"] = loaderVersion;
+    } else if (instance.loader === "forge" && loaderVersion) {
+      dependencies["forge"] = loaderVersion.startsWith(`${instance.gameVersion}-`) ? loaderVersion.slice(instance.gameVersion.length + 1) : loaderVersion;
+    } else if (instance.loader === "neoforge" && loaderVersion) {
+      dependencies["neoforge"] = loaderVersion;
+    }
+    const withVersions = instance.mods.filter((mod) => mod.provider === "modrinth" && mod.projectId && mod.versionId);
+    const versionMap = await this.fetchVersionsByIds([...new Set(withVersions.map((mod) => mod.versionId as string))]);
+    const files: MrpackIndexFile[] = [];
+    const manual: Array<{ kind: string; fileName: string }> = [];
+    for (const mod of instance.mods) {
+      const kind = (mod.projectType ?? "mod") as keyof typeof dirKindFolder;
+      const folder = dirKindFolder[kind];
+      if (!folder || !mod.fileName) {
+        continue;
+      }
+      if (included && !included.has(folder)) {
+        continue;
+      }
+      const version = mod.versionId ? versionMap.get(mod.versionId) : undefined;
+      const apiFile = version?.files.find((f) => f.primary) ?? version?.files[0];
+      if (version && apiFile?.hashes && apiFile.url && typeof apiFile.size === "number") {
+        files.push({
+          path: `${folder}/${apiFile.filename}`,
+          hashes: { sha1: apiFile.hashes.sha1, sha512: apiFile.hashes.sha512 },
+          env: kind === "mod"
+            ? { client: "required", server: "optional" }
+            : kind === "datapack"
+              ? { client: "required", server: "required" }
+              : { client: "required", server: "unsupported" },
+          downloads: [apiFile.url],
+          fileSize: apiFile.size
+        });
+      } else {
+        manual.push({ kind: folder, fileName: mod.fileName });
+      }
+    }
+    const tmp = path.join(getLauncherRoot(), "cache", "modpacks", `export-${randomUUID()}`);
+    try {
+      await mkdir(path.join(tmp, "overrides"), { recursive: true });
+      for (const entry of manual) {
+        const src = path.join(instance.directory, entry.kind, entry.fileName);
+        if (!existsSync(src)) {
+          continue;
+        }
+        await mkdir(path.join(tmp, "overrides", entry.kind), { recursive: true });
+        await cp(src, path.join(tmp, "overrides", entry.kind, entry.fileName), { recursive: true });
+      }
+      const knownFiles = new Set([
+        ...instance.mods.map((mod) => (mod.fileName ?? "").toLowerCase()),
+        ...instance.mods.map((mod) => `${mod.fileName ?? ""}.disabled`.toLowerCase())
+      ]);
+      for (const folder of Object.values(dirKindFolder)) {
+        if (included && !included.has(folder)) {
+          continue;
+        }
+        let entries: string[] = [];
+        try {
+          entries = await readdir(path.join(instance.directory, folder));
+        } catch {
+          continue;
+        }
+        for (const name of entries) {
+          if (knownFiles.has(name.toLowerCase())) {
+            continue;
+          }
+          await mkdir(path.join(tmp, "overrides", folder), { recursive: true });
+          await cp(path.join(instance.directory, folder, name), path.join(tmp, "overrides", folder, name), { recursive: true });
+        }
+      }
+      for (const extra of ["config", "options.txt", "servers.dat", "optionsof.txt"]) {
+        if (included && !included.has(extra)) {
+          continue;
+        }
+        const src = path.join(instance.directory, extra);
+        if (existsSync(src)) {
+          await cp(src, path.join(tmp, "overrides", extra), { recursive: true });
+        }
+      }
+      const index: MrpackIndex = {
+        formatVersion: 1,
+        game: "minecraft",
+        versionId: randomUUID(),
+        name: instance.name,
+        summary: `${instance.gameVersion} / ${instance.loader}`,
+        dependencies,
+        files
+      };
+      await writeFile(path.join(tmp, "modrinth.index.json"), JSON.stringify(index, null, 2), "utf8");
+      await mkdir(path.dirname(outPath), { recursive: true });
+      const zipStage = `${outPath}.${process.pid}.zip`;
+      const psPath = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+      const packScript = [
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem",
+        `$zip = [System.IO.Compression.ZipFile]::Open(${psPath(zipStage)}, 'Create')`,
+        "try {",
+        `$items = Get-ChildItem -LiteralPath ${psPath(tmp)} -Recurse -Force`,
+        `$base = ${psPath(tmp)}`,
+        "foreach ($item in $items) {",
+        `  $rel = $item.FullName.Substring($base.Length).TrimStart('\\').Replace('\\', '/')`,
+        "  if ($item.PSIsContainer) {",
+        "    $null = $zip.CreateEntry($rel + '/')",
+        "  } else {",
+        "    $entry = $zip.CreateEntry($rel)",
+        "    $out = $entry.Open()",
+        "    $in = [System.IO.File]::OpenRead($item.FullName)",
+        "    try { $in.CopyTo($out) } finally { $out.Dispose(); $in.Dispose() }",
+        "  }",
+        "}",
+        "} finally { $zip.Dispose() }"
+      ].join("\r\n");
+      try {
+        await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", packScript], {
+          windowsHide: true,
+          timeout: 180000,
+          maxBuffer: 32 * 1024 * 1024
+        });
+      } catch {
+        await rm(zipStage, { force: true }).catch(() => undefined);
+        throw new Error("Could not pack the .mrpack file");
+      }
+      await rm(outPath, { force: true }).catch(() => undefined);
+      await rename(zipStage, outPath);
+      return outPath;
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -232,12 +493,21 @@ export class ModpackService {
         sender.send(IPC.mrpackProgress, { instanceId, done, total, fileName });
       }
     };
+    const emitBytes = createThrottledEmitter((update) => {
+      if (!sender.isDestroyed()) {
+        sender.send(IPC.transferProgress, update);
+      }
+    });
 
     try {
+      const settings = (await this.store.getData()).settings;
+      const limit = Math.min(16, Math.max(1, Math.round(settings.concurrentDownloads) || 8));
       const downloaded: DownloadedEntry[] = [];
       let done = 0;
-      await pool(job.files, 6, async (file) => {
-        const buffer = await downloadBuffer(file.downloads![0]);
+      await pool(job.files, limit, async (file) => {
+        const buffer = await downloadBuffer(file.downloads![0], (received, total) =>
+          emitBytes(`mrpack:${instanceId}`, file.path, received, total, { doneFiles: done, totalFiles: job.files.length })
+        );
         verifyBuffer(buffer, file.hashes, file.path);
         const target = resolveTarget(instance.directory, file.path);
         await mkdir(path.dirname(target), { recursive: true });
@@ -253,16 +523,23 @@ export class ModpackService {
         emit(done, job.files.length, file.path);
       });
 
-      const overrides = path.join(job.tmp, "overrides");
-      if (existsSync(overrides)) {
-        await this.copyOverrides(overrides, instance.directory);
+      for (const overridesName of ["overrides", "client-overrides"]) {
+        const overrides = path.join(job.tmp, overridesName);
+        if (existsSync(overrides)) {
+          await this.copyOverrides(overrides, instance.directory);
+        }
       }
 
-      await this.linkModrinthEntries(instance.id, downloaded);
+      await this.linkModrinthEntries(instance.id, downloaded, limit).catch(() => undefined);
 
       emit(job.files.length, job.files.length, "");
       const fresh = await this.store.getData();
       return fresh.instances.find((item) => item.id === instanceId) ?? instance;
+    } catch (error) {
+      if (job.created) {
+        await this.instances.remove(instanceId).catch(() => undefined);
+      }
+      throw error;
     } finally {
       await rm(job.tmp, { recursive: true, force: true });
     }
@@ -284,10 +561,29 @@ export class ModpackService {
     }
   }
 
+  private async fetchVersionsByIds(ids: string[]): Promise<Map<string, ExportVersion>> {
+    const out = new Map<string, ExportVersion>();
+    if (!ids.length) return out;
+    try {
+      const response = await fetch(`https://api.modrinth.com/v2/versions?ids=${encodeURIComponent(JSON.stringify(ids))}`, {
+        headers: { "User-Agent": "lynapp" },
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!response.ok) return out;
+      const body = (await response.json()) as ExportVersion[];
+      for (const version of body ?? []) {
+        if (version?.id) out.set(version.id, version);
+      }
+    } catch {
+    }
+    return out;
+  }
+
   private async fetchVersionByHash(hash: string, algorithm: "sha512" | "sha1"): Promise<MrpackVersion | null> {
     try {
       const response = await fetch(`https://api.modrinth.com/v2/version_file/${hash}?algorithm=${algorithm}`, {
-        headers: { "User-Agent": "lynapp" }
+        headers: { "User-Agent": "lynapp" },
+        signal: AbortSignal.timeout(15000)
       });
       if (!response.ok) return null;
       const body = (await response.json()) as Partial<MrpackVersion>;
@@ -297,7 +593,7 @@ export class ModpackService {
     }
   }
 
-  private async resolveVersions(entries: DownloadedEntry[]): Promise<Map<string, MrpackVersion>> {
+  private async resolveVersions(entries: DownloadedEntry[], limit = 6): Promise<Map<string, MrpackVersion>> {
     const byHash = new Map<string, DownloadedEntry[]>();
     for (const entry of entries) {
       const hash = entry.sha512 || entry.sha1;
@@ -314,13 +610,12 @@ export class ModpackService {
         const response = await fetch("https://api.modrinth.com/v2/version_files", {
           method: "POST",
           headers: { "User-Agent": "lynapp", "Content-Type": "application/json" },
-          body: JSON.stringify({ hashes: sha512Hashes, algorithm: "sha512" })
+          body: JSON.stringify({ hashes: sha512Hashes, algorithm: "sha512" }),
+          signal: AbortSignal.timeout(20000)
         });
         if (response.ok) {
           const body = (await response.json()) as Record<string, Partial<MrpackVersion>> | MrpackVersion[];
-          const pairs: Array<[string, Partial<MrpackVersion>]> = Array.isArray(body)
-            ? body.map((version, index) => [sha512Hashes[index] ?? "", version] as [string, Partial<MrpackVersion>])
-            : Object.entries(body);
+          const pairs: Array<[string, Partial<MrpackVersion>]> = Array.isArray(body) ? [] : Object.entries(body);
           for (const [hash, version] of pairs) {
             if (version?.id && version?.project_id && byHash.has(hash)) {
               for (const entry of byHash.get(hash)!) resolved.set(entry.rel, { id: version.id, project_id: version.project_id });
@@ -332,7 +627,7 @@ export class ModpackService {
     }
 
     const missing = entries.filter((entry) => !resolved.has(entry.rel) && (entry.sha512 || entry.sha1));
-    await pool(missing, 6, async (entry) => {
+    await pool(missing, Math.min(16, Math.max(1, limit)), async (entry) => {
       const version =
         (entry.sha512 ? await this.fetchVersionByHash(entry.sha512, "sha512") : null) ??
         (entry.sha1 ? await this.fetchVersionByHash(entry.sha1, "sha1") : null);
@@ -346,7 +641,8 @@ export class ModpackService {
     if (!ids.length) return out;
     try {
       const response = await fetch(`https://api.modrinth.com/v2/projects?ids=${encodeURIComponent(JSON.stringify(ids))}`, {
-        headers: { "User-Agent": "lynapp" }
+        headers: { "User-Agent": "lynapp" },
+        signal: AbortSignal.timeout(20000)
       });
       if (!response.ok) return out;
       const body = (await response.json()) as MrpackProject[];
@@ -358,13 +654,13 @@ export class ModpackService {
     return out;
   }
 
-  private async linkModrinthEntries(instanceId: string, downloaded: DownloadedEntry[]): Promise<void> {
+  private async linkModrinthEntries(instanceId: string, downloaded: DownloadedEntry[], limit = 6): Promise<void> {
     const candidates = downloaded.filter((entry) => dirProjectType[entry.rel.split("/")[0]?.toLowerCase() ?? ""] && (entry.sha512 || entry.sha1));
     if (!candidates.length) return;
 
     let versions: Map<string, MrpackVersion>;
     try {
-      versions = await this.resolveVersions(candidates);
+      versions = await this.resolveVersions(candidates, limit);
     } catch {
       return;
     }

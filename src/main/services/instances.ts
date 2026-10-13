@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync } from "node:fs";
-import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { mkdir, open, readFile, realpath, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import path from "node:path";
 import type { CreateInstancePayload, UpdateInstancePayload } from "@shared/ipc";
 import type { AccountState, LaunchResult, LauncherInstance } from "@shared/types";
@@ -33,8 +34,7 @@ function buildInstanceFolderName(payload: CreateInstancePayload, uniqueSuffix: s
   return `${base.slice(0, Math.max(1, 80 - suffix.length))}${suffix}`;
 }
 
-function parseJvmFlags(input: string | undefined): string[] {
-  if (!input?.trim()) {
+function parseJvmFlags(input: string | undefined): string[] {  if (!input?.trim()) {
     return [];
   }
   return [...input.matchAll(/(?:[^\s"]+|"[^"]*")+/g)]
@@ -42,7 +42,44 @@ function parseJvmFlags(input: string | undefined): string[] {
     .filter(Boolean);
 }
 
-function redactLaunchArgs(args: string[]): string[] {  const secretKeys = new Set(["--accessToken", "--clientId", "--xuid", "--uuid"]);
+async function readNewestCrash(instanceDir: string): Promise<{ file: string; description: string } | null> {
+  let entries: Array<{ name: string; mtime: number }> = [];
+  try {
+    const dir = path.join(instanceDir, "crash-reports");
+    const names = await readdir(dir);
+    for (const name of names) {
+      if (!/^crash-.*\.(txt|log)$/i.test(name)) continue;
+      try {
+        const st = await stat(path.join(dir, name));
+        entries.push({ name, mtime: st.mtimeMs });
+      } catch {
+      }
+    }
+  } catch {
+    return null;
+  }
+  if (!entries.length) return null;
+  entries.sort((a, b) => b.mtime - a.mtime);
+  const newest = entries[0];
+  try {
+    const text = await readFile(path.join(instanceDir, "crash-reports", newest.name), "utf8");
+    const head = text.slice(0, 20000);
+    const desc = head.match(/^Description:\s*(.+)$/im)?.[1]?.trim() ?? "";
+    const exc = head.match(/^([a-zA-Z0-9_.$]+(?:Exception|Error)(?::\s*(.+))?)$/im);
+    const mixin = head.match(/Callback method \S+ in \S+?:(\S+) from mod (\S+) failed injection/i);
+    const sinytra = /sinytra connector is present/i.test(head);
+    const parts = [
+      mixin ? `Mod '${mixin[2]}' mixin crash (${mixin[1]})` : desc,
+      mixin ? "Remove or update the mod, or drop Sinytra Connector test" : exc?.[0]?.trim(),
+      !mixin && sinytra ? "Sinytra Connector is present, verify it is not the cause" : ""
+    ].filter(Boolean);
+    return { file: newest.name, description: parts.slice(0, 2).join(" / ").slice(0, 220) || "Crash report saved" };
+  } catch {
+    return null;
+  }
+}
+
+function redactLaunchArgs(args: string[]): string[] {  const secretKeys = new Set(["--accessToken", "--clientId", "--xuid", "--uuid", "--session"]);
   return args.map((arg, index) => (secretKeys.has(args[index - 1]) ? "<redacted>" : arg));
 }
 
@@ -50,6 +87,26 @@ async function writeInstanceManifest(instance: LauncherInstance): Promise<void> 
   const launcherDir = path.join(instance.directory, ".launcher");
   await mkdir(launcherDir, { recursive: true });
   await writeFile(path.join(launcherDir, "instance.json"), JSON.stringify(instance, null, 2), "utf8");
+}
+
+const execFileAsync = promisify(execFile);
+
+async function isJavaProcessAlive(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+  if (process.platform !== "win32") {
+    return true;
+  }
+  try {
+    const { stdout } = await execFileAsync("tasklist", ["/FI", `PID eq ${pid}`, "/NH", "/FO", "CSV"], { windowsHide: true, timeout: 5000 });
+    const image = (stdout.split(",")[0] ?? "").replace(/"/g, "").trim().toLowerCase();
+    return image === "java.exe" || image === "javaw.exe";
+  } catch {
+    return true;
+  }
 }
 
 export class InstanceService {
@@ -115,18 +172,25 @@ export class InstanceService {
   }
 
   async updateInstance(payload: UpdateInstancePayload): Promise<LauncherInstance> {
-    if (payload.patch.gameVersion !== undefined) {
-      const gameVersion = payload.patch.gameVersion.trim() || "1.21.1";
-      await this.minecraft.assertVersionExists(gameVersion);
-      payload.patch.gameVersion = gameVersion;
-    }
-
     const data = await this.store.getData();
     const current = data.instances.find((item) => item.id === payload.id);
     if (!current) {
       throw new Error("Instance not found");
     }
-    await this.minecraft.assertLoaderCompatible(payload.patch.loader ?? current.loader, payload.patch.gameVersion ?? current.gameVersion);
+    const nextGameVersion = payload.patch.gameVersion !== undefined
+      ? payload.patch.gameVersion.trim() || "1.21.1"
+      : current.gameVersion;
+    const nextLoader = payload.patch.loader ?? current.loader;
+    const versionChanged = nextGameVersion !== current.gameVersion;
+    const loaderChanged = nextLoader !== current.loader
+      || (payload.patch.loaderVersion ?? current.loaderVersion) !== current.loaderVersion;
+    if (payload.patch.gameVersion !== undefined) {
+      payload.patch.gameVersion = nextGameVersion;
+    }
+    if (versionChanged || loaderChanged) {
+      await this.minecraft.assertVersionExists(nextGameVersion);
+      await this.minecraft.assertLoaderCompatible(nextLoader, nextGameVersion);
+    }
 
     const updated = await this.store.update((data) => {
       const instance = data.instances.find((item) => item.id === payload.id);
@@ -152,17 +216,8 @@ export class InstanceService {
     }
 
     const pid = data.runningProcesses[id];
-    if (pid !== undefined) {
-      let alive = false;
-      try {
-        process.kill(pid, 0);
-        alive = true;
-      } catch (error) {
-        alive = (error as NodeJS.ErrnoException)?.code === "EPERM";
-      }
-      if (alive) {
-        throw new Error(`${target.name} is running. Stop it before deleting.`);
-      }
+    if (pid !== undefined && (await isJavaProcessAlive(pid))) {
+      throw new Error(`${target.name} is running. Stop it before deleting.`);
     }
 
     const directory = target.directory;
@@ -186,78 +241,90 @@ export class InstanceService {
     });
   }
 
-  async launch(id: string): Promise<LaunchResult> {
-    const data = await this.store.getData();
-    const instance = data.instances.find((item) => item.id === id);
-
-    if (!instance) {
+  async launch(id: string, onProgress?: (progress: import("./minecraft").LaunchProgress) => void): Promise<LaunchResult> {
+    if (this.launchAborts.has(id)) {
       return {
         ok: false,
-        message: "Instance not found"
+        message: "already launching"
       };
     }
-
-    const existingPid = data.runningProcesses[id];
-    if (existingPid !== undefined) {
-      try {
-        process.kill(existingPid, 0);
-        return {
-          ok: false,
-          message: "already running"
-        };
-      } catch {
-      }
-    }
-
-    try {
-      await mkdir(path.join(instance.directory, ".launcher", "logs"), { recursive: true });
-      await writeFile(path.join(instance.directory, ".launcher", "logs", "latest.log"), `lynapp Minecraft log\nStarted: ${new Date().toISOString()}\nInstance: ${instance.name}\n`, "utf8");
-    } catch {
-    }
-
-    let activeAccount = getActiveAccount(data);
-    if (!activeAccount) {
-      return {
-        ok: false,
-        message: "Add an account first (Microsoft login or offline profile)"
-      };
-    }
-    if (this.auth && activeAccount.kind !== "offline") {
-      const exp = activeAccount.expiresAt ? Date.parse(activeAccount.expiresAt) : NaN;
-      const needsMicrosoftRefresh = activeAccount.kind === "microsoft" && (Number.isNaN(exp) || exp - Date.now() < 5 * 60 * 1000);
-      if (needsMicrosoftRefresh || activeAccount.kind === "ely") {
-        const fresh = await this.auth.ensureFreshSession().catch(() => null);
-        if (fresh) {
-          activeAccount = fresh;
-        }
-      }
-    }
-    if (
-      activeAccount.kind === "microsoft" &&
-      activeAccount.expiresAt &&
-      !Number.isNaN(Date.parse(activeAccount.expiresAt)) &&
-      Date.parse(activeAccount.expiresAt) < Date.now()
-    ) {
-      return {
-        ok: false,
-        message: `Microsoft session for ${activeAccount.profileName ?? "account"} expired. Log in again via Add account.`
-      };
-    }
-
     const controller = new AbortController();
     this.launchAborts.set(id, controller);
     const signal = controller.signal;
 
     try {
-      return await this.runLaunch(id, instance, data, activeAccount, signal);
-    } catch (error) {
-      if (signal.aborted) {
+      const data = await this.store.getData();
+      const instance = data.instances.find((item) => item.id === id);
+
+      if (!instance) {
         return {
           ok: false,
-          message: "launch cancelled"
+          message: "Instance not found"
         };
       }
-      throw error;
+
+      const existingPid = data.runningProcesses[id];
+      if (existingPid !== undefined && (await isJavaProcessAlive(existingPid))) {
+        return {
+          ok: false,
+          message: "already running"
+        };
+      }
+      if (existingPid !== undefined) {
+        const stale = existingPid;
+        await this.store.update((current) => {
+          if (current.runningProcesses[id] === stale) {
+            delete current.runningProcesses[id];
+          }
+        }).catch(() => undefined);
+      }
+
+      try {
+        await mkdir(path.join(instance.directory, ".launcher", "logs"), { recursive: true });
+        await writeFile(path.join(instance.directory, ".launcher", "logs", "latest.log"), `lynapp Minecraft log\nStarted: ${new Date().toISOString()}\nInstance: ${instance.name}\n`, "utf8");
+      } catch {
+      }
+
+      let activeAccount = getActiveAccount(data);
+      if (!activeAccount) {
+        return {
+          ok: false,
+          message: "Add an account first (Microsoft login or offline profile)"
+        };
+      }
+      if (this.auth && activeAccount.kind !== "offline") {
+        const exp = activeAccount.expiresAt ? Date.parse(activeAccount.expiresAt) : NaN;
+        const needsMicrosoftRefresh = activeAccount.kind === "microsoft" && (Number.isNaN(exp) || exp - Date.now() < 5 * 60 * 1000);
+        if (needsMicrosoftRefresh || activeAccount.kind === "ely") {
+          const fresh = await this.auth.ensureFreshSession().catch(() => null);
+          if (fresh) {
+            activeAccount = fresh;
+          }
+        }
+      }
+      if (
+        activeAccount.kind === "microsoft" &&
+        activeAccount.expiresAt &&
+        !Number.isNaN(Date.parse(activeAccount.expiresAt)) &&
+        Date.parse(activeAccount.expiresAt) < Date.now()
+      ) {
+        return {
+          ok: false,
+          message: `Microsoft session for ${activeAccount.profileName ?? "account"} expired. Log in again via Add account.`
+        };
+      }
+
+      try {
+        return await this.runLaunch(id, instance, data, activeAccount, signal, onProgress);
+      } catch (error) {
+        if (signal.aborted) {
+          return {
+            ok: false,
+            message: "launch cancelled"
+          };
+        }
+        throw error;
+      }
     } finally {
       if (this.launchAborts.get(id) === controller) {
         this.launchAborts.delete(id);
@@ -283,14 +350,7 @@ export class InstanceService {
 
     const pid = data.runningProcesses[id];
     if (pid !== undefined) {
-      let alive = false;
-      try {
-        process.kill(pid, 0);
-        alive = true;
-      } catch (error) {
-        alive = (error as NodeJS.ErrnoException)?.code === "EPERM";
-      }
-      if (alive) {
+      if (await isJavaProcessAlive(pid)) {
         try {
           process.kill(pid);
         } catch {
@@ -303,6 +363,12 @@ export class InstanceService {
           message: "stopped"
         };
       }
+      const stalePid = pid;
+      await this.store.update((current) => {
+        if (current.runningProcesses[id] === stalePid) {
+          delete current.runningProcesses[id];
+        }
+      }).catch(() => undefined);
     }
 
     return {
@@ -311,13 +377,13 @@ export class InstanceService {
     };
   }
 
-  private async runLaunch(id: string, instance: LauncherInstance, data: LauncherData, activeAccount: AccountState, signal: AbortSignal): Promise<LaunchResult> {
+  private async runLaunch(id: string, instance: LauncherInstance, data: LauncherData, activeAccount: AccountState, signal: AbortSignal, onProgress?: (progress: import("./minecraft").LaunchProgress) => void): Promise<LaunchResult> {
     const requiredMajor = await this.minecraft.getRequiredJavaMajor(instance.gameVersion);
     const javaRuntime = await this.java.ensureRuntime(requiredMajor, [
       instance.javaPath,
       data.settings.javaPaths?.[String(requiredMajor)],
       data.settings.javaPath
-    ], signal);
+    ], signal, (received, total) => onProgress?.({ phase: "java", done: 0, total: 0, received, totalBytes: total }));
     const javaPath = javaRuntime.path;
     const rawMemory = instance.maxMemoryMb || data.settings.maxMemoryMb;
     const maxMemoryMb = Math.min(65536, Math.max(512, Math.round(rawMemory) || 4096));
@@ -340,7 +406,7 @@ export class InstanceService {
     const launch = await this.minecraft.prepareLaunch(updatedInstance, activeAccount, {
       memoryMb: maxMemoryMb,
       extraJvmArgs
-    }, javaPath, signal);
+    }, javaPath, signal, onProgress, data.settings.concurrentDownloads);
     const launchPlanPath = path.join(instance.directory, ".launcher", "logs", "latest-launch-plan.log");
     await mkdir(path.dirname(launchPlanPath), { recursive: true });
     await writeFile(
@@ -372,12 +438,21 @@ export class InstanceService {
     await writeFile(launch.logPath, logHeader, "utf8");
 
     const logFd = openSync(launch.logPath, "a");
-    const child = spawn(javaPath, launch.args, {
-      cwd: instance.directory,
-      detached: true,
-      stdio: ["ignore", logFd, logFd],
-      windowsHide: false
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(javaPath, launch.args, {
+        cwd: instance.directory,
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+        windowsHide: false
+      });
+    } catch (error) {
+      closeSync(logFd);
+      return {
+        ok: false,
+        message: error instanceof Error ? `Could not start Java: ${error.message}` : "Could not start Java"
+      };
+    }
     child.unref();
     closeSync(logFd);
 
@@ -389,10 +464,22 @@ export class InstanceService {
     }
 
     const startedPid = child.pid;
-    child.on("exit", () => {
+    const startedChild = child;
+    startedChild.on("error", () => {
       void this.store
         .update((current) => {
-          delete current.runningProcesses[id];
+          if (current.runningProcesses[id] === startedPid) {
+            delete current.runningProcesses[id];
+          }
+        })
+        .catch(() => undefined);
+    });
+    startedChild.on("exit", () => {
+      void this.store
+        .update((current) => {
+          if (current.runningProcesses[id] === startedPid) {
+            delete current.runningProcesses[id];
+          }
         })
         .catch(() => undefined);
     });
@@ -415,13 +502,8 @@ export class InstanceService {
     const alive: string[] = [];
 
     for (const [id, pid] of Object.entries(data.runningProcesses)) {
-      try {
-        process.kill(pid, 0);
+      if (await isJavaProcessAlive(pid)) {
         alive.push(id);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code === "EPERM") {
-          alive.push(id);
-        }
       }
     }
 
@@ -449,7 +531,10 @@ export class InstanceService {
     }
 
     const pid = data.runningProcesses[id];
-    if (pid === undefined) {
+    if (pid === undefined || !(await isJavaProcessAlive(pid))) {
+      await this.store.update((current) => {
+        delete current.runningProcesses[id];
+      }).catch(() => undefined);
       return {
         ok: false,
         message: "not running"
@@ -457,9 +542,8 @@ export class InstanceService {
     }
 
     try {
-      const { execFile: execFileCb } = await import("node:child_process");
       await new Promise<void>((resolve) => {
-        execFileCb("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => resolve());
+        execFile("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => resolve());
       });
       try {
         process.kill(pid);
@@ -482,7 +566,7 @@ export class InstanceService {
     await this.getRunning();
   }
 
-  async getLogs(id: string): Promise<{ log: string; plan: string; hasLog: boolean }> {
+  async getLogs(id: string): Promise<{ log: string; plan: string; hasLog: boolean; crash: { file: string; description: string } | null }> {
     const data = await this.store.getData();
     const instance = data.instances.find((item) => item.id === id);
     if (!instance) {
@@ -490,23 +574,32 @@ export class InstanceService {
     }
     const tailKb = 200 * 1024;
     const readTail = async (file: string): Promise<{ text: string; found: boolean }> => {
+      let handle: import("node:fs/promises").FileHandle | null = null;
       try {
-        const buf = await readFile(file);
-        const slice = buf.length > tailKb ? buf.subarray(buf.length - tailKb) : buf;
-        let text = slice.toString("utf8");
-        if (buf.length > tailKb) {
+        handle = await open(file, "r");
+        const size = (await handle.stat()).size;
+        if (size <= 0) {
+          return { text: "", found: true };
+        }
+        const start = Math.max(0, size - tailKb);
+        const buf = Buffer.alloc(Math.min(size, tailKb));
+        await handle.read(buf, 0, buf.length, start);
+        let text = buf.toString("utf8");
+        if (start > 0) {
           const cut = text.indexOf("\n");
           text = cut >= 0 ? text.slice(cut + 1) : text;
         }
         return { text, found: true };
       } catch {
         return { text: "", found: false };
+      } finally {
+        await handle?.close().catch(() => undefined);
       }
     };
     const logPath = path.join(instance.directory, ".launcher", "logs", "latest.log");
     const planPath = path.join(instance.directory, ".launcher", "logs", "latest-launch-plan.log");
     const log = await readTail(logPath);
     const plan = await readTail(planPath);
-    return { log: log.text, plan: plan.text, hasLog: log.found };
+    return { log: log.text, plan: plan.text, hasLog: log.found, crash: await readNewestCrash(instance.directory) };
   }
 }
