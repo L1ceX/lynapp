@@ -116,8 +116,8 @@ function createWindow(): void {
 if (isRunningInsideDataDir()) {
   app.whenReady().then(() => {
     dialog.showErrorBox(
-      "lynapp is installed into its data folder",
-      `This copy runs from:\n${path.dirname(app.getPath("exe"))}\n\nThat folder is reserved for instances and saves. Please reinstall lynapp into a different folder (for example %APPDATA%\\Programs\\lynapp).\n\nYour instances and worlds stay untouched.`
+      "lynapp is installed into its data folder / lynapp установлен в папку с данными",
+      `This copy runs from:\n${path.dirname(app.getPath("exe"))}\n\nThat folder is reserved for instances and saves. Please reinstall lynapp into a different folder (for example %APPDATA%\\Programs\\lynapp).\n\nYour instances and worlds stay untouched.\n\n---\n\nЭта копия запущена из папки:\n${path.dirname(app.getPath("exe"))}\n\nЭта папка зарезервирована для инстанций и сохранений. Переустановите lynapp в другую папку (например, %APPDATA%\\Programs\\lynapp).\n\nВаши инстанции и миры останутся нетронутыми.`
     );
     app.quit();
   });

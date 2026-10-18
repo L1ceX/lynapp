@@ -51,6 +51,7 @@ import {
 import appIcon from "./assets/icon.png";
 import { FunctionAnimation, SkinViewer } from "skinview3d";
 import { THEME_DEFAULTS, THEME_GROUPS, THEME_PRESETS, THEME_TOKENS, hexToRgb, resolveTheme, type ThemeTokenId } from "@shared/theme";
+import { EFFECTS_DEFAULTS } from "@shared/types";
 import type {
   BootstrapState,
   CapeInfo,
@@ -64,7 +65,8 @@ import type {
   ModSearchResult,
   ModSortIndex,
   SkinInfo,
-  UpdateStatus
+  UpdateStatus,
+  EffectsSettings
 } from "@shared/types";
 
 type AppSection = "home" | "instances" | "launcher" | "visuals" | "skins" | "accounts";
@@ -97,13 +99,38 @@ const fileSortLabelRu: Record<string, string> = {
   "Oldest first": "Сначала старые"
 };
 
+let motionRate = 1;
+function motionMs(ms: number): number {
+  return document.documentElement.classList.contains("no-anim") ? 0 : Math.round(ms / motionRate);
+}
+
+const effectGroups: Array<{ id: Exclude<keyof EffectsSettings, "enabled">; cls: string; label: string; labelRu: string; hint: string; hintRu: string }> = [
+  { id: "background", cls: "fx-bg", label: "Animated background", labelRu: "Анимированный фон", hint: "Slowly moving color spots behind the pages", hintRu: "Плавно движущиеся цветовые пятна на фоне страниц" },
+  { id: "springs", cls: "fx-springs", label: "Control animations", labelRu: "Анимация элементов управления", hint: "Response of buttons, tabs, menus and dialogs to hover and click", hintRu: "Отклик кнопок, вкладок, меню и диалогов на наведение и нажатие" },
+  { id: "launch", cls: "fx-launch", label: "Launch button animation", labelRu: "Анимация кнопки «Запустить»", hint: "Animated gradient and an indicator while the game is running", hintRu: "Анимированный градиент и индикатор работы игры" },
+  { id: "cascade", cls: "fx-cascade", label: "Appearance animation", labelRu: "Анимация появления", hint: "Pages fade in, list items appear in sequence", hintRu: "Плавное появление страниц и поочерёдное появление элементов списков" },
+  { id: "cards", cls: "fx-cards", label: "Card animations", labelRu: "Анимация карточек", hint: "Cards and icons react to the cursor", hintRu: "Карточки и иконки реагируют на наведение курсора" },
+  { id: "details", cls: "fx-details", label: "Status indicators", labelRu: "Индикаторы состояния", hint: "Animated progress bars, account status, crash notice and empty states", hintRu: "Анимация полос загрузки, статуса аккаунта, уведомления о сбое и пустых состояний" }
+];
+
+type ExportEntryKind = "normal" | "cache" | "private";
+const exportCacheNames = new Set([".fabric", ".bobby", ".cache", "cache", "downloads", ".mixin.out", "debug", "crash-reports"]);
+const exportPrivateNames = new Set(["logs", "usercache.json", "usernamecache.json", "command_history.txt"]);
+function exportEntryKind(name: string): ExportEntryKind {
+  const lower = name.toLowerCase();
+  if (exportPrivateNames.has(lower) || /account|token|secret|password|credential/.test(lower) || /\.log$/.test(lower) || /^(hs_err_pid|replay_pid)/.test(lower)) {
+    return "private";
+  }
+  return exportCacheNames.has(lower) ? "cache" : "normal";
+}
+
 function getLauncherApi() {
   if (!window.launcher) throw new Error("Launcher preload failed to load. Restart the launcher.");
   return window.launcher;
 }
 
-function formatDownloads(value?: number): string {
-  return new Intl.NumberFormat("en-US", { notation: "compact" }).format(value ?? 0);
+function formatDownloads(value: number | undefined, lang: "en" | "ru"): string {
+  return new Intl.NumberFormat(lang === "ru" ? "ru-RU" : "en-US", { notation: "compact" }).format(value ?? 0);
 }
 
 function formatBytes(bytes: number): string {
@@ -125,21 +152,31 @@ function formatDateTime(iso?: string): string {
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
-function formatRelative(iso?: string): string {
+function ruPlural(n: number, one: string, few: string, many: string): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+function formatRelative(iso: string | undefined, lang: "en" | "ru"): string {
   if (!iso) return "";
   const diffMs = Date.now() - new Date(iso).getTime();
   if (Number.isNaN(diffMs) || diffMs < 0) return "";
+  const ago = (n: number, en: string, one: string, few: string, many: string): string =>
+    lang === "ru" ? `${n} ${ruPlural(n, one, few, many)} назад` : `${n} ${en}${n === 1 ? "" : "s"} ago`;
   const minutes = Math.floor(diffMs / 60000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  if (minutes < 1) return lang === "ru" ? "только что" : "just now";
+  if (minutes < 60) return ago(minutes, "minute", "минуту", "минуты", "минут");
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  if (hours < 24) return ago(hours, "hour", "час", "часа", "часов");
   const days = Math.floor(hours / 24);
-  if (days < 30) return `${days} day${days === 1 ? "" : "s"} ago`;
+  if (days < 30) return ago(days, "day", "день", "дня", "дней");
   const months = Math.floor(days / 30);
-  if (months < 12) return `${months} month${months === 1 ? "" : "s"} ago`;
+  if (months < 12) return ago(months, "month", "месяц", "месяца", "месяцев");
   const years = Math.floor(months / 12);
-  return `${years} year${years === 1 ? "" : "s"} ago`;
+  return ago(years, "year", "год", "года", "лет");
 }
 
 function pageList(current: number, total: number): Array<number | "gap"> {
@@ -212,7 +249,7 @@ function contentLabel(type?: ModrinthProjectType): string {
   return contentTypes.find((item) => item.id === (type ?? "mod"))?.label ?? "Content";
 }
 
-function MemorySlider({ value, onChange, onCommit }: { value: number; onChange: (value: number) => void; onCommit?: (value: number) => void }) {
+function MemorySlider({ value, onChange, onCommit, label = "Allocated RAM" }: { value: number; onChange: (value: number) => void; onCommit?: (value: number) => void; label?: string }) {
   const safe = Math.min(32768, Math.max(512, Math.round(value / 256) * 256 || 2048));
   const [local, setLocal] = useState(safe);
   useEffect(() => {
@@ -225,10 +262,22 @@ function MemorySlider({ value, onChange, onCommit }: { value: number; onChange: 
   };
   return (
     <div className="memory-slider">
-      <input type="range" min={512} max={32768} step={256} value={local} onChange={(event) => setLocal(Number(event.target.value))} onPointerUp={() => commit(local)} onKeyUp={() => commit(local)} onBlur={() => { if (local !== safe) commit(local); }} aria-label="Allocated RAM" />
+      <input type="range" min={512} max={32768} step={256} value={local} onChange={(event) => setLocal(Number(event.target.value))} onPointerUp={() => commit(local)} onKeyUp={() => commit(local)} onBlur={() => { if (local !== safe) commit(local); }} aria-label={label} />
       <span className="muted">{local} MB · {gb} GB</span>
     </div>
   );
+}
+
+function CommitInput({ value, onCommit, placeholder }: { value: string; onCommit: (value: string) => void; placeholder?: string }) {
+  const [local, setLocal] = useState(value);
+  useEffect(() => {
+    setLocal(value);
+  }, [value]);
+  const commit = (): void => {
+    if (local.trim() && local !== value) onCommit(local);
+    else if (!local.trim()) setLocal(value);
+  };
+  return <input value={local} placeholder={placeholder} onChange={(event) => setLocal(event.target.value)} onBlur={commit} onKeyDown={(event) => { if (event.key === "Enter") (event.target as HTMLInputElement).blur(); if (event.key === "Escape") { setLocal(value); } }} />;
 }
 
 function transferLabel(entry: { received: number; total: number | null } | undefined): string | null {
@@ -243,43 +292,46 @@ function isInstallable(result: ModSearchResult): boolean {
   return !result.id.includes("error") && !result.categories.includes("error");
 }
 
-function detectCrash(log: string): { title: string; hint: string } | null {
+type Translate = (en: string, ru: string) => string;
+
+function detectCrash(log: string, t: Translate): { title: string; hint: string; generic?: boolean } | null {
   const text = log.slice(-30000);
   const lower = text.toLowerCase();
   if (!lower.trim()) return null;
   const crashEvidence = /(outofmemoryerror|java heap space|unsupportedclassversionerror|unsupported class file|unsatisfiedlinkerror|invalid_grant|mod resolution failed|incompatible mods found|formattedexception|duplicate mod|pixel format not accelerated|glfw error 6554|could not set pixel format|no space left|cannot access the file|mixin apply failed|critical injection failure|failed injection|missing or unsupported mandatory|which is missing|exception in thread|caused by:|a fatal error|crash report|process crashed|game crashed|mixintransformererror)/.test(lower);
   if (!crashEvidence) return null;
   if (lower.includes("outofmemoryerror") || lower.includes("java heap space")) {
-    return { title: "Нехватка памяти", hint: "Закройте другие приложения или увеличьте объём памяти во вкладке RAM." };
+    return { title: t("Out of memory", "Нехватка памяти"), hint: t("Close other apps or give the instance more memory on the RAM tab.", "Закройте другие приложения или увеличьте объём памяти во вкладке RAM.") };
   }
   if (lower.includes("unsupportedclassversionerror")) {
-    return { title: "Неподходящая версия Java", hint: "Установите версию Java, требуемую инстанцией, в настройках лаунчера." };
+    return { title: t("Wrong Java version", "Неподходящая версия Java"), hint: t("Install the Java version this instance needs in launcher settings.", "Установите версию Java, требуемую инстанцией, в настройках лаунчера.") };
   }
   if (lower.includes("unsatisfiedlinkerror")) {
-    return { title: "Повреждены нативные библиотеки", hint: "Удалите версию игры и запустите снова, чтобы библиотеки скачались заново." };
+    return { title: t("Native libraries are broken", "Повреждены нативные библиотеки"), hint: t("Delete the game version and launch again so the libraries download fresh.", "Удалите версию игры и запустите снова, чтобы библиотеки скачались заново.") };
   }
   const majorMatch = lower.match(/unsupported class file major version (\d+)/);
   if (majorMatch) {
-    const javaByMajor: Record<string, string> = { "69": "25", "68": "24", "67": "23", "66": "22", "65": "21", "64": "20", "63": "19", "61": "17", "55": "11", "52": "8" };
+    const javaByMajor: Record<string, string> = { "69": "25", "68": "24", "67": "23", "66": "22", "65": "21", "64": "20", "63": "19", "62": "18", "61": "17", "60": "16", "55": "11", "52": "8" };
     const java = javaByMajor[majorMatch[1]] ?? `? (class ${majorMatch[1]})`;
-    return { title: `Загрузчик устарел для Java ${java}`, hint: "Обновите загрузчик до выпуска с поддержкой этой Java либо дождитесь его." };
+    return { title: t(`Loader is too old for Java ${java}`, `Загрузчик устарел для Java ${java}`), hint: t("Update the loader to a release that supports this Java, or wait for one.", "Обновите загрузчик до выпуска с поддержкой этой Java либо дождитесь его.") };
   }
   if (lower.includes("modules minecraft and") && lower.includes("export package")) {
-    return { title: "Конфликт клиента Forge", hint: "Переустановите версию игры или загрузчик." };
+    return { title: t("Forge client conflict", "Конфликт клиента Forge"), hint: t("Reinstall the game version or the loader.", "Переустановите версию игры или загрузчик.") };
   }
   if (lower.includes("invalid_grant") || lower.includes("xsts") || (lower.includes("minecraft profile") && lower.includes("401"))) {
-    return { title: "Сессия входа истекла", hint: "Войдите снова во вкладке аккаунтов." };
+    return { title: t("Login session expired", "Сессия входа истекла"), hint: t("Sign in again on the Accounts page.", "Войдите снова во вкладке аккаунтов.") };
   }
+  const gpuHint = t("Update your graphics drivers. The game could not start OpenGL.", "Обновите драйверы видеокарты. Игре не удалось запустить OpenGL.");
   const known: Array<{ keys: string[]; title: string; hint: string }> = [
-    { keys: ["duplicate mod"], title: "Дублирующийся мод", hint: "Удалите одну из двух копий из папки mods." },
-    { keys: ["pixel format not accelerated"], title: "Не удалось инициализировать графику", hint: "Обновите драйверы видеокарты. Старое встроенное видео может не запускать новые версии." },
-    { keys: ["glfw error 65542"], title: "Не удалось инициализировать графику", hint: "Обновите драйверы видеокарты. Игре не удалось запустить OpenGL." },
-    { keys: ["could not set pixel format"], title: "Не удалось инициализировать графику", hint: "Обновите драйверы видеокарты. Игре не удалось запустить OpenGL." },
-    { keys: ["no space left on device"], title: "Диск переполнен", hint: "Освободите место на диске и запустите снова." },
-    { keys: ["the process cannot access the file"], title: "Файл заблокирован", hint: "Закройте другие лаунчеры, проверки антивируса и оставшиеся процессы игры." },
-    { keys: ["sinytra connector is present"], title: "Конфликт Sinytra", hint: "Удалите Connector или конфликтующий Fabric-мод и повторите." },
-    { keys: ["mixin apply failed"], title: "Ошибка миксина", hint: "Мод попытался изменить игру и не смог. Удалите недавно добавленные моды." },
-    { keys: ["optifine", "sodium"], title: "OptiFine против Sodium", hint: "Используйте либо OptiFine, либо Sodium с Iris, но не вместе." }
+    { keys: ["duplicate mod"], title: t("Duplicate mod", "Дублирующийся мод"), hint: t("Remove one of the two copies from the mods folder.", "Удалите одну из двух копий из папки mods.") },
+    { keys: ["pixel format not accelerated"], title: t("Graphics failed to start", "Не удалось инициализировать графику"), hint: t("Update your graphics drivers. Old integrated GPUs may not run new versions.", "Обновите драйверы видеокарты. Старое встроенное видео может не запускать новые версии.") },
+    { keys: ["glfw error 65542"], title: t("Graphics failed to start", "Не удалось инициализировать графику"), hint: gpuHint },
+    { keys: ["could not set pixel format"], title: t("Graphics failed to start", "Не удалось инициализировать графику"), hint: gpuHint },
+    { keys: ["no space left on device"], title: t("Disk is full", "Диск переполнен"), hint: t("Free up disk space and launch again.", "Освободите место на диске и запустите снова.") },
+    { keys: ["the process cannot access the file"], title: t("File is locked", "Файл заблокирован"), hint: t("Close other launchers, antivirus scans and leftover game processes.", "Закройте другие лаунчеры, проверки антивируса и оставшиеся процессы игры.") },
+    { keys: ["sinytra connector is present"], title: t("Sinytra conflict", "Конфликт Sinytra"), hint: t("Remove Connector or the conflicting Fabric mod and try again.", "Удалите Connector или конфликтующий Fabric-мод и повторите.") },
+    { keys: ["mixin apply failed"], title: t("Mixin error", "Ошибка миксина"), hint: t("A mod tried to patch the game and failed. Remove recently added mods.", "Мод попытался изменить игру и не смог. Удалите недавно добавленные моды.") },
+    { keys: ["optifine", "sodium"], title: t("OptiFine vs Sodium", "OptiFine против Sodium"), hint: t("Use either OptiFine, or Sodium with Iris, not both.", "Используйте либо OptiFine, либо Sodium с Iris, но не вместе.") }
   ];
   for (const rule of known) {
     if (rule.keys.every((key) => lower.includes(key))) {
@@ -288,38 +340,49 @@ function detectCrash(log: string): { title: string; hint: string } | null {
   }
   const missingDep = lower.match(/requires [^.\n]*?of ([a-z0-9_\-.+]+),? which is missing/);
   if (missingDep) {
-    return { title: `Отсутствует ${missingDep[1]}`, hint: `Установите ${missingDep[1]} во вкладке контента.` };
+    return { title: t(`Missing ${missingDep[1]}`, `Отсутствует ${missingDep[1]}`), hint: t(`Install ${missingDep[1]} on the Content tab.`, `Установите ${missingDep[1]} во вкладке контента.`) };
   }
   const forgeDep = lower.includes("missing or unsupported mandatory dependencies")
     ? lower.match(/mod id: '([^']+)'/)
     : null;
   if (forgeDep) {
-    return { title: `Отсутствует мод '${forgeDep[1]}'`, hint: `Установите '${forgeDep[1]}' во вкладке контента.` };
+    return { title: t(`Missing mod '${forgeDep[1]}'`, `Отсутствует мод '${forgeDep[1]}'`), hint: t(`Install '${forgeDep[1]}' on the Content tab.`, `Установите '${forgeDep[1]}' во вкладке контента.`) };
   }
   const mixinMod = lower.match(/failed injection.*?from mod (\S+)/);
   if (mixinMod) {
-    return { title: `Миксин мода '${mixinMod[1]}' вызвал краш`, hint: `Удалите или обновите мод '${mixinMod[1]}' либо проверьте без Sinytra Connector.` };
+    return { title: t(`Mod '${mixinMod[1]}' mixin crashed`, `Миксин мода '${mixinMod[1]}' вызвал краш`), hint: t(`Remove or update '${mixinMod[1]}', or test without Sinytra Connector.`, `Удалите или обновите мод '${mixinMod[1]}' либо проверьте без Sinytra Connector.`) };
   }
+  const incompatible = { title: t("Incompatible mods", "Несовместимость модов"), hint: t("Remove recently added mods, or match the loader and game version.", "Удалите недавно добавленные моды либо приведите загрузчик и версию игры в соответствие.") };
   const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0).slice(-40);
   if (lower.includes("mod resolution failed") || lower.includes("incompatible mods found") || lower.includes("formattedexception")) {
     const installs = [...text.matchAll(/Install ([A-Za-z0-9_'.+ -]+?), (?:version ([\d.]+) or later|any version)/gi)].map((m) => ({ name: m[1].trim(), version: m[2] ?? "" }));
     const api = installs.find((i) => i.name.toLowerCase().includes("fabric-api")) ?? installs[0];
     if (api) {
-      return { title: `Отсутствует ${api.name}`, hint: api.version ? `Установите ${api.name} версии ${api.version} или новее во вкладке контента.` : `Установите ${api.name} во вкладке контента.` };
+      return {
+        title: t(`Missing ${api.name}`, `Отсутствует ${api.name}`),
+        hint: api.version
+          ? t(`Install ${api.name} ${api.version} or newer on the Content tab.`, `Установите ${api.name} версии ${api.version} или новее во вкладке контента.`)
+          : t(`Install ${api.name} on the Content tab.`, `Установите ${api.name} во вкладке контента.`)
+      };
     }
     const javaNeed = text.match(/requires version (\d+) or later of[^]*?java/i);
     const javaHave = text.match(/but only the wrong version is present:\s*(\d+)/i);
     if (javaNeed) {
-      return { title: `Требуется Java ${javaNeed[1]}`, hint: javaHave ? `Сейчас используется Java ${javaHave[1]}. Установите Java ${javaNeed[1]} в настройках лаунчера.` : `Установите Java ${javaNeed[1]} в настройках лаунчера.` };
+      return {
+        title: t(`Java ${javaNeed[1]} required`, `Требуется Java ${javaNeed[1]}`),
+        hint: javaHave
+          ? t(`Java ${javaHave[1]} is in use now. Install Java ${javaNeed[1]} in launcher settings.`, `Сейчас используется Java ${javaHave[1]}. Установите Java ${javaNeed[1]} в настройках лаунчера.`)
+          : t(`Install Java ${javaNeed[1]} in launcher settings.`, `Установите Java ${javaNeed[1]} в настройках лаунчера.`)
+      };
     }
-    return { title: "Несовместимость модов", hint: "Удалите недавно добавленные моды либо приведите загрузчик и версию игры в соответствие." };
+    return incompatible;
   }
   const benign = (l: string): boolean => l.includes("reference map") || l.includes("error loading class") || l.includes("force-disabling mixin") || l.includes("workaround") || l.includes("pdh counter") || l.includes("invalid query") || l.includes("disabling further attempts");
   for (const line of lines) {
     const l = line.toLowerCase();
     if (benign(l)) continue;
     if (l.includes("mod resolution") || l.includes("missing mods") || l.includes("incompatible mods") || l.includes("requires mod") || l.includes("mixin apply failed") || l.includes("failed to launch")) {
-      return { title: "Несовместимость модов", hint: "Удалите недавно добавленные моды либо приведите загрузчик и версию игры в соответствие." };
+      return incompatible;
     }
   }
   for (let i = lines.length - 1; i >= 0; i -= 1) {
@@ -327,7 +390,7 @@ function detectCrash(log: string): { title: string; hint: string } | null {
     const l = line.toLowerCase();
     if (benign(l)) continue;
     if (l.includes("exception in thread") || l.includes("caused by:") || l.includes("a fatal error") || l.includes("crash report") || l.includes("process crashed") || (l.includes("exit code") && !l.includes("exit code 0"))) {
-      return { title: "Краш", hint: line.trim().slice(0, 180) };
+      return { title: t("Crashed", "Краш"), hint: line.trim().slice(0, 180), generic: true };
     }
   }
   return null;
@@ -354,7 +417,7 @@ function Dropdown({ value, options, onChange, disabled, ariaLabel }: DropdownPro
       setOpen(false);
       setClosing(false);
       closeTimer.current = null;
-    }, document.documentElement.classList.contains("no-anim") ? 0 : 195);
+    }, motionMs(195));
   }
 
   useEffect(() => () => {
@@ -394,7 +457,7 @@ function Dropdown({ value, options, onChange, disabled, ariaLabel }: DropdownPro
         setOpen(false);
         setClosing(false);
         closeTimer.current = null;
-      }, document.documentElement.classList.contains("no-anim") ? 0 : 195);
+      }, motionMs(195));
       return;
     }
     setClosing(false);
@@ -464,15 +527,15 @@ function drawSkinPreview(canvas: HTMLCanvasElement, image: HTMLImageElement, sli
   part(8, 8, 8, 8, bodyX, 4);
   part(40, 8, 8, 8, bodyX, 4);
   part(44, 20, arm, 12, bodyX - arm * u, rowY);
-  part(44, 52, arm, 12, bodyX - arm * u, rowY);
+  part(44, 36, arm, 12, bodyX - arm * u, rowY);
   part(36, 52, arm, 12, bodyX + 8 * u, rowY);
-  part(36, 52, arm, 12, bodyX + 8 * u, rowY);
+  part(52, 52, arm, 12, bodyX + 8 * u, rowY);
   part(20, 20, 8, 12, bodyX, rowY);
   part(20, 36, 8, 12, bodyX, rowY);
   part(4, 20, 4, 12, bodyX, legY);
-  part(4, 52, 4, 12, bodyX, legY);
+  part(4, 36, 4, 12, bodyX, legY);
   part(20, 52, 4, 12, bodyX + 4 * u, legY);
-  part(20, 52, 4, 12, bodyX + 4 * u, legY);
+  part(4, 52, 4, 12, bodyX + 4 * u, legY);
 }
 
 function SkinPreview({ dataUrl, slim }: { dataUrl: string; slim: boolean }) {
@@ -734,6 +797,8 @@ export function App() {
   function t(en: string, ru: string): string {
     return lang === "ru" ? ru : en;
   }
+  const tRef = useRef(t);
+  tRef.current = t;
   async function setLanguage(next: "en" | "ru"): Promise<void> {
     try {
       const settings = await getLauncherApi().updateSettings({ language: next });
@@ -808,7 +873,7 @@ export function App() {
       setInstanceTab(next);
       setTabExiting(false);
       tabTimer.current = null;
-    }, animsRef.current ? 225 : 0);
+    }, motionMs(225));
   }
 
   function switchSection(next: AppSection): void {
@@ -825,7 +890,7 @@ export function App() {
       setSection(next);
       setSectionExiting(false);
       sectionTimer.current = null;
-    }, animsRef.current ? 225 : 0);
+    }, motionMs(225));
   }
 
   function switchContentType(next: ModrinthProjectType): void {
@@ -843,7 +908,7 @@ export function App() {
       setModResults([]);
       setContentExiting(false);
       contentTimer.current = null;
-    }, animsRef.current ? 225 : 0);
+    }, motionMs(225));
   }
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createForm, setCreateForm] = useState(defaultCreateForm);
@@ -854,6 +919,10 @@ export function App() {
   const [glowSize, setGlowSize] = useState(100);
   const [glowSpeed, setGlowSpeed] = useState(100);
   const [animsOn, setAnimsOn] = useState(true);
+  const [animSpeed, setAnimSpeed] = useState(100);
+  const [effects, setEffects] = useState<EffectsSettings>({ ...EFFECTS_DEFAULTS });
+  const motionSaveTimer = useRef<number | null>(null);
+  const pendingMotion = useRef<Pick<Partial<LauncherSettings>, "animationSpeed" | "effects">>({});
   const glowColor = useRef<[number, number, number]>([255, 255, 255]);
   const glowOnRef = useRef(true);
   const glowSizeRef = useRef(100);
@@ -865,6 +934,7 @@ export function App() {
   useEffect(() => () => {
     if (themeSaveTimer.current !== null) window.clearTimeout(themeSaveTimer.current);
     if (prefsSaveTimer.current !== null) window.clearTimeout(prefsSaveTimer.current);
+    if (motionSaveTimer.current !== null) window.clearTimeout(motionSaveTimer.current);
   }, []);
 
   useEffect(() => {
@@ -874,8 +944,68 @@ export function App() {
       setGlowSize(bootstrap.settings.glowSize ?? 100);
       setGlowSpeed(Math.min(bootstrap.settings.glowSpeed ?? 100, 150));
       setAnimsOn(bootstrap.settings.animationsEnabled ?? true);
+      setAnimSpeed(Math.min(200, Math.max(50, bootstrap.settings.animationSpeed ?? 100)));
+      setEffects({ ...EFFECTS_DEFAULTS, ...(bootstrap.settings.effects ?? {}) });
     }
   }, [bootstrap]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    for (const group of effectGroups) {
+      root.classList.toggle(group.cls, effects.enabled && effects[group.id]);
+    }
+  }, [effects]);
+
+  useEffect(() => {
+    const rate = animSpeed / 100;
+    motionRate = rate;
+    const adjust = (animation: Animation): void => {
+      if (animation.playbackRate !== rate) animation.playbackRate = rate;
+    };
+    for (const animation of document.getAnimations()) adjust(animation);
+    const onStart = (event: Event): void => {
+      const target = event.target;
+      if (target instanceof Element) target.getAnimations().forEach(adjust);
+      const pseudo = (event as AnimationEvent).pseudoElement;
+      if (pseudo && target instanceof Element) {
+        for (const animation of document.getAnimations()) {
+          const effect = animation.effect as KeyframeEffect | null;
+          if (effect?.target === target && effect.pseudoElement === pseudo) adjust(animation);
+        }
+      }
+    };
+    document.addEventListener("animationstart", onStart, true);
+    document.addEventListener("transitionrun", onStart, true);
+    return () => {
+      document.removeEventListener("animationstart", onStart, true);
+      document.removeEventListener("transitionrun", onStart, true);
+    };
+  }, [animSpeed]);
+
+  function saveMotion(change: Pick<Partial<LauncherSettings>, "animationSpeed" | "effects">): void {
+    if (motionSaveTimer.current !== null) window.clearTimeout(motionSaveTimer.current);
+    pendingMotion.current = { ...pendingMotion.current, ...change };
+    motionSaveTimer.current = window.setTimeout(() => {
+      motionSaveTimer.current = null;
+      const patch = pendingMotion.current;
+      pendingMotion.current = {};
+      void getLauncherApi().updateSettings(patch).then((settings) => {
+        setBootstrap((current) => current ? { ...current, settings } : current);
+        setSettingsDraft((current) => current ? { ...current, ...patch } : current);
+      }).catch((error) => setStatus(error instanceof Error ? error.message : t("Failed to save", "Не удалось сохранить")));
+    }, 350);
+  }
+
+  function setAnimSpeedValue(value: number): void {
+    setAnimSpeed(value);
+    saveMotion({ animationSpeed: value });
+  }
+
+  function setEffectFlag(id: keyof EffectsSettings, value: boolean): void {
+    const next = { ...effects, [id]: value };
+    setEffects(next);
+    saveMotion({ effects: next });
+  }
 
   useEffect(() => {
     const root = document.documentElement;
@@ -929,7 +1059,7 @@ export function App() {
       void getLauncherApi().updateSettings(snapshot).then((settings) => {
         setBootstrap((current) => current ? { ...current, settings } : current);
         setSettingsDraft((current) => current ? { ...current, ...snapshot } : current);
-      }).catch((error) => setStatus(error instanceof Error ? error.message : "Failed to save"));
+      }).catch((error) => setStatus(error instanceof Error ? error.message : t("Failed to save", "Не удалось сохранить")));
     }, 350);
   }
 
@@ -981,7 +1111,7 @@ export function App() {
   const [dropActive, setDropActive] = useState(false);
   const [windowDrag, setWindowDrag] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [modpackTarget, setModpackTarget] = useState<{ resultId: string; title: string; filePath: string; info: { totalFiles: number; packName: string; packGameVersion: string; packLoader: string } } | null>(null);
+  const [modpackTarget, setModpackTarget] = useState<{ resultId: string; title: string; filePath: string; instanceId: string; instanceName: string; instanceVersion: string; instanceLoader: string; info: { totalFiles: number; packName: string; packGameVersion: string; packLoader: string } } | null>(null);
   const [exportModal, setExportModal] = useState<{ entries: Array<{ name: string; isDir: boolean; size: number; modified: string | null }>; checked: Record<string, boolean> } | null>(null);
   const [mrpackProgress, setMrpackProgress] = useState<Record<string, { done: number; total: number }>>({});
 
@@ -1011,7 +1141,7 @@ export function App() {
     try {
       setSkins(await getLauncherApi().listSkins());
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to load skins");
+      setStatus(error instanceof Error ? error.message : t("Failed to load skins", "Не удалось загрузить скины"));
     }
   }
 
@@ -1058,13 +1188,13 @@ export function App() {
       const dataUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => reject(new Error("Could not read file"));
+        reader.onerror = () => reject(new Error(t("Could not read file", "Не удалось прочитать файл")));
         reader.readAsDataURL(file);
       });
       setSkins(await getLauncherApi().addSkin({ name: file.name.replace(/\.png$/i, ""), dataUrl, slim: false }));
       setStatus(t(`Added skin ${file.name}`, `Добавлен скин ${file.name}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to add skin");
+      setStatus(error instanceof Error ? error.message : t("Failed to add skin", "Не удалось добавить скин"));
     } finally {
       setSkinBusy(false);
     }
@@ -1078,7 +1208,7 @@ export function App() {
       setSettingsDraft((current) => current ? { ...current, activeSkinId: result.activeSkinId } : current);
       setStatus(result.uploaded ? t(`Skin uploaded to Mojang: ${name}`, `Скин загружен в Mojang: ${name}`) : t(`Selected ${name}. Others see it on servers with skin plugins.`, `Выбрано: ${name}. Другие игроки увидят его на серверах с плагинами скинов.`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to apply skin");
+      setStatus(error instanceof Error ? error.message : t("Failed to apply skin", "Не удалось применить скин"));
     } finally {
       setSkinBusy(false);
     }
@@ -1093,7 +1223,7 @@ export function App() {
       setSettingsDraft((current) => current ? { ...current, activeSkinId: result.activeSkinId } : current);
       setStatus(t(`Deleted skin ${name}`, `Скин удалён: ${name}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to delete skin");
+      setStatus(error instanceof Error ? error.message : t("Failed to delete skin", "Не удалось удалить скин"));
     } finally {
       setSkinBusy(false);
     }
@@ -1105,7 +1235,7 @@ export function App() {
       setCapes(await getLauncherApi().equipCape(capeId));
       setStatus(capeId ? t("Cape equipped", "Плащ надет") : t("Cape removed", "Плащ снят"));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to change cape");
+      setStatus(error instanceof Error ? error.message : t("Failed to change cape", "Не удалось сменить плащ"));
     } finally {
       setSkinBusy(false);
     }
@@ -1127,12 +1257,12 @@ export function App() {
       setSelectedId(started.instance.id);
       switchSection("instances");
       setMrpackProgress((current) => ({ ...current, [started.instance.id]: { done: 0, total: started.totalFiles } }));
-      setInstanceStatus((current) => ({ ...current, [started.instance.id]: `Importing ${started.instance.name}... 0%` }));
-      setStatus(t(`Importing ${started.instance.name}... 0%`, `Импорт: ${started.instance.name}... 0%`));
+      setInstanceStatus((current) => ({ ...current, [started.instance.id]: t(`Importing ${started.instance.name}... 0%`, `Импорт: ${started.instance.name}... 0%`) }));
+      setStatus(t(t(`Importing ${started.instance.name}... 0%`, `Импорт: ${started.instance.name}... 0%`), `Импорт: ${started.instance.name}... 0%`));
       try {
         await getLauncherApi().importMrpackFiles(started.instance.id);
         await refresh({ setReadyStatus: false });
-        setInstanceStatus((current) => ({ ...current, [started.instance.id]: `Imported ${started.instance.name}` }));
+        setInstanceStatus((current) => ({ ...current, [started.instance.id]: t(`Imported ${started.instance.name}`, `Импортировано: ${started.instance.name}`) }));
         setStatus(t(`Imported ${started.instance.name}`, `Импортировано: ${started.instance.name}`));
       } finally {
         setMrpackProgress((current) => {
@@ -1142,16 +1272,26 @@ export function App() {
         });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Modpack import failed";
+      const message = error instanceof Error ? error.message : t("Modpack import failed", "Не удалось импортировать модпак");
       if (startedId) {
         const sid: string = startedId;
         setInstanceStatus((current) => ({ ...current, [sid]: message }));
+        const fresh = await getLauncherApi().getBootstrap().catch(() => null);
+        if (fresh) {
+          setBootstrap(fresh);
+          setSettingsDraft(fresh.settings);
+          if (!fresh.instances.some((item) => item.id === sid)) {
+            setSelectedId(fresh.activeInstanceId ?? fresh.instances[0]?.id ?? null);
+          }
+        }
       }
       setStatus(message);
     } finally {
       setBusy(false);
     }
   }
+  const importMrpackRef = useRef(importMrpackByPath);
+  importMrpackRef.current = importMrpackByPath;
 
   useEffect(() => {
     function hasFiles(event: DragEvent): boolean {
@@ -1195,15 +1335,15 @@ export function App() {
           }
         }
         if (!paths.length) {
-          setStatus(t("Could not read the dropped file", "Не удалось прочитать перетащенный файл"));
+          setStatus(tRef.current("Could not read the dropped file", "Не удалось прочитать перетащенный файл"));
           return;
         }
         const mrpack = paths.find((item) => /\.mrpack$/i.test(item));
         if (!mrpack) {
-          setStatus(t("Only .mrpack modpack files can be dropped here", "Сюда можно перетаскивать только файлы .mrpack"));
+          setStatus(tRef.current("Only .mrpack modpack files can be dropped here", "Сюда можно перетаскивать только файлы .mrpack"));
           return;
         }
-        void importMrpackByPath(mrpack);
+        void importMrpackRef.current(mrpack);
       })();
     }
     window.addEventListener("dragenter", onDragEnter);
@@ -1239,7 +1379,7 @@ export function App() {
         await activateSkin(id, current?.name ?? "skin");
       }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to update skin");
+      setStatus(error instanceof Error ? error.message : t("Failed to update skin", "Не удалось обновить скин"));
     } finally {
       setSkinBusy(false);
     }
@@ -1260,11 +1400,11 @@ export function App() {
         const id = update.key.slice(7);
         if (update.phase === "java") {
           const label = transferLabel({ received: update.received, total: update.total });
-          setInstanceStatus((current) => ({ ...current, [id]: t(`Downloading Java ${label ?? "..."}`, `Загрузка Java ${label ?? "..."}`) }));
+          setInstanceStatus((current) => ({ ...current, [id]: tRef.current(`Downloading Java ${label ?? "..."}`, `Загрузка Java ${label ?? "..."}`) }));
         } else if (update.phase === "loader") {
-          setInstanceStatus((current) => ({ ...current, [id]: t("Installing loader...", "Установка загрузчика...") }));
+          setInstanceStatus((current) => ({ ...current, [id]: tRef.current("Installing loader...", "Установка загрузчика...") }));
         } else {
-          const label = update.phase === "assets" ? t("Preparing assets", "Подготовка ассетов") : t("Preparing libraries", "Подготовка библиотек");
+          const label = update.phase === "assets" ? tRef.current("Preparing assets", "Подготовка ассетов") : tRef.current("Preparing libraries", "Подготовка библиотек");
           setInstanceStatus((current) => ({ ...current, [id]: `${label} ${update.doneFiles ?? 0}/${update.totalFiles ?? 0}` }));
         }
         return;
@@ -1312,7 +1452,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    refresh().catch((error) => setStatus(error instanceof Error ? error.message : "Failed to load launcher"));
+    refresh().catch((error) => setStatus(error instanceof Error ? error.message : t("Failed to load launcher", "Не удалось загрузить лаунчер")));
   }, [refresh]);
 
   const refreshVersions = useCallback(async () => {
@@ -1321,7 +1461,7 @@ export function App() {
       setGameVersions(versions);
       setCreateForm((form) => (versions.includes(form.gameVersion) ? form : { ...form, gameVersion: versions[0] ?? form.gameVersion }));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to load Minecraft versions");
+      setStatus(error instanceof Error ? error.message : t("Failed to load Minecraft versions", "Не удалось загрузить версии Minecraft"));
     }
     try {
       setLoaderSupport(await getLauncherApi().getLoaderSupport());
@@ -1360,7 +1500,7 @@ export function App() {
     try {
       setJavaInstalls(await getLauncherApi().getJavaInstallations());
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to load Java installations", "Не удалось загрузить установленные версии Java"));
+      setStatus(error instanceof Error ? error.message : tRef.current("Failed to load Java installations", "Не удалось загрузить установленные версии Java"));
     }
   }, []);
 
@@ -1437,7 +1577,7 @@ export function App() {
           current = null;
           glow.classList.remove("on");
         }
-        raf = requestAnimationFrame(place);
+        raf = 0;
         return;
       }
       const rect = current.getBoundingClientRect();
@@ -1465,6 +1605,7 @@ export function App() {
         gy = cy;
         glow.classList.toggle("on", !!next);
       }
+      if (next && !raf) raf = requestAnimationFrame(place);
     }
 
     function onLeave(): void {
@@ -1472,7 +1613,6 @@ export function App() {
       glow.classList.remove("on");
     }
 
-    raf = requestAnimationFrame(place);
     document.addEventListener("mousemove", onMove);
     document.documentElement.addEventListener("mouseleave", onLeave);
     return () => {
@@ -1496,7 +1636,7 @@ export function App() {
         setStatus(t("Browse cancelled", "Операция отменена"));
       }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : `Java ${major} action failed`);
+      setStatus(error instanceof Error ? error.message : t(`Java ${major} action failed`, `Java ${major}: действие не выполнено`));
     } finally {
       setJavaBusy(null);
     }
@@ -1533,8 +1673,8 @@ export function App() {
   const lastActivity = useMemo(() => {
     const stamps = (bootstrap?.instances ?? []).map((item) => item.updatedAt ?? "").filter(Boolean);
     if (!stamps.length) return "";
-    return formatRelative(stamps.sort().reverse()[0]);
-  }, [bootstrap?.instances]);
+    return formatRelative(stamps.sort().reverse()[0], lang);
+  }, [bootstrap?.instances, lang]);
 
   function loadersForVersion(version: string): ModLoader[] {
     if (!loaderSupport) return loaders;
@@ -1607,7 +1747,7 @@ export function App() {
       setSelectedId(instance.id);
       say(t(`Created ${instance.name}`, `Создано: ${instance.name}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to create instance");
+      setStatus(error instanceof Error ? error.message : t("Failed to create instance", "Не удалось создать инстанцию"));
     } finally {
       setCreating(false);
     }
@@ -1620,7 +1760,7 @@ export function App() {
       setBootstrap((current) => current ? { ...current, instances: current.instances.map((item) => item.id === updated.id ? updated : item) } : current);
       say(t(`Saved ${updated.name}`, `Сохранено: ${updated.name}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to save instance");
+      setStatus(error instanceof Error ? error.message : t("Failed to save instance", "Не удалось сохранить инстанцию"));
     }
   }
   async function exportSelected(): Promise<void> {
@@ -1628,7 +1768,7 @@ export function App() {
     setBusy(true);
     try {
       const entries = await getLauncherApi().listExportEntries(selected.id);
-      const defaults = new Set(["mods", "resourcepacks", "shaderpacks", "datapacks", "config", "options.txt", "servers.dat", "optionsof.txt"]);
+      const defaults = new Set(["mods", "resourcepacks", "shaderpacks", "datapacks", "config", "defaultconfigs", "options.txt", "optionsof.txt", "optionsshaders.txt", "servers.dat"]);
       const checked: Record<string, boolean> = {};
       for (const entry of entries) {
         checked[entry.name] = defaults.has(entry.name);
@@ -1668,9 +1808,9 @@ export function App() {
       await getLauncherApi().removeInstance(selected.id);
       setSelectedId(null);
       await refresh();
-      say(t(`Deleted ${selected.name} with all its files`, `Удалено: ${selected.name} со всеми файлами`));
+      setStatus(t(`Deleted ${selected.name} with all its files`, `Удалено: ${selected.name} со всеми файлами`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to delete instance");
+      setStatus(error instanceof Error ? error.message : t("Failed to delete instance", "Не удалось удалить инстанцию"));
     } finally {
       setBusy(false);
     }
@@ -1680,9 +1820,9 @@ export function App() {
     if (!selected) return;
     try {
       const error = await getLauncherApi().openInstanceFolder(selected.id);
-      if (error) setStatus(`Could not open folder: ${error}`);
+      if (error) setStatus(t(`Could not open folder: ${error}`, `Не удалось открыть папку: ${error}`));
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : "Could not open folder");
+      setStatus(err instanceof Error ? err.message : t("Could not open folder", "Не удалось открыть папку"));
     }
   }
 
@@ -1692,7 +1832,7 @@ export function App() {
     try {
       setLocalContent(await getLauncherApi().getLocalContent(selected.id));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to read instance files");
+      setStatus(error instanceof Error ? error.message : t("Failed to read instance files", "Не удалось прочитать файлы инстанции"));
     } finally {
       setBusy(false);
     }
@@ -1705,7 +1845,7 @@ export function App() {
       setLocalContent(await getLauncherApi().toggleLocalContent({ instanceId: selected.id, fileName: item.fileName, kind: item.kind }));
       say(`${item.enabled ? t("Disabled", "Отключено") : t("Enabled", "Включено")} ${item.displayName}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to toggle file");
+      setStatus(error instanceof Error ? error.message : t("Failed to toggle file", "Не удалось переключить файл"));
     } finally {
       setBusy(false);
     }
@@ -1719,10 +1859,15 @@ export function App() {
       say(t(`Deleted ${item.displayName}`, `Удалено: ${item.displayName}`));
       await refresh();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to delete file");
+      setStatus(error instanceof Error ? error.message : t("Failed to delete file", "Не удалось удалить файл"));
     } finally {
       setBusy(false);
     }
+  }
+
+  function cleanLaunchError(error: unknown): string {
+    const message = error instanceof Error ? error.message : t("Failed to prepare Java runtime", "Не удалось подготовить Java");
+    return message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "");
   }
 
   async function launchSelected(): Promise<void> {
@@ -1736,7 +1881,7 @@ export function App() {
       await refresh({ setReadyStatus: false });
       await refreshRunning();
     } catch (error) {
-      say(error instanceof Error ? error.message : "Failed to prepare Java runtime");
+      say(cleanLaunchError(error));
     } finally {
       setLaunchingIds((current) => current.filter((id) => id !== selected.id));
     }
@@ -1748,7 +1893,7 @@ export function App() {
     try {
       await getLauncherApi().cancelLaunch(selected.id);
     } catch (error) {
-      say(error instanceof Error ? error.message : "Failed to cancel launch");
+      say(error instanceof Error ? error.message : t("Failed to cancel launch", "Не удалось отменить запуск"));
     }
   }
 
@@ -1760,7 +1905,7 @@ export function App() {
       say(result.message);
       await refreshRunning();
     } catch (error) {
-      say(error instanceof Error ? error.message : "Failed to stop instance");
+      say(error instanceof Error ? error.message : t("Failed to stop instance", "Не удалось остановить инстанцию"));
     } finally {
       setBusy(false);
     }
@@ -1806,16 +1951,11 @@ export function App() {
 
   async function refreshInstanceLogs(silent: boolean): Promise<void> {
     if (!selectedId) return;
-    const live = runningIds.includes(selectedId) || launchingIds.includes(selectedId);
-    if (!live) {
-      setInstanceLogs(null);
-      return;
-    }
     try {
       const logs = await getLauncherApi().getInstanceLogs(selectedId);
-      setInstanceLogs((prev) => (prev && prev.log === logs.log && prev.plan === logs.plan && prev.hasLog === logs.hasLog ? prev : logs));
+      setInstanceLogs((prev) => (prev && prev.log === logs.log && prev.plan === logs.plan && prev.hasLog === logs.hasLog && prev.crash?.file === logs.crash?.file ? prev : logs));
     } catch (error) {
-      if (!silent) say(error instanceof Error ? error.message : "Failed to read logs");
+      if (!silent) say(error instanceof Error ? error.message : t("Failed to read logs", "Не удалось прочитать журнал"));
     }
   }
 
@@ -1826,13 +1966,13 @@ export function App() {
   const logsLive = selectedId !== null && instanceTab === "logs" && (runningIds.includes(selectedId) || launchingIds.includes(selectedId));
   const crashAssist = useMemo(() => {
     if (!instanceLogs || !instanceLogs.hasLog) return null;
-    const found = detectCrash(instanceLogs.log);
-    if (found && found.title !== "Crashed") return found;
+    const found = detectCrash(instanceLogs.log, t);
+    if (found && !found.generic) return found;
     if (instanceLogs.crash) {
-      return { title: found?.title ?? "Crashed", hint: `${instanceLogs.crash.description} (${instanceLogs.crash.file})` };
+      return { title: found?.title ?? t("Crashed", "Краш"), hint: `${instanceLogs.crash.description} (${instanceLogs.crash.file})` };
     }
     return found;
-  }, [instanceLogs]);
+  }, [instanceLogs, lang]);
 
   async function copyCrashAssist(): Promise<void> {
     if (!instanceLogs || !crashAssist) return;
@@ -1846,7 +1986,7 @@ export function App() {
   }
 
   useEffect(() => {
-    if (!logsLive || !selectedId) return;
+    if (instanceTab !== "logs" || !selectedId) return;
     let stale = false;
     const apply = (logs: { log: string; plan: string; hasLog: boolean; crash: { file: string; description: string } | null }): void => {
       if (stale) return;
@@ -1855,14 +1995,14 @@ export function App() {
     void getLauncherApi().getInstanceLogs(selectedId).then(apply).catch(() => {
       if (!stale) setInstanceLogs({ log: "", plan: "", hasLog: false, crash: null });
     });
-    const timer = window.setInterval(() => {
+    const timer = logsLive ? window.setInterval(() => {
       void getLauncherApi().getInstanceLogs(selectedId).then(apply).catch(() => undefined);
-    }, 1500);
+    }, 1500) : null;
     return () => {
       stale = true;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearInterval(timer);
     };
-  }, [logsLive, selectedId]);
+  }, [instanceTab, logsLive, selectedId]);
 
   useEffect(() => {
     if (instanceTab !== "logs" || !logsFollow) return;
@@ -1936,7 +2076,7 @@ export function App() {
       setSelectedCategories(query.categories);
       say(t(`Found ${response.totalHits} ${contentLabel(contentType).toLowerCase()} on Modrinth`, `Найдено: ${response.totalHits} — ${(contentTypes.find((c) => c.id === contentType)?.labelRu ?? "").toLowerCase()} на Modrinth`));
     } catch (error) {
-      say(error instanceof Error ? error.message : "Modrinth search failed");
+      say(error instanceof Error ? error.message : t("Modrinth search failed", "Поиск на Modrinth не удался"));
     } finally {
       setBusy(false);
     }
@@ -1962,7 +2102,7 @@ export function App() {
         });
         await importMrpackByPath(filePath);
       } catch (error) {
-        say(error instanceof Error ? error.message : `Failed to download ${result.title}`);
+        say(error instanceof Error ? error.message : t(`Failed to download ${result.title}`, `Не удалось скачать ${result.title}`));
       } finally {
         setDownloadingIds((current) => current.filter((id) => id !== result.id));
         setTransferPct((current) => {
@@ -1981,12 +2121,14 @@ export function App() {
         name: result.title,
         slug: result.slug,
         iconUrl: result.iconUrl,
-        projectType: result.projectType
+        projectType: result.projectType,
+        gameVersions: currentContentQuery().versions,
+        loaders: currentContentQuery().loaders
       });
       setBootstrap((current) => current ? { ...current, instances: current.instances.map((item) => item.id === updated.id ? updated : item) } : current);
       say(t(`Installed ${result.title}`, `Установлено: ${result.title}`));
     } catch (error) {
-      say(error instanceof Error ? error.message : `Failed to download ${result.title}`);
+      say(error instanceof Error ? error.message : t(`Failed to download ${result.title}`, `Не удалось скачать ${result.title}`));
     } finally {
       setDownloadingIds((current) => current.filter((id) => id !== result.id));
       setTransferPct((current) => {
@@ -2011,7 +2153,7 @@ export function App() {
       });
       const info = await getLauncherApi().importMrpackStartToInstance(filePath, selected.id);
       if (info.packGameVersion !== selected.gameVersion || info.packLoader !== selected.loader) {
-        setModpackTarget({ resultId: result.id, title: result.title, filePath, info });
+        setModpackTarget({ resultId: result.id, title: result.title, filePath, instanceId: selected.id, instanceName: selected.name, instanceVersion: selected.gameVersion, instanceLoader: selected.loader, info });
         say(t(`${info.packName}: ${info.packGameVersion} / ${info.packLoader} vs instance ${selected.gameVersion} / ${selected.loader}`, `${info.packName}: ${info.packGameVersion} / ${info.packLoader}, в инстанции ${selected.gameVersion} / ${selected.loader}`));
         return;
       }
@@ -2026,7 +2168,7 @@ export function App() {
         });
       }
     } catch (error) {
-      say(error instanceof Error ? error.message : `Failed to download ${result.title}`);
+      say(error instanceof Error ? error.message : t(`Failed to download ${result.title}`, `Не удалось скачать ${result.title}`));
       setDownloadingIds((current) => current.filter((id) => id !== result.id));
       setTransferPct((current) => {
         const next = { ...current };
@@ -2044,10 +2186,10 @@ export function App() {
       setInstanceStatus((current) => ({ ...current, [instanceId]: t(`Importing into ${instanceName}...`, `Импорт в ${instanceName}...`) }));
       await getLauncherApi().importMrpackFiles(instanceId);
       await refresh({ setReadyStatus: false });
-      setInstanceStatus((current) => ({ ...current, [instanceId]: `Imported into ${instanceName}` }));
+      setInstanceStatus((current) => ({ ...current, [instanceId]: t(`Imported into ${instanceName}`, `Импортировано в ${instanceName}`) }));
       setStatus(t(`Imported into ${instanceName}`, `Импортировано в ${instanceName}`));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Modpack import failed";
+      const message = error instanceof Error ? error.message : t("Modpack import failed", "Не удалось импортировать модпак");
       setInstanceStatus((current) => ({ ...current, [instanceId]: message }));
       setStatus(message);
     } finally {
@@ -2061,11 +2203,11 @@ export function App() {
   }
 
   async function confirmModpackTarget(): Promise<void> {
-    if (!modpackTarget || !selected) return;
+    if (!modpackTarget) return;
     const target = modpackTarget;
     setModpackTarget(null);
     try {
-      await finishModpackToInstance(selected.id, selected.name);
+      await finishModpackToInstance(target.instanceId, target.instanceName);
     } finally {
       setDownloadingIds((current) => current.filter((id) => id !== target.resultId));
       setTransferPct((current) => {
@@ -2077,11 +2219,11 @@ export function App() {
   }
 
   async function cancelModpackTarget(): Promise<void> {
-    if (!modpackTarget || !selected) return;
+    if (!modpackTarget) return;
     const target = modpackTarget;
     setModpackTarget(null);
     try {
-      await getLauncherApi().importMrpackCancel(selected.id);
+      await getLauncherApi().importMrpackCancel(target.instanceId);
     } catch {
     } finally {
       setDownloadingIds((current) => current.filter((id) => id !== target.resultId));
@@ -2102,7 +2244,7 @@ export function App() {
       setStatus(result.message);
       await refresh({ setReadyStatus: false });
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Microsoft login failed");
+      setStatus(error instanceof Error ? error.message : t("Microsoft login failed", "Не удалось войти через Microsoft"));
     } finally {
       setBusy(false);
     }
@@ -2118,7 +2260,7 @@ export function App() {
       await refresh({ setReadyStatus: false });
       setStatus(t(`Playing as ${name}`, `Вы играете как ${name}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to switch account");
+      setStatus(error instanceof Error ? error.message : t("Failed to switch account", "Не удалось сменить аккаунт"));
     } finally {
       setBusy(false);
     }
@@ -2133,7 +2275,7 @@ export function App() {
       await refresh({ setReadyStatus: false });
       setStatus(t(`Removed ${name}`, `Удалено: ${name}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to remove account");
+      setStatus(error instanceof Error ? error.message : t("Failed to remove account", "Не удалось удалить аккаунт"));
     } finally {
       setBusy(false);
     }
@@ -2164,7 +2306,7 @@ export function App() {
       await refresh({ setReadyStatus: false });
       setStatus(t(`Ely.by as ${elyName}`, `Ely.by: ${elyName}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Ely.by login failed");
+      setStatus(error instanceof Error ? error.message : t("Ely.by login failed", "Не удалось войти через Ely.by"));
     } finally {
       setBusy(false);
     }
@@ -2238,29 +2380,29 @@ export function App() {
             {selected ? <>
               <nav className="instance-tabs" aria-label={t("Instance settings", "Настройки инстанции")}>{instanceTabs.map(({ id, label, icon: Icon }) => <button key={id} className={instanceTab === id ? "tab-button active" : "tab-button"} onClick={() => switchTab(id)}><Icon size={16} />{label}</button>)}</nav>
               <section className={tabExiting ? "settings-surface tab-exiting" : "settings-surface"} key={instanceTab}>
-                {instanceTab === "general" && <div className="settings-content"><div className="surface-heading"><FolderCog size={19} /><div><h3>{t("General", "Основные")}</h3><span>{t("Identity and location for this installation.", "Название и расположение этой инстанции.")}</span></div></div><label>{t("Instance name", "Название инстанции")}<input value={selected.name} onChange={(event) => void updateSelected({ name: event.target.value })} /></label><div className="readonly-path"><HardDrive size={16} /><span>{selected.directory}</span><button type="button" className="path-open" onClick={() => void openSelectedFolder()} title={t("Open instance folder", "Открыть папку инстанции")}><FolderOpen size={15} /></button></div><button onClick={() => void exportSelected()} disabled={busy || isSelectedRunning} title={t("Export instance as .mrpack", "Экспортировать инстанцию в .mrpack")}><Archive size={16} /> {t("Export .mrpack", "Экспорт .mrpack")}</button><button className="danger-button" onClick={() => setConfirmDelete(true)} disabled={busy || isSelectedRunning} title={isSelectedRunning ? t("Stop the instance first", "Сначала остановите инстанцию") : t("Delete the instance and its folder", "Удалить инстанцию с папкой")}><Trash2 size={16} /> {t("Delete instance", "Удалить инстанцию")}</button></div>}
-                {instanceTab === "versions" && <div className="settings-content anim-stagger"><div className="surface-heading"><Waypoints size={19} /><div><h3>{t("Versions", "Версии")}</h3><span>{t("Minecraft version and loader for this instance.", "Версия Minecraft и загрузчик.")}</span></div></div><div className="two-col"><label>{t("Minecraft version", "Версия Minecraft")}{gameVersions ? <Dropdown value={selected.gameVersion} options={withFallback(versionsForLoader(selected.loader), selected.gameVersion)} ariaLabel={t("Minecraft version", "Версия Minecraft")} onChange={(version) => { const compatible = loadersForVersion(version); void updateSelected(compatible.includes(selected.loader) ? { gameVersion: version } : { gameVersion: version, loader: "vanilla" }); }} /> : <input value={selected.gameVersion} onChange={(event) => void updateSelected({ gameVersion: event.target.value })} placeholder="1.21.1" />}</label><label>{t("Loader", "Загрузчик")}<Dropdown value={selected.loader} options={withFallback(selectedLoaders ?? loadersForVersion(selected.gameVersion), selected.loader)} ariaLabel={t("Loader", "Загрузчик")} onChange={(loader) => { const next = loader as ModLoader; const versions = versionsForLoader(next); void updateSelected(versions.includes(selected.gameVersion) ? { loader: next } : { loader: next, gameVersion: versions[0] ?? selected.gameVersion }); }} /></label></div><label>{t("Loader version", "Версия загрузчика")}{selected.loader === "vanilla" ? <span className="muted">{t("Not needed for vanilla", "Не требуется для ванильной версии")}</span> : loaderVersions ? <Dropdown value={selected.loaderVersion?.trim() || t("Latest", "Последняя")} options={(selected.loaderVersion?.trim() ? [t("Latest", "Последняя"), selected.loaderVersion.trim(), ...loaderVersions.filter((item) => item !== selected.loaderVersion?.trim())] : [t("Latest", "Последняя"), ...loaderVersions])} ariaLabel={t("Loader version", "Версия загрузчика")} onChange={(label) => void updateSelected({ loaderVersion: label === t("Latest", "Последняя") ? "" : label })} /> : <input value="" disabled placeholder={t("Loading versions...", "Загрузка версий...")} />}</label></div>}
+                {instanceTab === "general" && <div className="settings-content"><div className="surface-heading"><FolderCog size={19} /><div><h3>{t("General", "Основные")}</h3><span>{t("Identity and location for this installation.", "Название и расположение этой инстанции.")}</span></div></div><label>{t("Instance name", "Название инстанции")}<CommitInput key={selected.id} value={selected.name} onCommit={(name) => void updateSelected({ name })} /></label><div className="readonly-path"><HardDrive size={16} /><span>{selected.directory}</span><button type="button" className="path-open" onClick={() => void openSelectedFolder()} title={t("Open instance folder", "Открыть папку инстанции")}><FolderOpen size={15} /></button></div><button onClick={() => void exportSelected()} disabled={busy || isSelectedRunning} title={t("Export instance as .mrpack", "Экспортировать инстанцию в .mrpack")}><Archive size={16} /> {t("Export .mrpack", "Экспорт .mrpack")}</button><button className="danger-button" onClick={() => setConfirmDelete(true)} disabled={busy || isSelectedRunning} title={isSelectedRunning ? t("Stop the instance first", "Сначала остановите инстанцию") : t("Delete the instance and its folder", "Удалить инстанцию с папкой")}><Trash2 size={16} /> {t("Delete instance", "Удалить инстанцию")}</button></div>}
+                {instanceTab === "versions" && <div className="settings-content anim-stagger"><div className="surface-heading"><Waypoints size={19} /><div><h3>{t("Versions", "Версии")}</h3><span>{t("Minecraft version and loader for this instance.", "Версия Minecraft и загрузчик.")}</span></div></div><div className="two-col"><label>{t("Minecraft version", "Версия Minecraft")}{gameVersions ? <Dropdown value={selected.gameVersion} options={withFallback(versionsForLoader(selected.loader), selected.gameVersion)} ariaLabel={t("Minecraft version", "Версия Minecraft")} onChange={(version) => { const compatible = loadersForVersion(version); void updateSelected(compatible.includes(selected.loader) ? { gameVersion: version } : { gameVersion: version, loader: "vanilla" }); }} /> : <CommitInput key={selected.id} value={selected.gameVersion} onCommit={(gameVersion) => void updateSelected({ gameVersion })} placeholder="1.21.1" />}</label><label>{t("Loader", "Загрузчик")}<Dropdown value={selected.loader} options={withFallback(selectedLoaders ?? loadersForVersion(selected.gameVersion), selected.loader)} ariaLabel={t("Loader", "Загрузчик")} onChange={(loader) => { const next = loader as ModLoader; const versions = versionsForLoader(next); void updateSelected(versions.includes(selected.gameVersion) ? { loader: next } : { loader: next, gameVersion: versions[0] ?? selected.gameVersion }); }} /></label></div><label>{t("Loader version", "Версия загрузчика")}{selected.loader === "vanilla" ? <span className="muted">{t("Not needed for vanilla", "Не требуется для ванильной версии")}</span> : loaderVersions ? <Dropdown value={selected.loaderVersion?.trim() || t("Latest", "Последняя")} options={(selected.loaderVersion?.trim() ? [t("Latest", "Последняя"), selected.loaderVersion.trim(), ...loaderVersions.filter((item) => item !== selected.loaderVersion?.trim())] : [t("Latest", "Последняя"), ...loaderVersions])} ariaLabel={t("Loader version", "Версия загрузчика")} onChange={(label) => void updateSelected({ loaderVersion: label === t("Latest", "Последняя") ? "" : label })} /> : <input value="" disabled placeholder={t("Loading versions...", "Загрузка версий...")} />}</label></div>}
                 {instanceTab === "files" && <div className="settings-content" key={`files-${selected.id}`}><div className="surface-heading"><Folder size={19} /><div><h3>{t("Local files", "Локальные файлы")}</h3><span>{t("Everything inside this instance folders, including files added by hand.", "Всё содержимое папок инстанции, включая файлы, добавленные вручную.")}</span></div></div><div className="button-row"><button onClick={() => void refreshLocalContent()} disabled={busy}><RefreshCw size={15} /> {t("Refresh", "Обновить")}</button><button onClick={() => void openSelectedFolder()}><FolderOpen size={15} /> {t("Open folder", "Открыть папку")}</button><input value={fileQuery} onChange={(event) => setFileQuery(event.target.value)} placeholder={t("Search files", "Поиск файлов")} aria-label={t("Search files", "Поиск файлов")} /><label className="sort-label">{t("Sort by:", "Сортировать по:")}<Dropdown value={t(fileSortOptions.find((option) => option.id === fileSort)?.label ?? "Name A-Z", fileSortLabelRu[fileSortOptions.find((option) => option.id === fileSort)?.label ?? ""] ?? "")} options={fileSortOptions.map((option) => t(option.label, fileSortLabelRu[option.label] ?? option.label))} ariaLabel={t("Sort files", "Сортировка файлов")} onChange={(label) => { const found = fileSortOptions.find((option) => option.label === label || t(option.label, fileSortLabelRu[option.label] ?? option.label) === label); if (found) setFileSort(found.id); }} /></label></div>{localContent === null ? <span className="muted">{t("Reading instance folders...", "Чтение папок инстанции...")}</span> : fileGroups.map((group) => { const rows = filterSortFiles(localContent.filter((item) => item.kind === group.id), fileQuery, fileSort); return <div key={group.id} className="file-group"><div className="section-title">{t(group.label, group.labelRu)} · {rows.filter((row) => row.enabled).length}/{rows.length}</div>{rows.length ? rows.map((item) => <div key={item.kind + item.fileName} className={item.enabled ? "file-row" : "file-row disabled"}>{item.iconUrl ? <img className="file-icon" src={item.iconUrl} alt="" /> : <div className="file-icon mod-icon">{item.displayName[0] ?? "?"}</div>}<div className="file-main"><strong>{item.displayName}</strong><small className="muted">{item.fileName} · {formatBytes(item.size)}{item.modified ? ` · ${formatDateTime(item.modified)}` : ""}</small></div><div className="file-side">{item.source === "modrinth" ? <span className="tag-chip">Modrinth</span> : item.source === "manual" ? <span className="tag-chip manual">{t("Manual", "Вручную")}</span> : <span className="tag-chip missing">{t("Missing file", "Файл отсутствует")}</span>}{item.enabled ? null : <span className="tag-chip">{t("Off", "Отключено")}</span>}{item.source !== "missing" ? <button type="button" title={item.enabled ? t("Disable", "Выключить") : t("Enable", "Включить")} onClick={() => void toggleLocalItem(item)} disabled={busy}>{item.enabled ? <EyeOff size={15} /> : <Eye size={15} />}</button> : null}<button type="button" title={t("Delete", "Удалить")} onClick={() => void removeLocalItem(item)} disabled={busy}><Trash2 size={15} /></button></div></div>) : <span className="muted">{t("Empty — drop files into the folder or install from Content.", "Пусто — закиньте файлы в папку или поставьте из контента.")}</span>}</div>; })}</div>}
-                {instanceTab === "runtime" && <div className="settings-content"><div className="surface-heading"><Cpu size={19} /><div><h3>RAM</h3><span>{t("Allocated memory for this instance only.", "Объём памяти только для этой инстанции.")}</span></div></div><label>{t("Allocated RAM", "Объём памяти")}<MemorySlider value={selected.maxMemoryMb ?? bootstrap.settings.maxMemoryMb} onChange={(next) => void updateSelected({ maxMemoryMb: next })} /></label><label>{t("Extra JVM flags", "Дополнительные флаги JVM")}<textarea value={selected.extraJvmArgs ?? ""} rows={2} spellCheck={false} placeholder={bootstrap.settings.extraJvmArgs || "-XX:+UseG1GC -XX:MaxGCPauseMillis=50"} onChange={(event) => void updateSelected({ extraJvmArgs: event.target.value })} /></label></div>}
-                {instanceTab === "logs" && <div className="settings-content"><div className="surface-heading"><ScrollText size={19} /><div><h3>{t("Logs", "Журнал")}</h3><span>{isSelectedRunning ? t("Live tail · running", "Текущий журнал · запущено") : t("Launch the instance to see live logs.", "Запустите инстанцию, чтобы увидеть журнал.")}</span></div></div><div className="button-row"><button onClick={() => void refreshInstanceLogs(false)} disabled={busy}><RefreshCw size={15} /> Refresh</button><button onClick={() => void openSelectedFolder()}><FolderOpen size={15} /> Open folder</button><button type="button" onClick={() => setLogsFollow((v) => !v)} title={t("Auto-scroll to bottom on new lines", "Автоматическая прокрутка вниз при новых строках")}>{logsFollow ? t("Follow: on", "Автопрокрутка: вкл") : t("Follow: off", "Автопрокрутка: выкл")}</button></div>{instanceLogs === null ? <span className="muted">{t("No live logs. Launch the instance.", "Журнал пуст. Запустите инстанцию.")}</span> : !instanceLogs.hasLog ? <span className="muted">{t("Starting... waiting for log.", "Запуск... Ожидание журнала.")}</span> : <>{crashAssist && !isSelectedRunning && !isLaunching ? <div className="crash-banner" role="alert"><XCircle size={17} /><div><strong>{crashAssist.title}</strong><span>{crashAssist.hint}</span></div><button onClick={() => void copyCrashAssist()} title={t("Copy reason and log tail", "Скопировать причину и хвост журнала")}><Copy size={14} /> {t("Copy", "Копировать")}</button></div> : null}<pre ref={logPreRef} className="log-view">{instanceLogs.log || t("(empty log)", "(журнал пуст)")}</pre>{instanceLogs.plan ? <details className="log-plan"><summary>{t("Launch plan", "План запуска")}</summary><pre className="log-view small">{instanceLogs.plan}</pre></details> : null}</>}</div>}
-                {instanceTab === "content" && <div className={contentExiting ? "settings-content content-content content-exiting" : "settings-content content-content"} key={`${contentType}-${selected.id}`}><div className="surface-heading"><PackageSearch size={19} /><div><h3>{t(`Discover ${contentLabel(contentType).toLowerCase()}`, `Обзор ${(contentTypes.find((c) => c.id === contentType)?.labelRu ?? "").toLowerCase()}`)}</h3><span>{t(`Browse Modrinth for ${selected.gameVersion} / ${selected.loader}.`, `Modrinth: ${selected.gameVersion} / ${selected.loader}.`)}</span></div></div><nav className="content-types" aria-label={t("Content type", "Тип контента")}>{visibleContentTypes.map(({ id, label, labelRu, icon: Icon }) => <button key={id} className={contentType === id ? "content-type active" : "content-type"} onClick={() => switchContentType(id)}><Icon size={15} /><span>{t(label, labelRu)}</span></button>)}</nav><div className="content-browser"><div className="content-main"><div className="search-row"><input value={modQuery} onChange={(event) => setModQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void runContentSearch({ page: 1 }); }} placeholder={t("Search or leave empty to browse", "Поиск. Оставьте пустым, чтобы показать всё")} /><button onClick={() => void runContentSearch({ page: 1 })} disabled={busy}><Search size={16} /> {t("Search", "Найти")}</button></div><div className="browse-controls"><label className="sort-label">{t("Sort by:", "Сортировать по:")}<Dropdown value={t(sortLabel, sortLabelRu[sortLabel] ?? sortLabel)} options={sortOptions.map((option) => t(option.label, sortLabelRu[option.label] ?? option.label))} ariaLabel={t("Sort by", "Сортировка")} onChange={(label) => { const found = sortOptions.find((option) => option.label === label || t(option.label, sortLabelRu[option.label] ?? option.label) === label); if (found) void runContentSearch({ page: 1, sort: found.id }); }} /></label><label className="sort-label">{t("View:", "На странице:")}<Dropdown value={String(contentLimit)} options={["10", "20", "50"]} ariaLabel={t("Results per page", "Результатов на странице")} onChange={(label) => void runContentSearch({ page: 1, limit: Number(label) })} /></label>{totalHits > 0 ? <span className="muted">{totalHits} {t(totalHits === 1 ? "result" : "results", totalHits % 10 === 1 && totalHits % 100 !== 11 ? "результат" : totalHits % 10 >= 2 && totalHits % 10 <= 4 && (totalHits % 100 < 10 || totalHits % 100 >= 20) ? "результата" : "результатов")}</span> : null}</div><div className={busy ? "mod-results refreshing" : "mod-results"}>{visibleResults.map((result) => <article key={`${result.projectType}-${result.id}`} className="mod-card">{result.iconUrl ? <img className="mod-card-icon" src={result.iconUrl} alt="" /> : <div className="mod-card-icon mod-icon">{result.title[0]}</div>}<div className="mod-card-main"><div className="mod-card-title"><strong>{result.title}</strong>{result.author ? <span>by {result.author}</span> : null}</div><p>{result.summary}</p>{result.categories.length ? <div className="mod-card-tags">{result.categories.slice(0, 5).map((category) => <span key={category} className="tag-chip">{category}</span>)}</div> : null}</div><div className="mod-card-side">{installedProjectIds.has(result.id) ? <span className="installed-badge"><Check size={14} /> {t("Installed", "Установлен")}</span> : <button className="install-button" onClick={() => void installContent(result)} disabled={busy || !isInstallable(result) || downloadingIds.includes(result.id)} title={result.projectType === "modpack" ? t(`Download ${result.title}`, `Скачать ${result.title}`) : t(`Install ${result.title}`, `Установить ${result.title}`)}>{downloadingIds.includes(result.id) ? <><RefreshCw size={14} className="spin" /> {t("Downloading", "Загрузка")} {transferLabel(transferPct[`mod:${result.id}`] ?? transferPct[`modpack:${result.id}`]) ?? "..."}</> : <><Plus size={14} /> {t("Install", "Установить")}</>}</button>}{result.projectType === "modpack" && !installedProjectIds.has(result.id) ? <button className="install-button" onClick={() => void installIntoThis(result)} disabled={busy || !isInstallable(result) || downloadingIds.includes(result.id)} title={t("Install into this instance", "Установить в эту инстанцию")}><Plus size={14} /> {t("Into this", "В инстанцию")}</button> : null}<div className="mod-card-stats"><span><Download size={13} /> {formatDownloads(result.downloads)}</span>{typeof result.follows === "number" ? <span><Heart size={13} /> {formatDownloads(result.follows)}</span> : null}</div>{result.dateModified ? <small className="muted"><Clock size={12} /> {formatRelative(result.dateModified)}</small> : null}</div></article>)}</div>{totalPages > 1 ? <nav className="pages" aria-label={t("Result pages", "Страницы результатов")}><button className="page-button" disabled={contentPage <= 1 || busy} aria-label={t("Previous page", "Предыдущая страница")} onClick={() => void runContentSearch({ page: contentPage - 1 })}><ChevronLeft size={15} /></button>{pageList(contentPage, totalPages).map((page, index) => page === "gap" ? <span key={`gap-${index}`} className="page-gap">…</span> : <button key={page} className={page === contentPage ? "page-button active" : "page-button"} disabled={busy} onClick={() => void runContentSearch({ page })}>{page}</button>)}<button className="page-button" disabled={contentPage >= totalPages || busy} aria-label={t("Next page", "Следующая страница")} onClick={() => void runContentSearch({ page: contentPage + 1 })}><ChevronRight size={15} /></button></nav> : null}</div><aside className="content-filters"><div className="filter-row"><div><strong>{t("Hide content already installed", "Скрыть уже установленное")}</strong></div><button type="button" role="switch" aria-checked={hideInstalled} className="switch" onClick={() => setHideInstalled((value) => !value)}><span className="knob" /></button></div><div className="filter-group"><div className="section-title">{t("Game version", "Версия игры")}</div>{versionUnlocked ? <Dropdown value={versionOverride ?? selected.gameVersion} options={gameVersions ?? [selected.gameVersion]} ariaLabel={t("Game version filter", "Фильтр версии игры")} onChange={(version) => { setVersionOverride(version); void runContentSearch({ page: 1, versions: [version] }); }} /> : <><span className="filter-lock">{selected.gameVersion}</span><p className="muted">{t("Game version is provided by the instance. Unlocking may show incompatible content.", "Версия определяется инстанцией. После разблокировки может отображаться несовместимый контент.")}</p><button onClick={() => { setVersionUnlocked(true); setVersionOverride(selected.gameVersion); }}><Lock size={14} />{t("Unlock filter", "Разблокировать")}</button></>}</div>{(contentType === "mod" || contentType === "modpack") ? <div className="filter-group"><div className="section-title">{t("Loader", "Загрузчик")}</div>{loaderUnlocked ? <Dropdown value={loaderOverride ?? selected.loader} options={loaderFilterOptions} ariaLabel={t("Loader filter", "Фильтр загрузчика")} onChange={(loader) => { setLoaderOverride(loader); void runContentSearch({ page: 1, loaders: [loader] }); }} /> : <><span className="filter-lock">{selected.loader}</span><button onClick={() => { setLoaderUnlocked(true); setLoaderOverride(selected.loader === "vanilla" ? "fabric" : selected.loader); }}><Lock size={14} />{t("Unlock filter", "Разблокировать")}</button></>}</div> : null}<div className="filter-group"><div className="section-title">{t("Categories", "Категории")}</div><div className="filter-checks">{categoryTags.length ? categoryTags.map((tag) => <label key={tag} className="filter-check"><input type="checkbox" checked={selectedCategories.includes(tag)} onChange={() => toggleCategory(tag)} />{tag}</label>) : <span className="muted">{t("No categories", "Нет категорий")}</span>}</div></div></aside></div></div>}
+                {instanceTab === "runtime" && <div className="settings-content"><div className="surface-heading"><Cpu size={19} /><div><h3>RAM</h3><span>{t("Allocated memory for this instance only.", "Объём памяти только для этой инстанции.")}</span></div></div><label>{t("Allocated RAM", "Объём памяти")}<MemorySlider label={t("Allocated RAM", "Объём памяти")} value={selected.maxMemoryMb ?? bootstrap.settings.maxMemoryMb} onChange={(next) => void updateSelected({ maxMemoryMb: next })} /></label><label>{t("Extra JVM flags", "Дополнительные флаги JVM")}<textarea value={selected.extraJvmArgs ?? ""} rows={2} spellCheck={false} placeholder={bootstrap.settings.extraJvmArgs || "-XX:+UseG1GC -XX:MaxGCPauseMillis=50"} onChange={(event) => void updateSelected({ extraJvmArgs: event.target.value })} /></label></div>}
+                {instanceTab === "logs" && <div className="settings-content"><div className="surface-heading"><ScrollText size={19} /><div><h3>{t("Logs", "Журнал")}</h3><span>{isSelectedRunning ? t("Live tail · running", "Текущий журнал · запущено") : t("Last run log. Launch the instance to follow it live.", "Журнал последнего запуска. Запустите инстанцию, чтобы следить вживую.")}</span></div></div><div className="button-row"><button onClick={() => void refreshInstanceLogs(false)} disabled={busy}><RefreshCw size={15} /> {t("Refresh", "Обновить")}</button><button onClick={() => void openSelectedFolder()}><FolderOpen size={15} /> {t("Open folder", "Открыть папку")}</button><button type="button" onClick={() => setLogsFollow((v) => !v)} title={t("Auto-scroll to bottom on new lines", "Автоматическая прокрутка вниз при новых строках")}>{logsFollow ? t("Follow: on", "Автопрокрутка: вкл") : t("Follow: off", "Автопрокрутка: выкл")}</button></div>{instanceLogs === null ? <span className="muted">{t("Reading log...", "Чтение журнала...")}</span> : !instanceLogs.hasLog ? <span className="muted">{isSelectedRunning || isLaunching ? t("Starting... waiting for log.", "Запуск... Ожидание журнала.") : t("No log yet. Launch the instance.", "Журнала пока нет. Запустите инстанцию.")}</span> : <>{crashAssist && !isSelectedRunning && !isLaunching ? <div className="crash-banner" role="alert"><XCircle size={17} /><div><strong>{crashAssist.title}</strong><span>{crashAssist.hint}</span></div><button onClick={() => void copyCrashAssist()} title={t("Copy reason and log tail", "Скопировать причину и хвост журнала")}><Copy size={14} /> {t("Copy", "Копировать")}</button></div> : null}<pre ref={logPreRef} className="log-view">{instanceLogs.log || t("(empty log)", "(журнал пуст)")}</pre>{instanceLogs.plan ? <details className="log-plan"><summary>{t("Launch plan", "План запуска")}</summary><pre className="log-view small">{instanceLogs.plan}</pre></details> : null}</>}</div>}
+                {instanceTab === "content" && <div className={contentExiting ? "settings-content content-content content-exiting" : "settings-content content-content"} key={`${contentType}-${selected.id}`}><div className="surface-heading"><PackageSearch size={19} /><div><h3>{t(`Discover ${contentLabel(contentType).toLowerCase()}`, `Обзор ${(contentTypes.find((c) => c.id === contentType)?.labelRu ?? "").toLowerCase()}`)}</h3><span>{t(`Browse Modrinth for ${selected.gameVersion} / ${selected.loader}.`, `Modrinth: ${selected.gameVersion} / ${selected.loader}.`)}</span></div></div><nav className="content-types" aria-label={t("Content type", "Тип контента")}>{visibleContentTypes.map(({ id, label, labelRu, icon: Icon }) => <button key={id} className={contentType === id ? "content-type active" : "content-type"} onClick={() => switchContentType(id)}><Icon size={15} /><span>{t(label, labelRu)}</span></button>)}</nav><div className="content-browser"><div className="content-main"><div className="search-row"><input value={modQuery} onChange={(event) => setModQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void runContentSearch({ page: 1 }); }} placeholder={t("Search or leave empty to browse", "Поиск. Оставьте пустым, чтобы показать всё")} /><button onClick={() => void runContentSearch({ page: 1 })} disabled={busy}><Search size={16} /> {t("Search", "Найти")}</button></div><div className="browse-controls"><label className="sort-label">{t("Sort by:", "Сортировать по:")}<Dropdown value={t(sortLabel, sortLabelRu[sortLabel] ?? sortLabel)} options={sortOptions.map((option) => t(option.label, sortLabelRu[option.label] ?? option.label))} ariaLabel={t("Sort by", "Сортировка")} onChange={(label) => { const found = sortOptions.find((option) => option.label === label || t(option.label, sortLabelRu[option.label] ?? option.label) === label); if (found) void runContentSearch({ page: 1, sort: found.id }); }} /></label><label className="sort-label">{t("View:", "На странице:")}<Dropdown value={String(contentLimit)} options={["10", "20", "50"]} ariaLabel={t("Results per page", "Результатов на странице")} onChange={(label) => void runContentSearch({ page: 1, limit: Number(label) })} /></label>{totalHits > 0 ? <span className="muted">{totalHits} {t(totalHits === 1 ? "result" : "results", totalHits % 10 === 1 && totalHits % 100 !== 11 ? "результат" : totalHits % 10 >= 2 && totalHits % 10 <= 4 && (totalHits % 100 < 10 || totalHits % 100 >= 20) ? "результата" : "результатов")}</span> : null}</div><div className={busy ? "mod-results refreshing" : "mod-results"}>{visibleResults.map((result) => <article key={`${result.projectType}-${result.id}`} className="mod-card">{result.iconUrl ? <img className="mod-card-icon" src={result.iconUrl} alt="" /> : <div className="mod-card-icon mod-icon">{result.title[0]}</div>}<div className="mod-card-main"><div className="mod-card-title"><strong>{result.title}</strong>{result.author ? <span>{t(`by ${result.author}`, `автор: ${result.author}`)}</span> : null}</div><p>{result.summary}</p>{result.categories.length ? <div className="mod-card-tags">{result.categories.slice(0, 5).map((category) => <span key={category} className="tag-chip">{category}</span>)}</div> : null}</div><div className="mod-card-side">{installedProjectIds.has(result.id) ? <span className="installed-badge"><Check size={14} /> {t("Installed", "Установлен")}</span> : <button className="install-button" onClick={() => void installContent(result)} disabled={busy || !isInstallable(result) || downloadingIds.includes(result.id)} title={result.projectType === "modpack" ? t(`Download ${result.title}`, `Скачать ${result.title}`) : t(`Install ${result.title}`, `Установить ${result.title}`)}>{downloadingIds.includes(result.id) ? <><RefreshCw size={14} className="spin" /> {t("Downloading", "Загрузка")} {transferLabel(transferPct[`mod:${result.id}`] ?? transferPct[`modpack:${result.id}`]) ?? "..."}</> : <><Plus size={14} /> {t("Install", "Установить")}</>}</button>}{result.projectType === "modpack" && !installedProjectIds.has(result.id) ? <button className="install-button" onClick={() => void installIntoThis(result)} disabled={busy || !isInstallable(result) || downloadingIds.includes(result.id)} title={t("Install into this instance", "Установить в эту инстанцию")}><Plus size={14} /> {t("Into this", "В инстанцию")}</button> : null}<div className="mod-card-stats"><span><Download size={13} /> {formatDownloads(result.downloads, lang)}</span>{typeof result.follows === "number" ? <span><Heart size={13} /> {formatDownloads(result.follows, lang)}</span> : null}</div>{result.dateModified ? <small className="muted"><Clock size={12} /> {formatRelative(result.dateModified, lang)}</small> : null}</div></article>)}</div>{totalPages > 1 ? <nav className="pages" aria-label={t("Result pages", "Страницы результатов")}><button className="page-button" disabled={contentPage <= 1 || busy} aria-label={t("Previous page", "Предыдущая страница")} onClick={() => void runContentSearch({ page: contentPage - 1 })}><ChevronLeft size={15} /></button>{pageList(contentPage, totalPages).map((page, index) => page === "gap" ? <span key={`gap-${index}`} className="page-gap">…</span> : <button key={page} className={page === contentPage ? "page-button active" : "page-button"} disabled={busy} onClick={() => void runContentSearch({ page })}>{page}</button>)}<button className="page-button" disabled={contentPage >= totalPages || busy} aria-label={t("Next page", "Следующая страница")} onClick={() => void runContentSearch({ page: contentPage + 1 })}><ChevronRight size={15} /></button></nav> : null}</div><aside className="content-filters"><div className="filter-row"><div><strong>{t("Hide content already installed", "Скрыть уже установленное")}</strong></div><button type="button" role="switch" aria-checked={hideInstalled} className="switch" onClick={() => setHideInstalled((value) => !value)}><span className="knob" /></button></div><div className="filter-group"><div className="section-title">{t("Game version", "Версия игры")}</div>{versionUnlocked ? <Dropdown value={versionOverride ?? selected.gameVersion} options={gameVersions ?? [selected.gameVersion]} ariaLabel={t("Game version filter", "Фильтр версии игры")} onChange={(version) => { setVersionOverride(version); void runContentSearch({ page: 1, versions: [version] }); }} /> : <><span className="filter-lock">{selected.gameVersion}</span><p className="muted">{t("Game version is provided by the instance. Unlocking may show incompatible content.", "Версия определяется инстанцией. После разблокировки может отображаться несовместимый контент.")}</p><button onClick={() => { setVersionUnlocked(true); setVersionOverride(selected.gameVersion); }}><Lock size={14} />{t("Unlock filter", "Разблокировать")}</button></>}</div>{(contentType === "mod" || contentType === "modpack") ? <div className="filter-group"><div className="section-title">{t("Loader", "Загрузчик")}</div>{loaderUnlocked ? <Dropdown value={loaderOverride ?? selected.loader} options={loaderFilterOptions} ariaLabel={t("Loader filter", "Фильтр загрузчика")} onChange={(loader) => { setLoaderOverride(loader); void runContentSearch({ page: 1, loaders: [loader] }); }} /> : <><span className="filter-lock">{selected.loader}</span><button onClick={() => { setLoaderUnlocked(true); setLoaderOverride(selected.loader === "vanilla" ? "fabric" : selected.loader); }}><Lock size={14} />{t("Unlock filter", "Разблокировать")}</button></>}</div> : null}<div className="filter-group"><div className="section-title">{t("Categories", "Категории")}</div><div className="filter-checks">{categoryTags.length ? categoryTags.map((tag) => <label key={tag} className="filter-check"><input type="checkbox" checked={selectedCategories.includes(tag)} onChange={() => toggleCategory(tag)} />{tag}</label>) : <span className="muted">{t("No categories", "Нет категорий")}</span>}</div></div></aside></div></div>}
               </section>
             </> : <div className="blank-workspace"><Boxes size={34} /><h2>{t("Select an instance", "Выберите инстанцию")}</h2></div>}
           </section>
         </main>
       )}
 
-      {section === "launcher" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">{t("Application", "Приложение")}</span><h2>{t("Launcher settings", "Настройки лаунчера")}</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Globe size={19} /><div><h3>{t("Language", "Язык")}</h3><span>{t("Interface language.", "Язык интерфейса.")}</span></div></div><label>{t("Language", "Язык")}<Dropdown value={lang === "ru" ? "Русский" : "English"} options={["English", "Русский"]} ariaLabel={t("Language", "Язык")} onChange={(label) => void setLanguage(label === "Русский" ? "ru" : "en")} /></label></div></section><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Settings size={19} /><div><h3>{t("Memory", "Память")}</h3><span>{t("Default allocated RAM for instances.", "Объём памяти по умолчанию для инстанций.")}</span></div></div><label>{t("Allocated RAM", "Объём памяти")}<MemorySlider value={settingsDraft.maxMemoryMb} onChange={(next) => setSettingsDraft({ ...settingsDraft, maxMemoryMb: next })} /></label><label>{t("Extra JVM flags", "Дополнительные флаги JVM")}<textarea value={settingsDraft.extraJvmArgs} rows={2} spellCheck={false} placeholder="-XX:+UseG1GC -XX:MaxGCPauseMillis=50" onChange={(event) => setSettingsDraft({ ...settingsDraft, extraJvmArgs: event.target.value })} /></label></div><button className="primary-button save-button" onClick={saveSettings}><Save size={16} /> {t("Save settings", "Сохранить настройки")}</button></section><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Cpu size={19} /><div><h3>{t("Java installations", "Установленные версии Java")}</h3><span>{t("One runtime per Minecraft requirement. The launcher picks the right one automatically.", "Для каждого требования Minecraft — своя среда выполнения. Программа сама выберет подходящую.")}</span></div></div><div className="java-rows">{javaInstalls ? javaInstalls.map((installation) => <div key={installation.major} className="java-row"><div className="java-row-head"><strong>Java {installation.major} {t("location", "путь")}</strong>{installation.valid ? <CheckCircle2 size={17} className="java-status ok" /> : <XCircle size={17} className="java-status bad" />}</div><input value={installation.path} readOnly placeholder={t("Not installed", "Не установлена")} /><div className="java-actions"><button onClick={() => void javaAction(installation.major, "install")} disabled={javaBusy !== null}><Download size={15} /> {t("Install recommended", "Установить рекомендуемую")}</button><button onClick={() => void javaAction(installation.major, "detect")} disabled={javaBusy !== null}><RefreshCw size={15} /> {t("Detect", "Найти")}</button><button onClick={() => void javaAction(installation.major, "browse")} disabled={javaBusy !== null}><FolderOpen size={15} /> {t("Browse", "Выбрать")}</button></div><small className="muted">{javaBusy === installation.major ? t("Working...", "Выполняется...") : installation.message}</small></div>) : <span className="muted">{t("Loading Java installations...", "Загрузка установленных версий Java...")}</span>}</div></div></section></main>}
+      {section === "launcher" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">{t("Application", "Приложение")}</span><h2>{t("Launcher settings", "Настройки лаунчера")}</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Globe size={19} /><div><h3>{t("Language", "Язык")}</h3><span>{t("Interface language.", "Язык интерфейса.")}</span></div></div><label>{t("Language", "Язык")}<Dropdown value={lang === "ru" ? "Русский" : "English"} options={["English", "Русский"]} ariaLabel={t("Language", "Язык")} onChange={(label) => void setLanguage(label === "Русский" ? "ru" : "en")} /></label></div></section><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Settings size={19} /><div><h3>{t("Memory", "Память")}</h3><span>{t("Default allocated RAM for instances.", "Объём памяти по умолчанию для инстанций.")}</span></div></div><label>{t("Allocated RAM", "Объём памяти")}<MemorySlider label={t("Allocated RAM", "Объём памяти")} value={settingsDraft.maxMemoryMb} onChange={(next) => setSettingsDraft({ ...settingsDraft, maxMemoryMb: next })} /></label><label>{t("Extra JVM flags", "Дополнительные флаги JVM")}<textarea value={settingsDraft.extraJvmArgs} rows={2} spellCheck={false} placeholder="-XX:+UseG1GC -XX:MaxGCPauseMillis=50" onChange={(event) => setSettingsDraft({ ...settingsDraft, extraJvmArgs: event.target.value })} /></label></div><button className="primary-button save-button" onClick={saveSettings}><Save size={16} /> {t("Save settings", "Сохранить настройки")}</button></section><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Cpu size={19} /><div><h3>{t("Java installations", "Установленные версии Java")}</h3><span>{t("One runtime per Minecraft requirement. The launcher picks the right one automatically.", "Для каждого требования Minecraft — своя среда выполнения. Программа сама выберет подходящую.")}</span></div></div><div className="java-rows">{javaInstalls ? javaInstalls.map((installation) => <div key={installation.major} className="java-row"><div className="java-row-head"><strong>Java {installation.major} {t("location", "путь")}</strong>{installation.valid ? <CheckCircle2 size={17} className="java-status ok" /> : <XCircle size={17} className="java-status bad" />}</div><input value={installation.path} readOnly placeholder={t("Not installed", "Не установлена")} /><div className="java-actions"><button onClick={() => void javaAction(installation.major, "install")} disabled={javaBusy !== null}><Download size={15} /> {t("Install recommended", "Установить рекомендуемую")}</button><button onClick={() => void javaAction(installation.major, "detect")} disabled={javaBusy !== null}><RefreshCw size={15} /> {t("Detect", "Найти")}</button><button onClick={() => void javaAction(installation.major, "browse")} disabled={javaBusy !== null}><FolderOpen size={15} /> {t("Browse", "Выбрать")}</button></div><small className="muted">{javaBusy === installation.major ? t("Working...", "Выполняется...") : installation.message}</small></div>) : <span className="muted">{t("Loading Java installations...", "Загрузка установленных версий Java...")}</span>}</div></div></section></main>}
 
-      {section === "visuals" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">{t("Appearance", "Внешний вид")}</span><h2>{t("Visuals", "Оформление")}</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Palette size={19} /><div><h3>{t("Theme", "Тема")}</h3><span>{t("Pick a parameter, choose any color. Applied instantly.", "Выберите параметр и цвет. Изменения применяются сразу.")}</span></div></div><div className="visuals-layout"><div className="visuals-main"><div className="preset-row">{THEME_PRESETS.map((item) => <button key={item.id} type="button" onClick={() => applyPreset(item.id)}>{t(item.label, item.labelRu)}</button>)}</div><div className="theme-grid">{THEME_GROUPS.map((group) => <div key={group} className="theme-group-block anim-stagger"><span className="theme-group">{t(group, THEME_TOKENS.find((token) => token.group === group)?.groupRu ?? group)}</span>{THEME_TOKENS.filter((token) => token.group === group).map((token) => { const value = theme[token.id] ?? token.default; return <label key={token.id} className="theme-row" onMouseEnter={() => setPreviewToken(token.id)}><input type="color" value={value} onChange={(event) => setToken(token.id, event.target.value)} aria-label={t(token.label, token.labelRu)} /><span className="theme-dot" style={{ background: value }} /><span className="theme-name">{t(token.label, token.labelRu)}</span><code>{value}</code></label>; })}</div>)}</div></div>{(() => { const def = THEME_TOKENS.find((item) => item.id === previewToken) ?? THEME_TOKENS[0]; return <div className="preview-pane"><span className="eyebrow">{t("Preview", "Предпросмотр")}</span><strong>{t(def.label, def.labelRu)}</strong><ThemePreview id={previewToken} t={t} /></div>; })()}</div></div></section><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Sparkles size={19} /><div><h3>{t("Motion", "Анимации")}</h3><span>{t("Cursor glow and animations.", "Свечение курсора и анимации.")}</span></div></div><div className="filter-row"><strong>{t("Cursor glow", "Свечение курсора")}</strong><button type="button" className="switch" role="switch" aria-checked={glowOn} aria-label={t("Cursor glow", "Свечение курсора")} onClick={() => setGlowEnabled(!glowOn)}><span className="knob" /></button></div><label>{t("Glow size", "Размер свечения")} · {glowSize}%<input type="range" min={10} max={220} step={5} value={glowSize} disabled={!glowOn} onChange={(event) => setGlowSizeValue(Number(event.target.value))} aria-label={t("Glow size", "Размер свечения")} /></label><label>{t("Glow follow speed", "Скорость следования")} · {glowSpeed}%<input type="range" min={20} max={150} step={10} value={glowSpeed} disabled={!glowOn} onChange={(event) => setGlowSpeedValue(Number(event.target.value))} aria-label={t("Glow follow speed", "Скорость следования")} /></label><div className="filter-row"><strong>{t("Animations", "Анимации")}</strong><button type="button" className="switch" role="switch" aria-checked={animsOn} aria-label={t("Animations", "Анимации")} onClick={() => setAnimsEnabled(!animsOn)}><span className="knob" /></button></div></div></section></main>}
+      {section === "visuals" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">{t("Appearance", "Внешний вид")}</span><h2>{t("Visuals", "Оформление")}</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Palette size={19} /><div><h3>{t("Theme", "Тема")}</h3><span>{t("Pick a parameter, choose any color. Applied instantly.", "Выберите параметр и цвет. Изменения применяются сразу.")}</span></div></div><div className="visuals-layout"><div className="visuals-main"><div className="preset-row">{THEME_PRESETS.map((item) => <button key={item.id} type="button" onClick={() => applyPreset(item.id)}>{t(item.label, item.labelRu)}</button>)}</div><div className="theme-grid">{THEME_GROUPS.map((group) => <div key={group} className="theme-group-block anim-stagger"><span className="theme-group">{t(group, THEME_TOKENS.find((token) => token.group === group)?.groupRu ?? group)}</span>{THEME_TOKENS.filter((token) => token.group === group).map((token) => { const value = theme[token.id] ?? token.default; return <label key={token.id} className="theme-row" onMouseEnter={() => setPreviewToken(token.id)}><input type="color" value={value} onChange={(event) => setToken(token.id, event.target.value)} aria-label={t(token.label, token.labelRu)} /><span className="theme-dot" style={{ background: value }} /><span className="theme-name">{t(token.label, token.labelRu)}</span><code>{value}</code></label>; })}</div>)}</div></div>{(() => { const def = THEME_TOKENS.find((item) => item.id === previewToken) ?? THEME_TOKENS[0]; return <div className="preview-pane"><span className="eyebrow">{t("Preview", "Предпросмотр")}</span><strong>{t(def.label, def.labelRu)}</strong><ThemePreview id={previewToken} t={t} /></div>; })()}</div></div></section><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Sparkles size={19} /><div><h3>{t("Motion", "Анимации")}</h3><span>{t("Cursor glow and animations.", "Свечение курсора и анимации.")}</span></div></div><div className="filter-row"><strong>{t("Cursor glow", "Свечение курсора")}</strong><button type="button" className="switch" role="switch" aria-checked={glowOn} aria-label={t("Cursor glow", "Свечение курсора")} onClick={() => setGlowEnabled(!glowOn)}><span className="knob" /></button></div><label>{t("Glow size", "Размер свечения")} · {glowSize}%<input type="range" min={10} max={220} step={5} value={glowSize} disabled={!glowOn} onChange={(event) => setGlowSizeValue(Number(event.target.value))} aria-label={t("Glow size", "Размер свечения")} /></label><label>{t("Glow follow speed", "Скорость следования")} · {glowSpeed}%<input type="range" min={20} max={150} step={10} value={glowSpeed} disabled={!glowOn} onChange={(event) => setGlowSpeedValue(Number(event.target.value))} aria-label={t("Glow follow speed", "Скорость следования")} /></label><div className="filter-row"><strong>{t("Animations", "Анимации")}</strong><button type="button" className="switch" role="switch" aria-checked={animsOn} aria-label={t("Animations", "Анимации")} onClick={() => setAnimsEnabled(!animsOn)}><span className="knob" /></button></div><label>{t("Animation speed", "Скорость анимаций")} · {animSpeed}%{animSpeed === 100 ? ` (${t("normal", "обычная")})` : animSpeed > 100 ? ` (${t("faster", "быстрее")})` : ` (${t("slower", "медленнее")})`}<input type="range" min={50} max={200} step={10} value={animSpeed} disabled={!animsOn} onChange={(event) => setAnimSpeedValue(Number(event.target.value))} onDoubleClick={() => setAnimSpeedValue(100)} aria-label={t("Animation speed", "Скорость анимаций")} title={t("Double-click to reset", "Двойной клик — сбросить")} /></label></div></section><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><Sparkles size={19} /><div><h3>{t("Additional effects", "Дополнительные эффекты")}</h3><span>{t("Effects on top of the base animations. Each group can be turned off separately.", "Эффекты поверх основных анимаций. Каждую группу можно отключить отдельно.")}</span></div></div><div className="filter-row"><strong>{t("All additional effects", "Все дополнительные эффекты")}</strong><button type="button" className="switch" role="switch" aria-checked={effects.enabled} disabled={!animsOn} aria-label={t("All additional effects", "Все дополнительные эффекты")} onClick={() => setEffectFlag("enabled", !effects.enabled)}><span className="knob" /></button></div><div className="effects-list">{effectGroups.map((group) => <div key={group.id} className={effects.enabled && animsOn ? "filter-row effects-row" : "filter-row effects-row off"}><div><strong>{t(group.label, group.labelRu)}</strong><span className="muted">{t(group.hint, group.hintRu)}</span></div><button type="button" className="switch" role="switch" aria-checked={effects[group.id]} disabled={!effects.enabled || !animsOn} aria-label={t(group.label, group.labelRu)} onClick={() => setEffectFlag(group.id, !effects[group.id])}><span className="knob" /></button></div>)}</div>{!animsOn ? <span className="muted">{t("Available when Animations are turned on.", "Доступно при включённых анимациях.")}</span> : null}</div></section></main>}
 
       {section === "skins" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">{t("Identity", "Профиль")}</span><h2>{t("Skins", "Скины")}</h2><span className="status-line">{status}</span></div></header><section className={dropActive ? "settings-surface skins-surface dragging" : "settings-surface skins-surface"} onDragOver={(event) => { event.preventDefault(); setDropActive(true); }} onDragLeave={() => setDropActive(false)} onDrop={dropSkin}><div className="settings-content"><div className="surface-heading"><Shirt size={19} /><div><h3>{t("Skin selector", "Выбор скина")}</h3><span>{t("Playing as", "Вы играете как")} {activeAccount?.profileName ?? activeAccount?.status}{activeAccount?.kind === "ely" ? t(". Ely.by skin below.", ". Скин Ely.by — ниже.") : activeAccount?.status === "signed-in" ? t(". Use uploads to Mojang.", ". Загрузка выполняется в Mojang.") : t(". Offline profile.", ". Офлайн-профиль.")}</span></div></div>{(() => { const list = canEditSkins ? (skins ?? []) : []; const preview = list.find((item) => item.id === (selectedSkinId ?? activeSkinId)) ?? list.find((item) => item.id === activeSkinId) ?? list[0] ?? null; const cape = (capes ?? []).find((item) => item.active) ?? null; return <div className="skins-layout"><div className="skin-stage"><SkinViewer3D dataUrl={isElyAccount ? (elySkin?.dataUrl ?? null) : (preview?.dataUrl ?? null)} slim={isElyAccount ? (elySkin?.slim ?? false) : (preview?.slim ?? false)} capeUrl={cape?.url ?? null} /><strong>{isElyAccount ? `${activeAccount?.profileName ?? "Ely"} · Ely.by` : (preview?.name ?? t("No skin yet", "Скин не выбран"))}</strong><span className="muted">{canEditSkins ? t("Drag to rotate · scroll to zoom · drop a PNG anywhere", "Вращение — перетаскивание, масштаб — колесо мыши. PNG-файл можно перетащить в любое место") : t("Drag to rotate · scroll to zoom", "Вращение — перетаскивание, масштаб — колесо мыши")}</span></div><div className="skins-side"><span className="section-title">{t("Saved skins", "Сохранённые скины")}</span>{skins === null ? <span className="muted">{t("Loading skins...", "Загрузка скинов...")}</span> : skins.length ? <div className="skin-grid">{skins.map((skin) => <div key={skin.id} role="button" tabIndex={0} onClick={() => setSelectedSkinId(skin.id)} onKeyDown={(event) => { if (event.key === "Enter") setSelectedSkinId(skin.id); }} className={skin.id === activeSkinId ? "skin-card active" : skin.id === (selectedSkinId ?? activeSkinId) ? "skin-card selected" : "skin-card"}><SkinPreview dataUrl={skin.dataUrl} slim={skin.slim} /><strong>{skin.name}</strong><div className="button-row skin-arms"><button type="button" className={skin.slim ? "" : "content-type active"} onClick={(event) => { event.stopPropagation(); void setSkinModel(skin.id, false); }} disabled={skinBusy || !canEditSkins}>{t("Wide", "Классическая")}</button><button type="button" className={skin.slim ? "content-type active" : ""} onClick={(event) => { event.stopPropagation(); void setSkinModel(skin.id, true); }} disabled={skinBusy || !canEditSkins}>{t("Slim", "Худая")}</button></div><div className="button-row skin-actions"><button type="button" className={skin.id === activeSkinId ? "primary-button" : ""} onClick={(event) => { event.stopPropagation(); void activateSkin(skin.id, skin.name); }} disabled={skinBusy || !canEditSkins || skin.id === activeSkinId}>{skin.id === activeSkinId ? <><Check size={15} /> {t("Active", "Активен")}</> : t("Use skin", "Выбрать скин")}</button><button type="button" onClick={(event) => { event.stopPropagation(); void removeSkin(skin.id, skin.name); }} disabled={skinBusy || !canEditSkins} title={t("Delete skin", "Удалить скин")}><Trash2 size={15} /></button></div></div>)}</div> : canEditSkins ? <span className="muted">{t("No skins yet. Upload a 64x64 PNG texture.", "Скинов пока нет. Загрузите PNG-файл 64x64.")}</span> : isElyAccount ? (elySkin === undefined ? <span className="muted">{t("Loading Ely.by skin...", "Загрузка скина Ely.by...")}</span> : elySkin ? <span className="muted">{t("Ely.by skin is shown in the preview.", "Скин Ely.by показан в области предпросмотра.")}</span> : <span className="muted">{t("No skin on this Ely.by account.", "На этой учётной записи Ely.by нет скина.")}</span>) : <span className="muted">{t("Sign in with Microsoft to see your skins.", "Войдите через Microsoft, чтобы увидеть скины.")}</span>}<div className="button-row"><label className={canEditSkins ? "file-pick" : "file-pick disabled"}><Plus size={16} /> {t("Upload skin", "Загрузить скин")}<input type="file" accept=".png,image/png" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadSkin(file); }} /></label></div>{canEditSkins ? null : <span className="muted">{t("Skins are locked for offline profiles. Sign in with Microsoft to change them.", "Скины недоступны для офлайн-профилей. Войдите через Microsoft, чтобы их изменять.")}</span>}<span className="section-title">{t("Cape", "Плащ")}</span>{capes === null ? <span className="muted">{t("Loading capes...", "Загрузка плащей...")}</span> : activeAccount?.status !== "signed-in" ? <span className="muted">{t("Sign in with Microsoft to use capes.", "Войдите через Microsoft, чтобы использовать плащи.")}</span> : capes.length ? <div className="cape-row"><button type="button" className={capes.some((item) => item.active) ? "cape-pick" : "cape-pick active"} onClick={() => void equipCape(null)} disabled={skinBusy} title={t("No cape", "Без плаща")}>{t("None", "Нет")}</button>{capes.map((item) => <button key={item.id} type="button" className={item.active ? "cape-pick active" : "cape-pick"} onClick={() => void equipCape(item.id)} disabled={skinBusy} title={item.alias}><CapeThumb url={item.url} /></button>)}</div> : <span className="muted">{t("No capes on this account. Custom capes cannot be uploaded to Mojang.", "На этой учётной записи нет плащей. Собственные плащи загрузить в Mojang нельзя.")}</span>}</div></div>; })()}</div></section></main>}
 
-      {section === "accounts" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">{t("Identity", "Профиль")}</span><h2>{t("Account settings", "Аккаунты")}</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><User size={19} /><div><h3>{t("Playing as", "Вы играете как")}</h3><span>{t("Click an account to switch, no re-login needed.", "Щёлкните по учётной записи, чтобы переключиться без повторного входа.")}</span></div></div><div className="account-list">{bootstrap.accounts.map((item) => <div key={item.id} role="button" tabIndex={0} onClick={() => void switchAccount(item.id)} onKeyDown={(event) => { if (event.key === "Enter") void switchAccount(item.id); }} className={item.id === activeAccount?.id ? "account-row active" : "account-row"}>{item.id === activeAccount?.id ? <span className="account-dot on" /> : <span className="account-dot" />}{item.kind === "microsoft" ? <KeyRound size={20} /> : <User size={20} />}<div><strong>{item.profileName ?? item.kind}</strong><span>{item.kind === "microsoft" ? t("Minecraft account", "Учётная запись Minecraft") : item.kind === "ely" ? "Ely.by" : t("Offline", "Офлайн")}</span></div><button type="button" title={t("Remove account", "Удалить учётную запись")} onClick={(event) => { event.stopPropagation(); void removeAccount(item.id, item.profileName ?? item.kind); }} disabled={busy}><Trash2 size={15} /></button></div>)}{bootstrap.accounts.length ? null : <span className="muted">{t("No accounts yet. Add one below.", "Учётных записей пока нет. Добавьте ниже.")}</span>}</div><div className="button-row"><button className="primary-button" onClick={beginLogin} disabled={busy}><Plus size={16} /> {t("Add account", "Добавить учётную запись")}</button></div></div><div className="settings-content bordered-top"><div className="surface-heading"><UserRoundCog size={19} /><div><h3>{t("Offline profile", "Офлайн-профиль")}</h3><span>{t("No Microsoft account needed.", "Учётная запись Microsoft не требуется.")}</span></div></div><label>{t("Username", "Имя пользователя")}<input value={offlineName} maxLength={16} onChange={(event) => setOfflineName(event.target.value)} placeholder={t("Player", "Игрок")} /></label><button onClick={useOfflineProfile} disabled={busy}><User size={16} /> {t("Add offline profile", "Добавить офлайн-профиль")}</button></div><div className="settings-content bordered-top"><div className="surface-heading"><KeyRound size={19} /><div><h3>Ely.by {t("account", "учётная запись")}</h3><span>{t("Login, skins and Ely servers.", "Вход, скины и серверы Ely.")}</span></div></div><label>{t("Username or e-mail", "Имя пользователя или эл. почта")}<input value={elyName} onChange={(event) => setElyName(event.target.value)} placeholder="nickname" /></label><label>{t("Password", "Пароль")}<input type="password" value={elyPassword} onChange={(event) => setElyPassword(event.target.value)} placeholder="••••••••" /></label><label>{t("2FA token (if enabled)", "2FA-код (если включён)")}<input value={elyTotp} inputMode="numeric" onChange={(event) => setElyTotp(event.target.value.replace(/[^0-9]/g, ""))} placeholder="123456" /></label><button className="primary-button" onClick={elyLogin} disabled={busy}><KeyRound size={16} /> {t("Add Ely account", "Добавить учётную запись Ely")}</button></div><div className="settings-content bordered-top"><div className="readonly-path"><HardDrive size={16} /><span>{bootstrap.storagePath}</span></div></div></section></main>}
+      {section === "accounts" && <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}><header className="workspace-header"><div><span className="eyebrow">{t("Identity", "Профиль")}</span><h2>{t("Account settings", "Аккаунты")}</h2><span className="status-line">{status}</span></div></header><section className="settings-surface narrow-surface"><div className="settings-content"><div className="surface-heading"><User size={19} /><div><h3>{t("Playing as", "Вы играете как")}</h3><span>{t("Click an account to switch, no re-login needed.", "Щёлкните по учётной записи, чтобы переключиться без повторного входа.")}</span></div></div><div className="account-list">{bootstrap.accounts.map((item) => <div key={item.id} role="button" tabIndex={0} onClick={() => void switchAccount(item.id)} onKeyDown={(event) => { if (event.key === "Enter") void switchAccount(item.id); }} className={item.id === activeAccount?.id ? "account-row active" : "account-row"}>{item.id === activeAccount?.id ? <span className="account-dot on" /> : <span className="account-dot" />}{item.kind === "microsoft" ? <KeyRound size={20} /> : <User size={20} />}<div><strong>{item.profileName ?? item.kind}</strong><span>{item.kind === "microsoft" ? t("Minecraft account", "Учётная запись Minecraft") : item.kind === "ely" ? "Ely.by" : t("Offline", "Офлайн")}</span></div><button type="button" title={t("Remove account", "Удалить учётную запись")} onClick={(event) => { event.stopPropagation(); void removeAccount(item.id, item.profileName ?? item.kind); }} disabled={busy}><Trash2 size={15} /></button></div>)}{bootstrap.accounts.length ? null : <span className="muted">{t("No accounts yet. Add one below.", "Учётных записей пока нет. Добавьте ниже.")}</span>}</div><div className="button-row"><button className="primary-button" onClick={beginLogin} disabled={busy}><Plus size={16} /> {t("Add account", "Добавить учётную запись")}</button></div></div><div className="settings-content bordered-top"><div className="surface-heading"><UserRoundCog size={19} /><div><h3>{t("Offline profile", "Офлайн-профиль")}</h3><span>{t("No Microsoft account needed.", "Учётная запись Microsoft не требуется.")}</span></div></div><label>{t("Username", "Имя пользователя")}<input value={offlineName} maxLength={16} onChange={(event) => setOfflineName(event.target.value)} placeholder={t("Player", "Игрок")} /></label><button onClick={useOfflineProfile} disabled={busy}><User size={16} /> {t("Add offline profile", "Добавить офлайн-профиль")}</button></div><div className="settings-content bordered-top"><div className="surface-heading"><KeyRound size={19} /><div><h3>Ely.by {t("account", "учётная запись")}</h3><span>{t("Login, skins and Ely servers.", "Вход, скины и серверы Ely.")}</span></div></div><label>{t("Username or e-mail", "Имя пользователя или эл. почта")}<input value={elyName} onChange={(event) => setElyName(event.target.value)} placeholder={t("nickname", "ник")} /></label><label>{t("Password", "Пароль")}<input type="password" value={elyPassword} onChange={(event) => setElyPassword(event.target.value)} placeholder="••••••••" /></label><label>{t("2FA token (if enabled)", "2FA-код (если включён)")}<input value={elyTotp} inputMode="numeric" onChange={(event) => setElyTotp(event.target.value.replace(/[^0-9]/g, ""))} placeholder="123456" /></label><button className="primary-button" onClick={elyLogin} disabled={busy}><KeyRound size={16} /> {t("Add Ely account", "Добавить учётную запись Ely")}</button></div><div className="settings-content bordered-top"><div className="readonly-path"><HardDrive size={16} /><span>{bootstrap.storagePath}</span></div></div></section></main>}
       </div>
       {confirmDelete && selected ? <div className="modal-backdrop" onClick={() => setConfirmDelete(false)}><div className="modal-card" role="alertdialog" aria-label={t("Delete instance", "Удаление инстанции")} onClick={(event) => event.stopPropagation()}><h3>{t("Delete", "Удалить")} {selected.name}?</h3><p className="muted">{t("The instance folder and ALL its files — worlds, mods, configs — will be permanently removed. This cannot be undone.", "Папка инстанции и все её файлы (миры, моды, конфигурации) будут удалены навсегда.")}</p><div className="button-row modal-actions"><button onClick={() => setConfirmDelete(false)}>{t("Cancel", "Отмена")}</button><button className="danger-button" onClick={() => { setConfirmDelete(false); void removeSelected(); }} disabled={busy}><Trash2 size={15} /> {t("Delete", "Удалить")}</button></div></div></div> : null}
-      {modpackTarget && selected ? <div className="modal-backdrop" onClick={() => void cancelModpackTarget()}><div className="modal-card" role="alertdialog" aria-label={t("Version mismatch", "Несовпадение версий")} onClick={(event) => event.stopPropagation()}><h3>{t("Install", "Установить")} {modpackTarget.info.packName} {t("into", "в")} {selected.name}?</h3><p className="muted">{t("Pack wants", "Модпаку требуется")} {modpackTarget.info.packGameVersion} / {modpackTarget.info.packLoader}, {t("instance is", "в инстанции")} {selected.gameVersion} / {selected.loader}. {t("Files may not work.", "Файлы могут не работать.")}</p><div className="button-row modal-actions"><button onClick={() => void cancelModpackTarget()}>{t("Cancel", "Отмена")}</button><button className="primary-button" onClick={() => void confirmModpackTarget()} disabled={busy}><Plus size={15} /> {t("Install anyway", "Всё равно установить")}</button></div></div></div> : null}
-      {exportModal && selected ? <div className="modal-backdrop" onClick={() => setExportModal(null)}><div className="modal-card export-modal" role="dialog" aria-label="Export modpack" onClick={(event) => event.stopPropagation()}><div className="export-head"><Archive size={20} /><div><h3>{t("Export modpack", "Экспорт модпака")}</h3><span className="muted">{selected.name} · {exportModal.entries.filter((e) => exportModal.checked[e.name]).length} / {exportModal.entries.length} · {formatBytes(exportModal.entries.filter((e) => exportModal.checked[e.name]).reduce((sum, e) => sum + e.size, 0))}</span></div><button type="button" className="titlebar-button" onClick={() => setExportModal(null)} aria-label={t("Close", "Закрыть")}><X size={15} /></button></div><div className="button-row export-quick"><button onClick={() => setExportModal((m) => m ? { ...m, checked: Object.fromEntries(m.entries.map((e) => [e.name, true])) } : m)}>{t("Select all", "Выбрать всё")}</button><button onClick={() => setExportModal((m) => m ? { ...m, checked: {} } : m)}>{t("Clear", "Очистить")}</button></div><div className="export-rows">{exportModal.entries.map((entry) => { const on = !!exportModal.checked[entry.name]; return <button key={entry.name} type="button" className={on ? "export-row on" : "export-row"} onClick={() => setExportModal((m) => m ? { ...m, checked: { ...m.checked, [entry.name]: !m.checked[entry.name] } } : m)}><span className="export-check">{on ? <Check size={14} /> : null}</span>{entry.isDir ? <Folder size={17} /> : <FileText size={17} />}<span className="export-name"><strong>{entry.name}</strong><small className="muted">{formatBytes(entry.size)}{entry.modified ? ` · ${formatDateTime(entry.modified)}` : ""}</small></span></button>; })}</div><div className="button-row modal-actions"><button onClick={() => setExportModal(null)}>{t("Cancel", "Отмена")}</button><button className="primary-button" onClick={() => void confirmExport()} disabled={busy || !exportModal.entries.some((e) => exportModal.checked[e.name])}><Archive size={15} /> {t("Export", "Экспортировать")}</button></div></div></div> : null}
+      {modpackTarget ? <div className="modal-backdrop" onClick={() => void cancelModpackTarget()}><div className="modal-card" role="alertdialog" aria-label={t("Version mismatch", "Несовпадение версий")} onClick={(event) => event.stopPropagation()}><h3>{t("Install", "Установить")} {modpackTarget.info.packName} {t("into", "в")} {modpackTarget.instanceName}?</h3><p className="muted">{t("Pack wants", "Модпаку требуется")} {modpackTarget.info.packGameVersion} / {modpackTarget.info.packLoader}, {t("instance is", "в инстанции")} {modpackTarget.instanceVersion} / {modpackTarget.instanceLoader}. {t("Files may not work.", "Файлы могут не работать.")}</p><div className="button-row modal-actions"><button onClick={() => void cancelModpackTarget()}>{t("Cancel", "Отмена")}</button><button className="primary-button" onClick={() => void confirmModpackTarget()} disabled={busy}><Plus size={15} /> {t("Install anyway", "Всё равно установить")}</button></div></div></div> : null}
+      {exportModal && selected ? <div className="modal-backdrop" onClick={() => setExportModal(null)}><div className="modal-card export-modal" role="dialog" aria-label={t("Export modpack", "Экспорт модпака")} onClick={(event) => event.stopPropagation()}><div className="export-head"><Archive size={20} /><div><h3>{t("Export modpack", "Экспорт модпака")}</h3><span className="muted">{selected.name} · {exportModal.entries.filter((e) => exportModal.checked[e.name]).length} / {exportModal.entries.length} · {formatBytes(exportModal.entries.filter((e) => exportModal.checked[e.name]).reduce((sum, e) => sum + e.size, 0))}</span></div><button type="button" className="titlebar-button" onClick={() => setExportModal(null)} aria-label={t("Close", "Закрыть")}><X size={15} /></button></div><div className="button-row export-quick"><button onClick={() => setExportModal((m) => m ? { ...m, checked: Object.fromEntries(m.entries.map((e) => [e.name, exportEntryKind(e.name) !== "private"])) } : m)} title={t("Private data is not selected", "Личные данные не выбираются")}>{t("Select all", "Выбрать всё")}</button><button onClick={() => setExportModal((m) => m ? { ...m, checked: {} } : m)}>{t("Clear", "Очистить")}</button></div><div className="export-rows">{exportModal.entries.map((entry) => { const on = !!exportModal.checked[entry.name]; return <button key={entry.name} type="button" className={on ? "export-row on" : "export-row"} onClick={() => setExportModal((m) => m ? { ...m, checked: { ...m.checked, [entry.name]: !m.checked[entry.name] } } : m)}><span className="export-check">{on ? <Check size={14} /> : null}</span>{entry.isDir ? <Folder size={17} /> : <FileText size={17} />}<span className="export-name"><strong>{entry.name}</strong><small className="muted">{formatBytes(entry.size)}{entry.modified ? ` · ${formatDateTime(entry.modified)}` : ""}</small></span>{exportEntryKind(entry.name) === "cache" ? <span className="export-tag cache">{t("Cache", "Кэш")}</span> : exportEntryKind(entry.name) === "private" ? <span className="export-tag private">{t("Private", "Личное")}</span> : null}</button>; })}</div>{exportModal.entries.some((e) => exportModal.checked[e.name] && exportEntryKind(e.name) === "private") ? <div className="export-warning" role="alert"><Lock size={15} /><span>{t("Private data is selected: logs, account files or player names may end up in the pack. Do not share it.", "Выбраны личные данные: логи, файлы аккаунтов или имена игроков попадут в сборку. Не передавайте такой файл.")}</span></div> : exportModal.entries.some((e) => exportModal.checked[e.name] && exportEntryKind(e.name) === "cache") ? <div className="export-note"><span>{t("Caches are selected. The game rebuilds them, they only make the pack larger.", "Выбран кэш. Игра создаёт его заново, в сборке он только увеличивает размер.")}</span></div> : null}<div className="button-row modal-actions"><button onClick={() => setExportModal(null)}>{t("Cancel", "Отмена")}</button><button className="primary-button" onClick={() => void confirmExport()} disabled={busy || !exportModal.entries.some((e) => exportModal.checked[e.name])}><Archive size={15} /> {t("Export", "Экспортировать")}</button></div></div></div> : null}
     </div>
   );
 }

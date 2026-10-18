@@ -11,6 +11,7 @@ import { JsonStore, getActiveAccount, type LauncherData } from "../store";
 import type { AuthService } from "./auth";
 import { JavaService } from "./java";
 import { MinecraftService } from "./minecraft";
+import { tr } from "../i18n";
 
 function sanitizeFilePart(value: string): string {
   return value
@@ -139,7 +140,7 @@ export class InstanceService {
       directory = path.join(getInstancesRoot(), folderName);
     }
     if (existsSync(directory)) {
-      throw new Error("Could not pick a free folder for the instance");
+      throw new Error(tr("Could not pick a free folder for the instance", "Не удалось подобрать свободную папку для инстанции"));
     }
 
     const instance: LauncherInstance = {
@@ -175,17 +176,21 @@ export class InstanceService {
     const data = await this.store.getData();
     const current = data.instances.find((item) => item.id === payload.id);
     if (!current) {
-      throw new Error("Instance not found");
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
     const nextGameVersion = payload.patch.gameVersion !== undefined
       ? payload.patch.gameVersion.trim() || "1.21.1"
       : current.gameVersion;
     const nextLoader = payload.patch.loader ?? current.loader;
     const versionChanged = nextGameVersion !== current.gameVersion;
-    const loaderChanged = nextLoader !== current.loader
+    const loaderKindChanged = nextLoader !== current.loader;
+    const loaderChanged = loaderKindChanged
       || (payload.patch.loaderVersion ?? current.loaderVersion) !== current.loaderVersion;
     if (payload.patch.gameVersion !== undefined) {
       payload.patch.gameVersion = nextGameVersion;
+    }
+    if ((versionChanged || loaderKindChanged) && payload.patch.loaderVersion === undefined) {
+      payload.patch.loaderVersion = "";
     }
     if (versionChanged || loaderChanged) {
       await this.minecraft.assertVersionExists(nextGameVersion);
@@ -195,11 +200,12 @@ export class InstanceService {
     const updated = await this.store.update((data) => {
       const instance = data.instances.find((item) => item.id === payload.id);
       if (!instance) {
-        throw new Error("Instance not found");
+        throw new Error(tr("Instance not found", "Инстанция не найдена"));
       }
 
       Object.assign(instance, payload.patch);
       instance.name = sanitizeFilePart(instance.name);
+      instance.loaderVersion = instance.loaderVersion?.trim() || undefined;
       instance.updatedAt = new Date().toISOString();
       return instance;
     });
@@ -217,14 +223,14 @@ export class InstanceService {
 
     const pid = data.runningProcesses[id];
     if (pid !== undefined && (await isJavaProcessAlive(pid))) {
-      throw new Error(`${target.name} is running. Stop it before deleting.`);
+      throw new Error(tr(`${target.name} is running. Stop it before deleting.`, `${target.name} запущена. Остановите её перед удалением.`));
     }
 
     const directory = target.directory;
     const root = await realpath(getInstancesRoot()).catch(() => getInstancesRoot());
     const resolvedDir = await realpath(directory).catch(() => directory);
     if (resolvedDir === root || !resolvedDir.startsWith(root + path.sep)) {
-      throw new Error("Refusing to delete a folder outside the instances directory");
+      throw new Error(tr("Refusing to delete a folder outside the instances directory", "Удаление отменено: папка находится вне каталога инстанций"));
     }
     await rm(directory, { recursive: true, force: true });
 
@@ -245,7 +251,7 @@ export class InstanceService {
     if (this.launchAborts.has(id)) {
       return {
         ok: false,
-        message: "already launching"
+        message: tr("already launching", "уже запускается")
       };
     }
     const controller = new AbortController();
@@ -259,7 +265,7 @@ export class InstanceService {
       if (!instance) {
         return {
           ok: false,
-          message: "Instance not found"
+          message: tr("Instance not found", "Инстанция не найдена")
         };
       }
 
@@ -267,7 +273,7 @@ export class InstanceService {
       if (existingPid !== undefined && (await isJavaProcessAlive(existingPid))) {
         return {
           ok: false,
-          message: "already running"
+          message: tr("already running", "уже запущена")
         };
       }
       if (existingPid !== undefined) {
@@ -289,7 +295,7 @@ export class InstanceService {
       if (!activeAccount) {
         return {
           ok: false,
-          message: "Add an account first (Microsoft login or offline profile)"
+          message: tr("Add an account first (Microsoft login or offline profile)", "Сначала добавьте аккаунт (вход через Microsoft или офлайн-профиль)")
         };
       }
       if (this.auth && activeAccount.kind !== "offline") {
@@ -310,7 +316,7 @@ export class InstanceService {
       ) {
         return {
           ok: false,
-          message: `Microsoft session for ${activeAccount.profileName ?? "account"} expired. Log in again via Add account.`
+          message: tr(`Microsoft session for ${activeAccount.profileName ?? "account"} expired. Log in again via Add account.`, `Сессия Microsoft для ${activeAccount.profileName ?? "аккаунта"} истекла. Войдите снова через «Добавить аккаунт».`)
         };
       }
 
@@ -320,7 +326,7 @@ export class InstanceService {
         if (signal.aborted) {
           return {
             ok: false,
-            message: "launch cancelled"
+            message: tr("launch cancelled", "запуск отменён")
           };
         }
         throw error;
@@ -339,7 +345,7 @@ export class InstanceService {
     if (!instance) {
       return {
         ok: false,
-        message: "Instance not found"
+        message: tr("Instance not found", "Инстанция не найдена")
       };
     }
 
@@ -360,7 +366,7 @@ export class InstanceService {
         });
         return {
           ok: true,
-          message: "stopped"
+          message: tr("stopped", "остановлена")
         };
       }
       const stalePid = pid;
@@ -373,30 +379,28 @@ export class InstanceService {
 
     return {
       ok: true,
-      message: "launch cancelled"
+      message: tr("launch cancelled", "запуск отменён")
     };
   }
 
   private async runLaunch(id: string, instance: LauncherInstance, data: LauncherData, activeAccount: AccountState, signal: AbortSignal, onProgress?: (progress: import("./minecraft").LaunchProgress) => void): Promise<LaunchResult> {
     const requiredMajor = await this.minecraft.getRequiredJavaMajor(instance.gameVersion);
     const javaRuntime = await this.java.ensureRuntime(requiredMajor, [
-      instance.javaPath,
       data.settings.javaPaths?.[String(requiredMajor)],
       data.settings.javaPath
     ], signal, (received, total) => onProgress?.({ phase: "java", done: 0, total: 0, received, totalBytes: total }));
     const javaPath = javaRuntime.path;
     const rawMemory = instance.maxMemoryMb || data.settings.maxMemoryMb;
     const maxMemoryMb = Math.min(65536, Math.max(512, Math.round(rawMemory) || 4096));
-    const extraJvmArgs = parseJvmFlags(instance.extraJvmArgs ?? data.settings.extraJvmArgs);
+    const extraJvmArgs = parseJvmFlags(instance.extraJvmArgs?.trim() ? instance.extraJvmArgs : data.settings.extraJvmArgs);
 
     const updatedInstance = await this.store.update((current) => {
       const target = current.instances.find((item) => item.id === id);
 
       if (!target) {
-        throw new Error("Instance not found");
+        throw new Error(tr("Instance not found", "Инстанция не найдена"));
       }
 
-      target.javaPath = javaPath;
       target.updatedAt = new Date().toISOString();
       return target;
     });
@@ -450,7 +454,7 @@ export class InstanceService {
       closeSync(logFd);
       return {
         ok: false,
-        message: error instanceof Error ? `Could not start Java: ${error.message}` : "Could not start Java"
+        message: error instanceof Error ? tr(`Could not start Java: ${error.message}`, `Не удалось запустить Java: ${error.message}`) : tr("Could not start Java", "Не удалось запустить Java")
       };
     }
     child.unref();
@@ -459,7 +463,7 @@ export class InstanceService {
     if (!child.pid) {
       return {
         ok: false,
-        message: "Minecraft process failed to start"
+        message: tr("Minecraft process failed to start", "Не удалось запустить процесс Minecraft")
       };
     }
 
@@ -490,7 +494,7 @@ export class InstanceService {
 
     return {
       ok: true,
-      message: `${javaRuntime.message}. Minecraft process started${launch.warning ? ` (${launch.warning})` : ""}.`,
+      message: tr(`${javaRuntime.message}. Minecraft process started${launch.warning ? ` (${launch.warning})` : ""}.`, `${javaRuntime.message}. Процесс Minecraft запущен${launch.warning ? ` (${launch.warning})` : ""}.`),
       logPath: launch.logPath,
       pid: startedPid,
       java: javaRuntime
@@ -526,7 +530,7 @@ export class InstanceService {
     if (!instance) {
       return {
         ok: false,
-        message: "Instance not found"
+        message: tr("Instance not found", "Инстанция не найдена")
       };
     }
 
@@ -537,7 +541,7 @@ export class InstanceService {
       }).catch(() => undefined);
       return {
         ok: false,
-        message: "not running"
+        message: tr("not running", "не запущена")
       };
     }
 
@@ -558,7 +562,7 @@ export class InstanceService {
 
     return {
       ok: true,
-      message: "stopped"
+      message: tr("stopped", "остановлена")
     };
   }
 
@@ -570,7 +574,7 @@ export class InstanceService {
     const data = await this.store.getData();
     const instance = data.instances.find((item) => item.id === id);
     if (!instance) {
-      throw new Error("Instance not found");
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
     const tailKb = 200 * 1024;
     const readTail = async (file: string): Promise<{ text: string; found: boolean }> => {

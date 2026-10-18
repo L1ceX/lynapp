@@ -5,8 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { JavaInstallation, JavaRuntimeState } from "@shared/types";
-import { getLauncherRoot, getWindowsJavaCandidates } from "../paths";
+import { getLauncherRoot, getTarPath, getWindowsJavaCandidates } from "../paths";
 import { readUrlBytes, type BytesCallback } from "./transfer";
+import { tr } from "../i18n";
 
 const execFileAsync = promisify(execFile);
 
@@ -243,11 +244,12 @@ function getDownloadMajor(requiredMajor: number): number {
 }
 
 function getRuntimeMessage(major: number, requiredMajor: number, verb: "Using" | "Downloaded"): string {
+  const verbRu = verb === "Using" ? "Используется" : "Скачана";
   if (major === requiredMajor) {
-    return `${verb} Java ${major}`;
+    return tr(`${verb} Java ${major}`, `${verbRu} Java ${major}`);
   }
 
-  return `${verb} Java ${major} for Minecraft Java ${requiredMajor} requirement`;
+  return tr(`${verb} Java ${major} for Minecraft Java ${requiredMajor} requirement`, `${verbRu} Java ${major} (Minecraft требует Java ${requiredMajor})`);
 }
 
 function getExecErrorMessage(error: unknown): string {
@@ -283,7 +285,7 @@ async function downloadRuntimeZip(major: number, signal?: AbortSignal, onBytes?:
   }
 
   const tempPath = `${zipPath}.tmp`;
-  const { buffer } = await readUrlBytes(getAdoptiumDownloadUrl(major), { "user-agent": "lynapp/1.1.0-beta.0" }, signal, (received, total) =>
+  const { buffer } = await readUrlBytes(getAdoptiumDownloadUrl(major), { "user-agent": "lynapp/1.1.0-beta.1" }, signal, (received, total) =>
     onBytes?.(received, total), 15 * 60 * 1000
   );
   await writeFile(tempPath, buffer);
@@ -298,12 +300,12 @@ async function expandZip(zipPath: string, destination: string): Promise<void> {
   await mkdir(destination, { recursive: true });
 
   try {
-    await execFileAsync("tar.exe", ["-xf", zipPath, "-C", destination], {
+    await execFileAsync(getTarPath(), ["-xf", zipPath, "-C", destination], {
       windowsHide: true,
       timeout: 120000
     });
   } catch (error) {
-    throw new Error(`Java archive extraction failed: ${getExecErrorMessage(error)}`);
+    throw new Error(tr(`Java archive extraction failed: ${getExecErrorMessage(error)}`, `Не удалось распаковать архив Java: ${getExecErrorMessage(error)}`));
   }
 }
 
@@ -384,7 +386,7 @@ export class JavaService {
     const installed = await this.installFresh(downloadMajor, signal, onBytes);
 
     if (!isCompatibleJavaMajor(installed.major, requiredMajor)) {
-      throw new Error(`Downloaded Java ${downloadMajor}, but archive contains Java ${installed.major}.`);
+      throw new Error(tr(`Downloaded Java ${downloadMajor}, but archive contains Java ${installed.major}.`, `Скачана Java ${downloadMajor}, но в архиве оказалась Java ${installed.major}.`));
     }
 
     return {
@@ -402,7 +404,7 @@ export class JavaService {
     const installed = await this.installFresh(downloadMajor);
 
     if (!isCompatibleJavaMajor(installed.major, requiredMajor)) {
-      throw new Error(`Downloaded Java ${downloadMajor}, but archive contains Java ${installed.major}.`);
+      throw new Error(tr(`Downloaded Java ${downloadMajor}, but archive contains Java ${installed.major}.`, `Скачана Java ${downloadMajor}, но в архиве оказалась Java ${installed.major}.`));
     }
 
     return installed.javawPath;
@@ -438,10 +440,10 @@ export class JavaService {
           source: candidate.source,
           message:
             candidate.source === "downloaded"
-              ? `Java ${candidate.major} managed by lynapp`
+              ? tr(`Java ${candidate.major} managed by lynapp`, `Java ${candidate.major}, установлена lynapp`)
               : candidate.source === "configured"
-                ? `Custom Java ${candidate.major}`
-                : `System Java ${candidate.major}`
+                ? tr(`Custom Java ${candidate.major}`, `Своя Java ${candidate.major}`)
+                : tr(`System Java ${candidate.major}`, `Системная Java ${candidate.major}`)
         };
       }
     }
@@ -451,7 +453,7 @@ export class JavaService {
       path: preferredPath ?? "",
       valid: false,
       source: "missing",
-      message: `Java ${major} is not installed`
+      message: tr(`Java ${major} is not installed`, `Java ${major} не установлена`)
     };
   }
 
@@ -477,7 +479,7 @@ export class JavaService {
     }
 
     if (!(await pathExists(javawPath))) {
-      throw new Error("Selected file was not found.");
+      throw new Error(tr("Selected file was not found.", "Выбранный файл не найден."));
     }
 
     return { javawPath, major: await readJavaMajor(javawPath) };
@@ -500,14 +502,14 @@ export class JavaService {
 
     if (!javawPath) {
       await rm(tempDir, { recursive: true, force: true });
-      throw new Error(`Downloaded Java ${downloadMajor}, but javaw.exe was not found in the archive.`);
+      throw new Error(tr(`Downloaded Java ${downloadMajor}, but javaw.exe was not found in the archive.`, `Скачана Java ${downloadMajor}, но в архиве нет javaw.exe.`));
     }
 
     const major = await readJavaMajor(javawPath);
 
     if (!major) {
       await rm(tempDir, { recursive: true, force: true });
-      throw new Error(`Downloaded Java ${downloadMajor}, but its version could not be detected.`);
+      throw new Error(tr(`Downloaded Java ${downloadMajor}, but its version could not be detected.`, `Скачана Java ${downloadMajor}, но её версию не удалось определить.`));
     }
 
     await rm(runtimeDir, { recursive: true, force: true });

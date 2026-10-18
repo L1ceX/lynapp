@@ -3,6 +3,7 @@ import { BrowserWindow, type BrowserWindowConstructorOptions } from "electron";
 import type { AccountsState, AccountState, LoginStartResult } from "@shared/types";
 import { bundledMicrosoftClientId } from "../config";
 import { JsonStore, getActiveAccount } from "../store";
+import { tr } from "../i18n";
 
 const microsoftAuthorizeUrl = "https://login.live.com/oauth20_authorize.srf";
 const microsoftNativeRedirectUri = "https://login.live.com/oauth20_desktop.srf";
@@ -95,7 +96,7 @@ async function postJson<T>(url: string, payload: unknown): Promise<T> {
   const data = await readJson<T & OAuthErrorResponse & XstsErrorResponse>(response);
 
   if (!response.ok) {
-    throw new Error(data.Message || data.error_description || data.error || `Request failed with HTTP ${response.status}`);
+    throw new Error(data.Message || data.error_description || data.error || tr(`Request failed with HTTP ${response.status}`, `Ошибка запроса, HTTP ${response.status}`));
   }
 
   return data;
@@ -173,7 +174,7 @@ function openMicrosoftLoginWindow(parentWindow: BrowserWindow | null, clientId: 
       }
 
       if (!code) {
-        reject(new Error("Microsoft login finished without an authorization code."));
+        reject(new Error(tr("Microsoft login finished without an authorization code.", "Вход через Microsoft завершился без кода авторизации.")));
         return;
       }
 
@@ -194,7 +195,7 @@ function openMicrosoftLoginWindow(parentWindow: BrowserWindow | null, clientId: 
       const code = params.get("code");
 
       if (returnedState !== state) {
-        finish(new Error("Microsoft login state check failed."));
+        finish(new Error(tr("Microsoft login state check failed.", "Проверка состояния входа через Microsoft не пройдена.")));
         return;
       }
 
@@ -211,7 +212,7 @@ function openMicrosoftLoginWindow(parentWindow: BrowserWindow | null, clientId: 
     authWindow.on("closed", () => {
       if (!finished) {
         finished = true;
-        reject(new Error("Microsoft login window was closed."));
+        reject(new Error(tr("Microsoft login window was closed.", "Окно входа Microsoft было закрыто.")));
       }
     });
 
@@ -233,7 +234,7 @@ async function readMicrosoftTokenResponse(response: Response, step: string): Pro
   const body = (await readJson<MicrosoftOAuthTokenResponse>(response));
 
   if (!response.ok || !body.access_token || !body.refresh_token) {
-    throw new Error(body.error_description || body.error || `Microsoft token request failed during ${step} (HTTP ${response.status})`);
+    throw new Error(body.error_description || body.error || tr(`Microsoft token request failed during ${step} (HTTP ${response.status})`, `Не удалось получить токен Microsoft на шаге «${step}» (HTTP ${response.status})`));
   }
 
   const expiresIn = Number(body.expires_in ?? 3600);
@@ -297,7 +298,7 @@ async function authenticateXbox(microsoftAccessToken: string): Promise<XboxAuthR
       });
 
       if (!result.Token) {
-        throw new Error("Xbox Live did not return a user token.");
+        throw new Error(tr("Xbox Live did not return a user token.", "Xbox Live не вернул токен пользователя."));
       }
 
       return result;
@@ -308,26 +309,26 @@ async function authenticateXbox(microsoftAccessToken: string): Promise<XboxAuthR
     }
   }
 
-  throw new Error(`Xbox Live authentication failed: ${errorMessage(firstError)}`);
+  throw new Error(tr(`Xbox Live authentication failed: ${errorMessage(firstError)}`, `Ошибка входа в Xbox Live: ${errorMessage(firstError)}`));
 }
 
 function describeXstsError(payload: XstsErrorResponse, status: number): string {
   switch (payload.XErr) {
     case 2148916229:
-      return "This Microsoft account is banned from Xbox Live.";
+      return tr("This Microsoft account is banned from Xbox Live.", "Этот аккаунт Microsoft заблокирован в Xbox Live.");
     case 2148916233:
-      return "This Microsoft account has no Xbox profile. Open xbox.com once and create a profile.";
+      return tr("This Microsoft account has no Xbox profile. Open xbox.com once and create a profile.", "У этого аккаунта Microsoft нет профиля Xbox. Откройте xbox.com и создайте профиль.");
     case 2148916234:
-      return "This Microsoft account is blocked from Xbox Live.";
+      return tr("This Microsoft account is blocked from Xbox Live.", "Доступ этого аккаунта Microsoft к Xbox Live закрыт.");
     case 2148916235:
-      return "Xbox Live is not available in this account region.";
+      return tr("Xbox Live is not available in this account region.", "Xbox Live недоступен в регионе этого аккаунта.");
     case 2148916236:
     case 2148916237:
-      return "This Xbox account is restricted from online services.";
+      return tr("This Xbox account is restricted from online services.", "Этому аккаунту Xbox ограничен доступ к онлайн-сервисам.");
     case 2148916238:
-      return "This is a child account. It needs adult approval before Minecraft login can work.";
+      return tr("This is a child account. It needs adult approval before Minecraft login can work.", "Это детский аккаунт. Для входа в Minecraft нужно разрешение взрослого.");
     default:
-      return payload.Message || `Xbox XSTS authorization failed with HTTP ${status}`;
+      return payload.Message || tr(`Xbox XSTS authorization failed with HTTP ${status}`, `Ошибка авторизации Xbox XSTS, HTTP ${status}`);
   }
 }
 
@@ -354,7 +355,7 @@ async function authorizeXsts(xboxToken: string): Promise<XboxAuthResponse> {
   }
 
   if (!payload.Token) {
-    throw new Error("Xbox XSTS did not return an authorization token.");
+    throw new Error(tr("Xbox XSTS did not return an authorization token.", "Xbox XSTS не вернул токен авторизации."));
   }
 
   return payload;
@@ -366,7 +367,7 @@ async function authenticateMinecraft(uhs: string, xstsToken: string): Promise<Mi
   });
 
   if (!result.access_token) {
-    throw new Error("Minecraft Services did not return an access token.");
+    throw new Error(tr("Minecraft Services did not return an access token.", "Minecraft Services не вернул токен доступа."));
   }
 
   return result;
@@ -382,15 +383,15 @@ async function fetchMinecraftProfile(accessToken: string): Promise<MinecraftProf
   const payload = await readJson<MinecraftProfileResponse & OAuthErrorResponse>(response);
 
   if (response.status === 404) {
-    throw new Error("Minecraft Java profile was not found on this Microsoft account.");
+    throw new Error(tr("Minecraft Java profile was not found on this Microsoft account.", "На этом аккаунте Microsoft нет профиля Minecraft Java."));
   }
 
   if (!response.ok) {
-    throw new Error(payload.error_description || payload.error || `Minecraft profile request failed with HTTP ${response.status}`);
+    throw new Error(payload.error_description || payload.error || tr(`Minecraft profile request failed with HTTP ${response.status}`, `Не удалось получить профиль Minecraft, HTTP ${response.status}`));
   }
 
   if (!payload.id || !payload.name) {
-    throw new Error("Minecraft profile response did not include name and uuid.");
+    throw new Error(tr("Minecraft profile response did not include name and uuid.", "В ответе с профилем Minecraft нет имени и UUID."));
   }
 
   return payload;
@@ -411,7 +412,7 @@ export class AuthService {
     const uhs = xsts.DisplayClaims?.xui?.[0]?.uhs;
 
     if (!uhs) {
-      throw new Error("Xbox XSTS response did not include a user hash.");
+      throw new Error(tr("Xbox XSTS response did not include a user hash.", "В ответе Xbox XSTS нет хеша пользователя."));
     }
 
     const minecraft = await authenticateMinecraft(uhs, xsts.Token);
@@ -434,7 +435,7 @@ export class AuthService {
         existing.minecraftAccessToken = minecraft.access_token;
         existing.microsoftRefreshToken = refreshToken;
         existing.xboxUhs = uhs;
-        existing.message = `Signed in as ${profile.name}`;
+        existing.message = tr(`Signed in as ${profile.name}`, `Выполнен вход: ${profile.name}`);
         current.activeAccountId = existing.id;
         current.settings.activeSkinId = existing.activeSkinId ?? null;
       } else {
@@ -448,7 +449,7 @@ export class AuthService {
           minecraftAccessToken: minecraft.access_token,
           microsoftRefreshToken: refreshToken,
           xboxUhs: uhs,
-          message: `Signed in as ${profile.name}`,
+          message: tr(`Signed in as ${profile.name}`, `Выполнен вход: ${profile.name}`),
           activeSkinId: null,
           addedAt: new Date().toISOString()
         };
@@ -466,7 +467,7 @@ export class AuthService {
     if (!clientId) {
       return {
         status: "missing-client-id",
-        message: "Microsoft login is not configured in this build."
+        message: tr("Microsoft login is not configured in this build.", "Вход через Microsoft не настроен в этой сборке.")
       };
     }
 
@@ -478,7 +479,7 @@ export class AuthService {
 
       return {
         status: "signed-in",
-        message: `Signed in as ${profile.name}`
+        message: tr(`Signed in as ${profile.name}`, `Выполнен вход: ${profile.name}`)
       };
     } catch (error) {
       const message = errorMessage(error);
@@ -520,7 +521,7 @@ export class AuthService {
         const refreshed = await this.store.update((current) => {
           const target = current.accounts.find((item) => item.id === active.id);
           if (!target) {
-            throw new Error("Account not found");
+            throw new Error(tr("Account not found", "Аккаунт не найден"));
           }
           target.elyAccessToken = accessToken;
           return target;
@@ -558,10 +559,10 @@ export class AuthService {
   async elyLogin(username: string, password: string, totp?: string): Promise<AccountsState> {
     const name = String(username ?? "").trim();
     if (!name) {
-      throw new Error("Enter your Ely.by username or e-mail.");
+      throw new Error(tr("Enter your Ely.by username or e-mail.", "Введите имя пользователя или e-mail Ely.by."));
     }
     if (!password) {
-      throw new Error("Enter your Ely.by password.");
+      throw new Error(tr("Enter your Ely.by password.", "Введите пароль Ely.by."));
     }
     const code = String(totp ?? "").trim();
     const clientToken = randomUUID().replace(/-/g, "");
@@ -579,7 +580,7 @@ export class AuthService {
         existing.profileName = profile.name;
         existing.elyAccessToken = profile.accessToken;
         existing.elyClientToken = clientToken;
-        existing.message = `Ely.by as ${profile.name}`;
+        existing.message = tr(`Ely.by as ${profile.name}`, `Ely.by: ${profile.name}`);
         data.activeAccountId = existing.id;
       } else {
         const entry: AccountState = {
@@ -590,7 +591,7 @@ export class AuthService {
           minecraftUuid: id,
           elyAccessToken: profile.accessToken,
           elyClientToken: clientToken,
-          message: `Ely.by as ${profile.name}`,
+          message: tr(`Ely.by as ${profile.name}`, `Ely.by: ${profile.name}`),
           activeSkinId: null,
           addedAt: new Date().toISOString()
         };
@@ -619,8 +620,8 @@ export class AuthService {
     const body = (await readJson<{ accessToken?: string; selectedProfile?: { id?: string; name?: string }; error?: string; errorMessage?: string }>(response));
 
     if (!response.ok || !body.accessToken || !body.selectedProfile?.id || !body.selectedProfile?.name) {
-      const detail = body.errorMessage || body.error || `Ely.by login failed (HTTP ${response.status})`;
-      const hint = /two factor/i.test(detail) ? " Enter your 2FA token in the token field." : "";
+      const detail = body.errorMessage || body.error || tr(`Ely.by login failed (HTTP ${response.status})`, `Не удалось войти через Ely.by (HTTP ${response.status})`);
+      const hint = /two factor/i.test(detail) ? tr(" Enter your 2FA token in the token field.", " Введите код двухфакторной аутентификации в поле для кода.") : "";
       throw new Error(`${detail}.${hint}`);
     }
 
@@ -659,7 +660,7 @@ export class AuthService {
     const body = (await readJson<{ accessToken?: string; error?: string; errorMessage?: string }>(response));
 
     if (!response.ok || !body.accessToken) {
-      throw new Error(body.errorMessage || body.error || `Ely.by refresh failed (HTTP ${response.status})`);
+      throw new Error(body.errorMessage || body.error || tr(`Ely.by refresh failed (HTTP ${response.status})`, `Не удалось обновить сессию Ely.by (HTTP ${response.status})`));
     }
 
     return body.accessToken;
@@ -668,7 +669,7 @@ export class AuthService {
   async useOfflineProfile(username: string): Promise<AccountsState> {
     const name = String(username ?? "").trim();
     if (!/^[A-Za-z0-9_]{3,16}$/.test(name)) {
-      throw new Error("Offline username must be 3-16 characters: letters, numbers, underscore.");
+      throw new Error(tr("Offline username must be 3-16 characters: letters, numbers, underscore.", "Офлайн-имя должно содержать от 3 до 16 символов: латинские буквы, цифры и подчёркивание."));
     }
 
     return this.store.update((data) => {
@@ -679,7 +680,7 @@ export class AuthService {
       const existing = data.accounts.find((item) => item.kind === "offline" && item.profileName?.toLowerCase() === name.toLowerCase());
       if (existing) {
         existing.status = "offline";
-        existing.message = `Offline profile: ${existing.profileName}`;
+        existing.message = tr(`Offline profile: ${existing.profileName}`, `Офлайн-профиль: ${existing.profileName}`);
         data.activeAccountId = existing.id;
       } else {
         const entry: AccountState = {
@@ -687,7 +688,7 @@ export class AuthService {
           kind: "offline",
           status: "offline",
           profileName: name,
-          message: `Offline profile: ${name}`,
+          message: tr(`Offline profile: ${name}`, `Офлайн-профиль: ${name}`),
           activeSkinId: null,
           addedAt: new Date().toISOString()
         };
@@ -710,7 +711,7 @@ export class AuthService {
       }
       const target = data.accounts.find((item) => item.id === id);
       if (!target) {
-        throw new Error("Account not found");
+        throw new Error(tr("Account not found", "Аккаунт не найден"));
       }
       data.activeAccountId = target.id;
       data.settings.activeSkinId = target.kind === "microsoft" ? (target.activeSkinId ?? null) : null;

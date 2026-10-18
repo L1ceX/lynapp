@@ -2,6 +2,7 @@ import { app, type BrowserWindow } from "electron";
 import electronUpdater from "electron-updater";
 import { IPC } from "@shared/ipc";
 import type { UpdateStatus } from "@shared/types";
+import { tr } from "./i18n";
 
 const { autoUpdater } = electronUpdater;
 
@@ -44,7 +45,7 @@ export function setupAutoUpdater(window: BrowserWindow): void {
 
 export async function downloadUpdate(): Promise<void> {
   if (!app.isPackaged) {
-    throw new Error("Self-update works only in installed builds");
+    throw new Error(tr("Self-update works only in installed builds", "Автообновление работает только в установленной версии"));
   }
   await autoUpdater.downloadUpdate();
 }

@@ -34,6 +34,26 @@ export interface LauncherInstance {
   mods: InstalledMod[];
 }
 
+export interface EffectsSettings {
+  enabled: boolean;
+  background: boolean;
+  springs: boolean;
+  launch: boolean;
+  cascade: boolean;
+  cards: boolean;
+  details: boolean;
+}
+
+export const EFFECTS_DEFAULTS: EffectsSettings = {
+  enabled: true,
+  background: true,
+  springs: true,
+  launch: true,
+  cascade: true,
+  cards: true,
+  details: true
+};
+
 export interface LauncherSettings {
   javaPath: string;
   javaPaths: Record<string, string>;
@@ -49,6 +69,8 @@ export interface LauncherSettings {
   glowSize: number;
   glowSpeed: number;
   animationsEnabled: boolean;
+  animationSpeed: number;
+  effects: EffectsSettings;
   activeSkinId: string | null;
 }
 

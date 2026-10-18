@@ -1,5 +1,15 @@
 import { app } from "electron";
+import { existsSync } from "node:fs";
 import path from "node:path";
+
+let tarPath: string | null = null;
+export function getTarPath(): string {
+  if (tarPath === null) {
+    const system = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+    tarPath = existsSync(system) ? system : "tar.exe";
+  }
+  return tarPath;
+}
 
 export function getLauncherRoot(): string {
   return path.join(app.getPath("appData"), "lynapp");

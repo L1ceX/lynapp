@@ -10,8 +10,9 @@ import type { LauncherInstance, ModLoader } from "@shared/types";
 import { getLauncherRoot } from "../paths";
 import { JsonStore } from "../store";
 import { InstanceService } from "./instances";
-import { MinecraftService } from "./minecraft";
+import { MinecraftService, pickLatestLoaderVersion } from "./minecraft";
 import { readUrlBytes, createThrottledEmitter, type BytesCallback } from "./transfer";
+import { tr } from "../i18n";
 
 const execFileAsync = promisify(execFile);
 
@@ -113,11 +114,11 @@ function pickLoader(dependencies: Record<string, string>, gameVersion: string): 
 function resolveTarget(instanceDir: string, entryPath: string): string {
   const normalized = path.normalize(entryPath.replace(/\//g, path.sep));
   if (path.isAbsolute(normalized) || normalized.startsWith("..") || /^[a-zA-Z]:/.test(normalized)) {
-    throw new Error(`Unsafe path inside .mrpack: ${entryPath}`);
+    throw new Error(tr(`Unsafe path inside .mrpack: ${entryPath}`, `Недопустимый путь внутри .mrpack: ${entryPath}`));
   }
   const target = path.join(instanceDir, normalized);
   if (target !== instanceDir && !target.startsWith(instanceDir + path.sep)) {
-    throw new Error(`Unsafe path inside .mrpack: ${entryPath}`);
+    throw new Error(tr(`Unsafe path inside .mrpack: ${entryPath}`, `Недопустимый путь внутри .mrpack: ${entryPath}`));
   }
   return target;
 }
@@ -126,14 +127,28 @@ function verifyBuffer(buffer: Buffer, hashes: MrpackIndexFile["hashes"], entryPa
   const sha512 = hashes?.sha512?.toLowerCase();
   if (sha512) {
     const actual = createHash("sha512").update(buffer).digest("hex").toLowerCase();
-    if (actual !== sha512) throw new Error(`Checksum mismatch: ${entryPath}`);
+    if (actual !== sha512) throw new Error(tr(`Checksum mismatch: ${entryPath}`, `Контрольная сумма не совпадает: ${entryPath}`));
     return;
   }
   const sha1 = hashes?.sha1?.toLowerCase();
   if (sha1) {
     const actual = createHash("sha1").update(buffer).digest("hex").toLowerCase();
-    if (actual !== sha1) throw new Error(`Checksum mismatch: ${entryPath}`);
+    if (actual !== sha1) throw new Error(tr(`Checksum mismatch: ${entryPath}`, `Контрольная сумма не совпадает: ${entryPath}`));
   }
+}
+
+const psQuote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+
+async function extractZip(zipPath: string, destination: string): Promise<void> {
+  const script = [
+    "Add-Type -AssemblyName System.IO.Compression.FileSystem",
+    `[System.IO.Compression.ZipFile]::ExtractToDirectory(${psQuote(zipPath)}, ${psQuote(destination)}, [System.Text.Encoding]::UTF8)`
+  ].join("\r\n");
+  await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    windowsHide: true,
+    timeout: 180000,
+    maxBuffer: 32 * 1024 * 1024
+  });
 }
 
 async function downloadBuffer(url: string, onBytes?: BytesCallback): Promise<Buffer> {
@@ -164,28 +179,24 @@ export class ModpackService {
 
   private async unpackIndex(filePath: string): Promise<{ tmp: string; index: MrpackIndex }> {
     if (!/\.mrpack$/i.test(filePath) || !existsSync(filePath)) {
-      throw new Error("Drop a Modrinth .mrpack file to import it");
+      throw new Error(tr("Drop a Modrinth .mrpack file to import it", "Перетащите файл модпака Modrinth (.mrpack), чтобы импортировать его"));
     }
     const tmp = path.join(getLauncherRoot(), "cache", "modpacks", `import-${randomUUID()}`);
     try {
       await mkdir(tmp, { recursive: true });
       try {
-        await execFileAsync("tar.exe", ["-xf", filePath, "-C", tmp], {
-          windowsHide: true,
-          timeout: 120000,
-          maxBuffer: 32 * 1024 * 1024
-        });
+        await extractZip(filePath, tmp);
       } catch {
-        throw new Error("Could not unpack the .mrpack file (corrupt archive?)");
+        throw new Error(tr("Could not unpack the .mrpack file (corrupt archive?)", "Не удалось распаковать файл .mrpack (архив повреждён?)"));
       }
       let index: MrpackIndex;
       try {
         index = JSON.parse(await readFile(path.join(tmp, "modrinth.index.json"), "utf8")) as MrpackIndex;
       } catch {
-        throw new Error("modrinth.index.json is missing or broken: not a valid .mrpack");
+        throw new Error(tr("modrinth.index.json is missing or broken: not a valid .mrpack", "Файл modrinth.index.json отсутствует или повреждён: это не модпак .mrpack"));
       }
       if (index.formatVersion !== 1 || index.game !== "minecraft") {
-        throw new Error("Unsupported .mrpack format (need formatVersion 1 for Minecraft)");
+        throw new Error(tr("Unsupported .mrpack format (need formatVersion 1 for Minecraft)", "Неподдерживаемый формат .mrpack (нужен formatVersion 1 для Minecraft)"));
       }
       return { tmp, index };
     } catch (error) {
@@ -207,7 +218,7 @@ export class ModpackService {
       const dependencies = index.dependencies ?? {};
       const gameVersion = (dependencies.minecraft ?? "").trim();
       if (!gameVersion) {
-        throw new Error("The .mrpack does not declare a Minecraft version");
+        throw new Error(tr("The .mrpack does not declare a Minecraft version", "В модпаке .mrpack не указана версия Minecraft"));
       }
       await this.minecraft.assertVersionExists(gameVersion);
       const { loader, loaderVersion } = pickLoader(dependencies, gameVersion);
@@ -239,7 +250,7 @@ export class ModpackService {
       const data = await this.store.getData();
       const instance = data.instances.find((item) => item.id === instanceId);
       if (!instance) {
-        throw new Error("Instance not found");
+        throw new Error(tr("Instance not found", "Инстанция не найдена"));
       }
       const dependencies = index.dependencies ?? {};
       const packGameVersion = (dependencies.minecraft ?? "").trim() || instance.gameVersion;
@@ -271,7 +282,7 @@ export class ModpackService {
     const data = await this.store.getData();
     const instance = data.instances.find((item) => item.id === instanceId);
     if (!instance) {
-      throw new Error("Instance not found");
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
     const out: Array<{ name: string; isDir: boolean; size: number; modified: string | null }> = [];
     let names: string[] = [];
@@ -321,7 +332,7 @@ export class ModpackService {
     const data = await this.store.getData();
     const instance = data.instances.find((item) => item.id === instanceId);
     if (!instance) {
-      throw new Error("Instance not found");
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
     const included = include ? new Set(include) : null;
     const dependencies: Record<string, string> = { minecraft: instance.gameVersion };
@@ -329,7 +340,7 @@ export class ModpackService {
     if (!loaderVersion && instance.loader !== "vanilla") {
       const available = await this.minecraft.listLoaderVersions(instance.loader, instance.gameVersion).catch(() => [] as string[]);
       loaderVersion = instance.loader === "forge" || instance.loader === "neoforge"
-        ? available[available.length - 1] ?? ""
+        ? pickLatestLoaderVersion(available) ?? ""
         : available.find((item) => !item.includes("-")) ?? available[0] ?? "";
     }
     if (instance.loader === "fabric" && loaderVersion) {
@@ -352,6 +363,9 @@ export class ModpackService {
         continue;
       }
       if (included && !included.has(folder)) {
+        continue;
+      }
+      if (/\.disabled$/i.test(mod.fileName) || !existsSync(path.join(instance.directory, folder, mod.fileName))) {
         continue;
       }
       const version = mod.versionId ? versionMap.get(mod.versionId) : undefined;
@@ -398,15 +412,19 @@ export class ModpackService {
           continue;
         }
         for (const name of entries) {
-          if (knownFiles.has(name.toLowerCase())) {
+          if (knownFiles.has(name.toLowerCase()) || /\.disabled$/i.test(name)) {
             continue;
           }
           await mkdir(path.join(tmp, "overrides", folder), { recursive: true });
           await cp(path.join(instance.directory, folder, name), path.join(tmp, "overrides", folder, name), { recursive: true });
         }
       }
-      for (const extra of ["config", "options.txt", "servers.dat", "optionsof.txt"]) {
-        if (included && !included.has(extra)) {
+      const contentFolders = new Set(Object.values(dirKindFolder));
+      const extras = included
+        ? [...included].filter((name) => !contentFolders.has(name))
+        : ["config", "defaultconfigs", "options.txt", "optionsof.txt", "optionsshaders.txt", "servers.dat"];
+      for (const extra of extras) {
+        if (!extra || extra === ".launcher" || extra.includes("/") || extra.includes("\\") || extra.includes("..")) {
           continue;
         }
         const src = path.join(instance.directory, extra);
@@ -426,10 +444,11 @@ export class ModpackService {
       await writeFile(path.join(tmp, "modrinth.index.json"), JSON.stringify(index, null, 2), "utf8");
       await mkdir(path.dirname(outPath), { recursive: true });
       const zipStage = `${outPath}.${process.pid}.zip`;
-      const psPath = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+      const psPath = psQuote;
       const packScript = [
+        "$ErrorActionPreference = 'Stop'",
         "Add-Type -AssemblyName System.IO.Compression.FileSystem",
-        `$zip = [System.IO.Compression.ZipFile]::Open(${psPath(zipStage)}, 'Create')`,
+        `$zip = [System.IO.Compression.ZipFile]::Open(${psPath(zipStage)}, 'Create', [System.Text.Encoding]::UTF8)`,
         "try {",
         `$items = Get-ChildItem -LiteralPath ${psPath(tmp)} -Recurse -Force`,
         `$base = ${psPath(tmp)}`,
@@ -438,9 +457,9 @@ export class ModpackService {
         "  if ($item.PSIsContainer) {",
         "    $null = $zip.CreateEntry($rel + '/')",
         "  } else {",
+        "    try { $in = [System.IO.File]::Open($item.FullName, 'Open', 'Read', 'ReadWrite') } catch { [Console]::Error.WriteLine('skipped: ' + $rel); continue }",
         "    $entry = $zip.CreateEntry($rel)",
         "    $out = $entry.Open()",
-        "    $in = [System.IO.File]::OpenRead($item.FullName)",
         "    try { $in.CopyTo($out) } finally { $out.Dispose(); $in.Dispose() }",
         "  }",
         "}",
@@ -454,7 +473,7 @@ export class ModpackService {
         });
       } catch {
         await rm(zipStage, { force: true }).catch(() => undefined);
-        throw new Error("Could not pack the .mrpack file");
+        throw new Error(tr("Could not pack the .mrpack file", "Не удалось упаковать файл .mrpack"));
       }
       await rm(outPath, { force: true }).catch(() => undefined);
       await rename(zipStage, outPath);
@@ -477,7 +496,7 @@ export class ModpackService {
   async finishImport(instanceId: string, sender: WebContents): Promise<LauncherInstance> {
     const job = this.pending.get(instanceId);
     if (!job) {
-      throw new Error("Import session expired, drop the .mrpack again");
+      throw new Error(tr("Import session expired, drop the .mrpack again", "Сеанс импорта истёк, перетащите .mrpack ещё раз"));
     }
     this.pending.delete(instanceId);
 
@@ -485,7 +504,7 @@ export class ModpackService {
     const instance = data.instances.find((item) => item.id === instanceId);
     if (!instance) {
       await rm(job.tmp, { recursive: true, force: true });
-      throw new Error("The instance was deleted before the import finished");
+      throw new Error(tr("The instance was deleted before the import finished", "Инстанция была удалена до завершения импорта"));
     }
 
     const emit = (done: number, total: number, fileName: string): void => {
@@ -682,17 +701,31 @@ export class ModpackService {
       });
     }
 
+    const staleFiles: string[] = [];
     const updated = await this.store.update((current) => {
       const target = current.instances.find((item) => item.id === instanceId);
-      if (!target) throw new Error("Instance not found");
+      if (!target) throw new Error(tr("Instance not found", "Инстанция не найдена"));
       for (const [rel, meta] of metas) {
-        const projectType = dirProjectType[rel.split("/")[0]?.toLowerCase() ?? ""];
+        const folder = rel.split("/")[0] ?? "";
+        const projectType = dirProjectType[folder.toLowerCase()];
         if (!projectType) continue;
         const fileName = rel.split("/").pop() ?? rel;
-        const exists = target.mods.some(
+        const existing = target.mods.find(
           (mod) => mod.provider === "modrinth" && mod.projectId === meta.projectId && (mod.projectType ?? "mod") === projectType
         );
-        if (exists) continue;
+        if (existing) {
+          const oldName = existing.fileName?.replace(/\.disabled$/i, "");
+          if (oldName && oldName.toLowerCase() !== fileName.toLowerCase()) {
+            staleFiles.push(path.join(target.directory, folder, oldName), path.join(target.directory, folder, `${oldName}.disabled`));
+          }
+          existing.versionId = meta.versionId;
+          existing.fileName = fileName;
+          existing.name = meta.name;
+          existing.slug = meta.slug ?? existing.slug;
+          existing.iconUrl = meta.iconUrl ?? existing.iconUrl;
+          existing.installedAt = new Date().toISOString();
+          continue;
+        }
         target.mods.push({
           id: randomUUID(),
           provider: "modrinth",
@@ -710,6 +743,9 @@ export class ModpackService {
       target.updatedAt = new Date().toISOString();
       return target;
     });
+    for (const file of staleFiles) {
+      await rm(file, { force: true }).catch(() => undefined);
+    }
     await writeFile(path.join(updated.directory, ".launcher", "content.json"), JSON.stringify(updated.mods, null, 2), "utf8");
   }
 }

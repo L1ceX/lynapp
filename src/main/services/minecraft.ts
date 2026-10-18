@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { AccountState, LauncherInstance, ModLoader } from "@shared/types";
-import { getLauncherRoot } from "../paths";
+import { getLauncherRoot, getTarPath } from "../paths";
 import { getRequiredJavaMajor as fallbackJavaMajor } from "./java";
 import { readUrlBytes, type BytesCallback } from "./transfer";
+import { tr } from "../i18n";
 
 const execFileAsync = promisify(execFile);
 const versionManifestUrl = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
@@ -80,6 +81,7 @@ interface VersionJson {
     jvm?: ArgumentEntry[];
   };
   minecraftArguments?: string;
+  prebuiltClientJar?: string;
 }
 
 interface AssetIndex {
@@ -151,6 +153,8 @@ async function isValidDownload(filePath: string, expectedSha1?: string): Promise
   return (await sha1File(filePath)).toLowerCase() === expectedSha1.toLowerCase();
 }
 
+let downloadTmpCounter = 0;
+
 async function downloadFile(url: string, filePath: string, expectedSha1?: string, signal?: AbortSignal, onBytes?: BytesCallback, timeoutMs?: number): Promise<void> {
   signal?.throwIfAborted();
   if (await isValidDownload(filePath, expectedSha1)) {
@@ -159,13 +163,13 @@ async function downloadFile(url: string, filePath: string, expectedSha1?: string
 
   await mkdir(path.dirname(filePath), { recursive: true });
 
-  const { buffer } = await readUrlBytes(url, { "user-agent": "lynapp/1.1.0-beta.0" }, signal, (received, total) => onBytes?.(received, total), timeoutMs);
-  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  const { buffer } = await readUrlBytes(url, { "user-agent": "lynapp/1.1.0-beta.1" }, signal, (received, total) => onBytes?.(received, total), timeoutMs);
+  const tmpPath = `${filePath}.${process.pid}.${(downloadTmpCounter += 1)}.tmp`;
   await writeFile(tmpPath, buffer);
   await rename(tmpPath, filePath);
 
   if (!(await isValidDownload(filePath, expectedSha1))) {
-    throw new Error(`Downloaded file checksum mismatch: ${filePath}`);
+    throw new Error(tr(`Downloaded file checksum mismatch: ${filePath}`, `Контрольная сумма скачанного файла не совпадает: ${filePath}`));
   }
 }
 
@@ -193,7 +197,7 @@ async function downloadJson<T>(url: string, filePath: string, expectedSha1?: str
     return second;
   }
   await rm(filePath, { force: true }).catch(() => undefined);
-  throw new Error(`Downloaded JSON failed validation: ${url}`);
+  throw new Error(tr(`Downloaded JSON failed validation: ${url}`, `Скачанный JSON не прошёл проверку: ${url}`));
 }
 
 function isVersionJsonLike(data: unknown): boolean {
@@ -228,12 +232,12 @@ async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
   const response = await fetch(url, {
     signal,
     headers: {
-      "user-agent": "lynapp/1.1.0-beta.0"
+      "user-agent": "lynapp/1.1.0-beta.1"
     }
   });
 
   if (!response.ok) {
-    throw new Error(`Request failed with HTTP ${response.status}: ${url}`);
+    throw new Error(tr(`Request failed with HTTP ${response.status}: ${url}`, `Ошибка запроса, HTTP ${response.status}: ${url}`));
   }
 
   return response.text();
@@ -241,6 +245,33 @@ async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
 
 function parseMavenVersions(metadataXml: string): string[] {
   return [...metadataXml.matchAll(/<version>([^<]+)<\/version>/g)].map((match) => match[1]);
+}
+
+export function compareLoaderVersions(a: string, b: string): number {
+  const split = (value: string): { nums: number[]; pre: string } => {
+    const dash = value.search(/-(?=[a-z])/i);
+    const core = dash >= 0 ? value.slice(0, dash) : value;
+    return { nums: core.split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0), pre: dash >= 0 ? value.slice(dash + 1) : "" };
+  };
+  const left = split(a);
+  const right = split(b);
+  for (let i = 0; i < Math.max(left.nums.length, right.nums.length); i += 1) {
+    const diff = (left.nums[i] ?? 0) - (right.nums[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  if (left.pre === right.pre) return 0;
+  if (!left.pre) return 1;
+  if (!right.pre) return -1;
+  return left.pre.localeCompare(right.pre);
+}
+
+export function sortLoaderVersionsDesc(versions: string[]): string[] {
+  return [...versions].sort((a, b) => compareLoaderVersions(b, a));
+}
+
+export function pickLatestLoaderVersion(versions: string[]): string | undefined {
+  const sorted = sortLoaderVersionsDesc(versions);
+  return sorted.find((item) => !/-(beta|alpha|rc|pre)/i.test(item)) ?? sorted[0];
 }
 
 const loaderVersionsCache = new Map<string, { at: number; versions: string[] }>();
@@ -270,10 +301,13 @@ async function getCachedLoaderVersions(key: string, loader: () => Promise<string
 
 async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.1.0-beta.0" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.1" }
   });
+  if (response.status === 400 || response.status === 404) {
+    return [];
+  }
   if (!response.ok) {
-    throw new Error(`Fabric loader versions returned ${response.status}`);
+    throw new Error(tr(`Fabric loader versions returned ${response.status}`, `Сервер Fabric вернул ошибку при загрузке версий: ${response.status}`));
   }
   const list = (await response.json()) as Array<{ loader?: { version?: string } }>;
   return list.map((item) => item.loader?.version).filter((item): item is string => Boolean(item));
@@ -281,10 +315,13 @@ async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> 
 
 async function listQuiltLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.1.0-beta.0" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.1" }
   });
+  if (response.status === 400 || response.status === 404) {
+    return [];
+  }
   if (!response.ok) {
-    throw new Error(`Quilt loader versions returned ${response.status}`);
+    throw new Error(tr(`Quilt loader versions returned ${response.status}`, `Сервер Quilt вернул ошибку при загрузке версий: ${response.status}`));
   }
   const list = (await response.json()) as Array<{ loader?: { version?: string }; version?: string }>;
   return list.map((item) => item.loader?.version ?? item.version).filter((item): item is string => Boolean(item));
@@ -292,7 +329,7 @@ async function listQuiltLoaderVersions(gameVersion: string): Promise<string[]> {
 
 async function listForgeLoaderVersions(gameVersion: string): Promise<string[]> {
   const metadata = await fetchText("https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml");
-  return parseMavenVersions(metadata).filter((item) => item.startsWith(`${gameVersion}-`));
+  return sortLoaderVersionsDesc(parseMavenVersions(metadata).filter((item) => item.startsWith(`${gameVersion}-`)));
 }
 
 async function listNeoForgeLoaderVersions(gameVersion: string): Promise<string[]> {
@@ -301,7 +338,7 @@ async function listNeoForgeLoaderVersions(gameVersion: string): Promise<string[]
     return [];
   }
   const metadata = await fetchText("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml");
-  return parseMavenVersions(metadata).filter((item) => item.startsWith(prefix));
+  return sortLoaderVersionsDesc(parseMavenVersions(metadata).filter((item) => item.startsWith(prefix)));
 }
 
 function parseGameVersion(version: string): [number, number, number] {
@@ -320,7 +357,7 @@ function isGameVersionAtLeast(version: string, major: number, minor: number, pat
 async function getFabricGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.fabricmc.net/v2/versions/game", {
-      headers: { "user-agent": "lynapp/1.1.0-beta.0" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.1" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -333,7 +370,7 @@ async function getFabricGameVersions(): Promise<string[]> {
 async function getQuiltGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.quiltmc.org/v3/versions/game", {
-      headers: { "user-agent": "lynapp/1.1.0-beta.0" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.1" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -390,7 +427,7 @@ async function getLoaderSupportMap(): Promise<LoaderSupportMap> {
     fabric: fabricLive.length ? releases.filter((item) => fabricSet.has(item)) : releases.filter((item) => isGameVersionAtLeast(item, 1, 14, 0)),
     quilt: quiltLive.length ? releases.filter((item) => quiltSet.has(item)) : releases.filter((item) => isGameVersionAtLeast(item, 1, 14, 0)),
     forge: forgeLive.length ? forgeLive : releases,
-    neoforge: neoforgeLive.length ? neoforgeLive : releases.filter((item) => isGameVersionAtLeast(item, 1, 20, 1))
+    neoforge: neoforgeLive.length ? neoforgeLive : releases.filter((item) => isGameVersionAtLeast(item, 1, 20, 2))
   };
 
   loaderSupportCache = { at: Date.now(), map };
@@ -545,13 +582,13 @@ async function extractNativeJar(jarPath: string, destination: string): Promise<v
   await mkdir(destination, { recursive: true });
 
   try {
-    await execFileAsync("tar.exe", ["-xf", jarPath, "-C", destination], {
+    await execFileAsync(getTarPath(), ["-xkf", jarPath, "-C", destination], {
       windowsHide: true,
       timeout: 60000
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Native library extraction failed: ${message}`);
+    throw new Error(tr(`Native library extraction failed: ${message}`, `Не удалось распаковать нативные библиотеки: ${message}`));
   }
 }
 
@@ -602,13 +639,13 @@ function getAccessToken(account: AccountState): string {
 
   if (account.kind === "ely") {
     if (account.status !== "signed-in" || !account.elyAccessToken) {
-      throw new Error("Log in with Ely.by again before launching Minecraft.");
+      throw new Error(tr("Log in with Ely.by again before launching Minecraft.", "Перед запуском Minecraft войдите через Ely.by ещё раз."));
     }
     return account.elyAccessToken;
   }
 
   if (account.status !== "signed-in" || !account.minecraftAccessToken) {
-    throw new Error("Sign in with Microsoft or select an offline profile before launching Minecraft.");
+    throw new Error(tr("Sign in with Microsoft or select an offline profile before launching Minecraft.", "Перед запуском Minecraft войдите через Microsoft или выберите офлайн-профиль."));
   }
 
   return account.minecraftAccessToken;
@@ -637,15 +674,15 @@ async function getManifest(): Promise<VersionManifest> {
   try {
     const response = await fetch(versionManifestUrl, {
       headers: {
-        "user-agent": "lynapp/1.1.0-beta.0"
+        "user-agent": "lynapp/1.1.0-beta.1"
       }
     });
     if (!response.ok) {
-      throw new Error(`Version manifest returned HTTP ${response.status}`);
+      throw new Error(tr(`Version manifest returned HTTP ${response.status}`, `Список версий Mojang вернул HTTP ${response.status}`));
     }
     const manifest = (await response.json()) as VersionManifest;
     if (!Array.isArray(manifest.versions)) {
-      throw new Error("Version manifest has an unexpected shape");
+      throw new Error(tr("Version manifest has an unexpected shape", "Список версий Mojang имеет неожиданный формат"));
     }
     await mkdir(path.dirname(manifestPath), { recursive: true });
     await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
@@ -657,7 +694,7 @@ async function getManifest(): Promise<VersionManifest> {
       manifestMemory = { at: Date.now(), manifest };
       return manifest;
     } catch {
-      throw new Error("Could not load the Minecraft version list (offline and no cache yet)");
+      throw new Error(tr("Could not load the Minecraft version list (offline and no cache yet)", "Не удалось загрузить список версий Minecraft (нет сети и сохранённой копии)"));
     }
   }
 }
@@ -667,7 +704,7 @@ async function getVersionJson(gameVersion: string, signal?: AbortSignal): Promis
   const version = manifest.versions.find((item) => item.id === gameVersion);
 
   if (!version) {
-    throw new Error(`Minecraft version not found in Mojang manifest: ${gameVersion}`);
+    throw new Error(tr(`Minecraft version not found in Mojang manifest: ${gameVersion}`, `Версия Minecraft не найдена в списке Mojang: ${gameVersion}`));
   }
 
   return downloadJson<VersionJson>(version.url, path.join(getVersionDir(gameVersion), `${gameVersion}.json`), undefined, signal, isVersionJsonLike);
@@ -724,7 +761,7 @@ async function prepareLibraries(version: VersionJson, nativesDir: string, signal
         ? path.join(getLibrariesRoot(), normalizePath(nativeDownload.path))
         : path.join(getLibrariesRoot(), mavenClassifierPath(library.name ?? "", classifier));
       if (!nativeDownload.path && !library.name) {
-        throw new Error(`Native library is missing and has no download URL (${classifier})`);
+        throw new Error(tr(`Native library is missing and has no download URL (${classifier})`, `Нативная библиотека отсутствует, и для неё нет ссылки на загрузку (${classifier})`));
       }
       const nativeUrl = nativeDownload.url ?? legacyMavenUrl(library.name ?? "", classifier);
       await downloadFile(nativeUrl, nativePath, nativeDownload.sha1, signal);
@@ -781,16 +818,16 @@ async function getFabricLoaderVersion(requested?: string, signal?: AbortSignal):
 
   const response = await fetch("https://meta.fabricmc.net/v2/versions/loader", {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.0" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.1" }
   });
   if (!response.ok) {
-    throw new Error(`Fabric loader versions returned ${response.status}`);
+    throw new Error(tr(`Fabric loader versions returned ${response.status}`, `Сервер Fabric вернул ошибку при загрузке версий: ${response.status}`));
   }
 
   const versions = (await response.json()) as Array<{ version: string; stable: boolean }>;
   const latest = versions.find((item) => item.stable) ?? versions[0];
   if (!latest) {
-    throw new Error("Fabric loader version list is empty.");
+    throw new Error(tr("Fabric loader version list is empty.", "Список версий загрузчика Fabric пуст."));
   }
 
   return latest.version;
@@ -812,17 +849,17 @@ async function getQuiltLoaderVersion(gameVersion: string, requested?: string, si
 
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.0" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.1" }
   });
   if (!response.ok) {
-    throw new Error(`Quilt loader versions returned ${response.status}`);
+    throw new Error(tr(`Quilt loader versions returned ${response.status}`, `Сервер Quilt вернул ошибку при загрузке версий: ${response.status}`));
   }
 
   const versions = (await response.json()) as Array<{ loader?: { version?: string }; version?: string }>;
   const all = versions.map((item) => item.loader?.version ?? item.version).filter((item): item is string => Boolean(item));
   const latest = all.find((item) => !item.includes("-")) ?? all[0];
   if (!latest) {
-    throw new Error(`No Quilt loader found for Minecraft ${gameVersion}.`);
+    throw new Error(tr(`No Quilt loader found for Minecraft ${gameVersion}.`, `Загрузчик Quilt для Minecraft ${gameVersion} не найден.`));
   }
 
   return latest;
@@ -899,7 +936,7 @@ async function runClientInstaller(javaPath: string, installerPath: string, loade
       maxBuffer: 20 * 1024 * 1024
     });
   } catch (error) {
-    throw new Error(`${loader} client installer failed:\n${installerErrorDetails(error)}`);
+    throw new Error(tr(`${loader} client installer failed:\n${installerErrorDetails(error)}`, `Установщик ${loader} завершился с ошибкой:\n${installerErrorDetails(error)}`));
   }
 }
 
@@ -972,7 +1009,7 @@ async function loadInstalledLoaderProfile(
   }
 
   if (!best) {
-    throw new Error(`${loader} installed profile was not found after installer finished.`);
+    throw new Error(tr(`${loader} installed profile was not found after installer finished.`, `После установки ${loader} профиль версии не найден.`));
   }
 
   const parent = best.profile.inheritsFrom ? await getVersionJson(best.profile.inheritsFrom) : vanillaVersion;
@@ -987,9 +1024,9 @@ async function getForgeLoaderVersion(gameVersion: string, requested?: string, si
 
   const metadata = await fetchText("https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml", signal);
   const versions = parseMavenVersions(metadata).filter((version) => version.startsWith(`${gameVersion}-`));
-  const latest = versions[versions.length - 1];
+  const latest = pickLatestLoaderVersion(versions);
   if (!latest) {
-    throw new Error(`No Forge loader found for Minecraft ${gameVersion}.`);
+    throw new Error(tr(`No Forge loader found for Minecraft ${gameVersion}.`, `Загрузчик Forge для Minecraft ${gameVersion} не найден.`));
   }
 
   return latest;
@@ -1008,25 +1045,70 @@ async function applyForgeProfile(version: VersionJson, instance: LauncherInstanc
   const installerUrl = `https://maven.minecraftforge.net/net/minecraftforge/forge/${loaderVersion}/forge-${loaderVersion}-installer.jar`;
   const installerPath = path.join(getMinecraftRoot(), "installers", `forge-${loaderVersion}-installer.jar`);
 
-  await downloadFile(installerUrl, installerPath, undefined, signal, undefined, 15 * 60 * 1000);
+  try {
+    await downloadFile(installerUrl, installerPath, undefined, signal, undefined, 15 * 60 * 1000);
+  } catch (error) {
+    if (error instanceof Error && /HTTP 404/.test(error.message)) {
+      return applyLegacyForgeProfile(version, instance, loaderVersion, signal);
+    }
+    throw error;
+  }
   onProgress?.({ phase: "loader", done: 0, total: 0 });
   await runClientInstaller(javaPath, installerPath, "forge");
   return loadInstalledLoaderProfile("forge", instance.gameVersion, loaderVersion, version);
 }
 
+async function applyLegacyForgeProfile(version: VersionJson, instance: LauncherInstance, loaderVersion: string, signal?: AbortSignal): Promise<VersionJson> {
+  const profileId = `${instance.gameVersion}-forge-${loaderVersion}`;
+  const builtJar = path.join(getVersionDir(profileId), `${profileId}.jar`);
+  if (pathExists(builtJar)) {
+    return { ...version, id: profileId, prebuiltClientJar: builtJar };
+  }
+  const zipUrl = `https://maven.minecraftforge.net/net/minecraftforge/forge/${loaderVersion}/forge-${loaderVersion}-client.zip`;
+  const zipPath = path.join(getMinecraftRoot(), "installers", `forge-${loaderVersion}-client.zip`);
+  try {
+    await downloadFile(zipUrl, zipPath, undefined, signal, undefined, 15 * 60 * 1000);
+  } catch (error) {
+    if (error instanceof Error && /HTTP 404/.test(error.message)) {
+      throw new Error(tr(`Forge ${loaderVersion} has no installer on record. Very old Forge versions cannot be installed automatically.`, `Для Forge ${loaderVersion} нет установщика. Очень старые версии Forge нельзя установить автоматически.`));
+    }
+    throw error;
+  }
+  const vanillaJar = path.join(getVersionDir(instance.gameVersion), `${instance.gameVersion}.jar`);
+  await downloadFile(version.downloads.client.url, vanillaJar, version.downloads.client.sha1, signal, undefined, 10 * 60 * 1000);
+  const workDir = path.join(getMinecraftRoot(), "installers", `legacy-${loaderVersion}`);
+  const vanillaDir = path.join(workDir, "vanilla");
+  const forgeDir = path.join(workDir, "forge");
+  await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+  await mkdir(vanillaDir, { recursive: true });
+  await mkdir(forgeDir, { recursive: true });
+  try {
+    await execFileAsync(getTarPath(), ["-xf", vanillaJar, "-C", vanillaDir], { windowsHide: true, timeout: 120000 });
+    await execFileAsync(getTarPath(), ["-xf", zipPath, "-C", forgeDir], { windowsHide: true, timeout: 120000 });
+    await cp(forgeDir, vanillaDir, { recursive: true });
+    await rm(path.join(vanillaDir, "META-INF"), { recursive: true, force: true });
+    const members = await readdir(vanillaDir);
+    const profileDir = getVersionDir(profileId);
+    await mkdir(profileDir, { recursive: true });
+    const zipStage = path.join(profileDir, `${profileId}.jar.tmp.zip`);
+    await execFileAsync(getTarPath(), ["-a", "-cf", zipStage, "-C", vanillaDir, ...members], { windowsHide: true, timeout: 180000 });
+    await rm(path.join(profileDir, `${profileId}.jar`), { force: true }).catch(() => undefined);
+    await rename(zipStage, builtJar);
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+  return { ...version, id: profileId, prebuiltClientJar: builtJar };
+}
+
 function neoForgePrefixForGameVersion(gameVersion: string): string | null {
-  const known: Record<string, string> = {
-    "1.20.1": "47.1.",
-    "1.20.2": "20.2."
-  };
-  if (known[gameVersion]) {
-    return known[gameVersion];
+  if (gameVersion === "1.20.1") {
+    return null;
   }
 
   const legacy = /^1\.(\d+)(?:\.(\d+))?$/.exec(gameVersion);
 
   if (legacy) {
-    return legacy[2] === undefined ? `${legacy[1]}.` : `${legacy[1]}.${legacy[2]}.`;
+    return `${legacy[1]}.${legacy[2] ?? "0"}.`;
   }
 
   const modern = /^(\d+)\.(\d+)(?:\.\d+)?$/.exec(gameVersion.trim());
@@ -1045,14 +1127,14 @@ async function getNeoForgeLoaderVersion(gameVersion: string, requested?: string,
 
   const prefix = neoForgePrefixForGameVersion(gameVersion);
   if (!prefix) {
-    throw new Error(`NeoForge version mapping is unknown for Minecraft ${gameVersion}.`);
+    throw new Error(tr(`NeoForge version mapping is unknown for Minecraft ${gameVersion}.`, `Неизвестно, какая версия NeoForge подходит для Minecraft ${gameVersion}.`));
   }
 
   const metadata = await fetchText("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml");
   const versions = parseMavenVersions(metadata).filter((version) => version.startsWith(prefix));
-  const latest = versions[versions.length - 1];
+  const latest = pickLatestLoaderVersion(versions);
   if (!latest) {
-    throw new Error(`No NeoForge loader found for Minecraft ${gameVersion}.`);
+    throw new Error(tr(`No NeoForge loader found for Minecraft ${gameVersion}.`, `Загрузчик NeoForge для Minecraft ${gameVersion} не найден.`));
   }
 
   return latest;
@@ -1098,7 +1180,7 @@ async function prepareAssets(version: VersionJson, signal?: AbortSignal, onProgr
   const objectsDir = path.join(getAssetsRoot(), "objects");
   const indexPath = path.join(indexesDir, `${version.assetIndex.id}.json`);
   const assetIndex = await downloadJson<AssetIndex>(version.assetIndex.url, indexPath, version.assetIndex.sha1, signal, isAssetIndexLike);
-  const entries = Object.values(assetIndex.objects);
+  const entries = [...new Map(Object.values(assetIndex.objects).map((asset) => [asset.hash, asset])).values()];
   let done = 0;
 
   await mapLimit(entries, Math.min(16, Math.max(1, concurrency)), async (asset) => {
@@ -1140,7 +1222,7 @@ function buildLaunchArgs(
     version_type: version.type,
     natives_directory: paths.nativesDir,
     launcher_name: "lynapp",
-        launcher_version: "1.1.0-beta.0",
+        launcher_version: "1.1.0-beta.1",
     classpath: paths.classpath,
     classpath_separator: ";",
     library_directory: getLibrariesRoot(),
@@ -1171,15 +1253,15 @@ async function ensureAuthlibInjector(signal?: AbortSignal): Promise<string> {
   }
   const response = await fetch("https://api.github.com/repos/yushijinhun/authlib-injector/releases/latest", {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.0", accept: "application/vnd.github+json" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.1", accept: "application/vnd.github+json" }
   });
   if (!response.ok) {
-    throw new Error(`authlib-injector release lookup failed (HTTP ${response.status})`);
+    throw new Error(tr(`authlib-injector release lookup failed (HTTP ${response.status})`, `Не удалось найти выпуск authlib-injector (HTTP ${response.status})`));
   }
   const body = (await response.json()) as { assets?: Array<{ name?: string; browser_download_url?: string }> };
   const asset = (body.assets ?? []).find((item) => item.browser_download_url && /\.jar$/i.test(item.name ?? ""));
   if (!asset?.browser_download_url) {
-    throw new Error("authlib-injector jar was not found in the latest release");
+    throw new Error(tr("authlib-injector jar was not found in the latest release", "В последнем выпуске authlib-injector нет jar-файла"));
   }
   await downloadFile(asset.browser_download_url, jarPath, undefined, signal);
   return jarPath;
@@ -1208,7 +1290,7 @@ export class MinecraftService {
     const manifest = await getManifest();
 
     if (!manifest.versions.some((item) => item.id === gameVersion)) {
-      throw new Error(`Minecraft version "${gameVersion}" does not exist. Pick one from the list.`);
+      throw new Error(tr(`Minecraft version "${gameVersion}" does not exist. Pick one from the list.`, `Версии Minecraft «${gameVersion}» не существует. Выберите версию из списка.`));
     }
   }
 
@@ -1236,12 +1318,12 @@ export class MinecraftService {
     const support = await getLoaderSupportMap();
 
     if (!support[loader]?.includes(gameVersion)) {
-      throw new Error(`Loader "${loader}" does not support Minecraft ${gameVersion}. Pick a compatible combination.`);
+      throw new Error(tr(`Loader "${loader}" does not support Minecraft ${gameVersion}. Pick a compatible combination.`, `Загрузчик «${loader}» не поддерживает Minecraft ${gameVersion}. Выберите совместимое сочетание.`));
     }
 
     const versions = await this.listLoaderVersions(loader, gameVersion);
     if (!versions.length) {
-      throw new Error(`No ${loader} releases for Minecraft ${gameVersion} yet. Try another loader or version.`);
+      throw new Error(tr(`No ${loader} releases for Minecraft ${gameVersion} yet. Try another loader or version.`, `Для Minecraft ${gameVersion} пока нет выпусков ${loader}. Выберите другой загрузчик или версию.`));
     }
   }
 
@@ -1259,7 +1341,8 @@ export class MinecraftService {
     const vanillaVersion = await getVersionJson(instance.gameVersion, signal);
     const version = await applyLoaderProfile(vanillaVersion, instance, javaPath, signal, onProgress);
     const nativesDir = getNativesRoot(version.id);
-    const clientJar = await prepareClientJar(vanillaVersion, version.id, signal);    const libraryClasspath = await prepareLibraries(version, nativesDir, signal, onProgress);
+    const clientJar = version.prebuiltClientJar ?? await prepareClientJar(vanillaVersion, version.id, signal);
+    const libraryClasspath = await prepareLibraries(version, nativesDir, signal, onProgress);
     await prepareAssets(version, signal, onProgress, concurrency);
 
     const classpath = [...new Set([...libraryClasspath, clientJar])].join(";");
@@ -1269,7 +1352,7 @@ export class MinecraftService {
     });
     if (account.kind === "ely") {
       const injector = await ensureAuthlibInjector(signal);
-      args.unshift(`-javaagent:${injector}=https://authserver.ely.by`);
+      args.unshift(`-javaagent:${injector}=ely.by`);
     }
     const logPath = path.join(instance.directory, ".launcher", "logs", "latest.log");
     await mkdir(path.dirname(logPath), { recursive: true });

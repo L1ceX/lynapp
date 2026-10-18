@@ -6,6 +6,7 @@ import type { CapeInfo, SkinInfo } from "@shared/types";
 import { getLauncherRoot } from "../paths";
 import { JsonStore, getActiveAccount } from "../store";
 import type { AuthService } from "./auth";
+import { tr } from "../i18n";
 
 function skinsDir(): string {
   return path.join(getLauncherRoot(), "skins");
@@ -28,7 +29,7 @@ function parsePng(buffer: Buffer): { width: number; height: number; data: Buffer
 function toPngBuffer(dataUrl: string): Buffer {
   const match = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec((dataUrl ?? "").trim());
   if (!match) {
-    throw new Error("Skin must be a PNG file");
+    throw new Error(tr("Skin must be a PNG file", "Скин должен быть файлом PNG"));
   }
   return Buffer.from(match[1], "base64");
 }
@@ -49,7 +50,7 @@ async function uploadMojangSkin(png: Buffer, slim: boolean, token: string): Prom
     } catch {
       detail = "";
     }
-    throw new Error(`Mojang rejected the skin (HTTP ${response.status})${detail ? `: ${detail}` : ""}`);
+    throw new Error(tr(`Mojang rejected the skin (HTTP ${response.status})${detail ? `: ${detail}` : ""}`, `Mojang отклонил скин (HTTP ${response.status})${detail ? `: ${detail}` : ""}`));
   }
 }
 
@@ -85,7 +86,7 @@ export class SkinService {
     const data = await this.store.getData();
     const active = getActiveAccount(data);
     if (!active || active.kind !== "microsoft" || active.status !== "signed-in") {
-      throw new Error("Sign in with Microsoft to change skins");
+      throw new Error(tr("Sign in with Microsoft to change skins", "Войдите через Microsoft, чтобы изменять скины"));
     }
   }
 
@@ -94,7 +95,7 @@ export class SkinService {
     const png = toPngBuffer(payload.dataUrl);
     const parsed = parsePng(png);
     if (!parsed || parsed.width !== 64 || parsed.height !== 64) {
-      throw new Error("Skin must be a 64x64 PNG texture");
+      throw new Error(tr("Skin must be a 64x64 PNG texture", "Скин должен быть текстурой PNG 64×64"));
     }
     const name = (payload.name ?? "").trim().slice(0, 32) || "Custom skin";
     const id = randomUUID();
@@ -112,7 +113,7 @@ export class SkinService {
     await this.store.update((data) => {
       const skin = data.skins.find((item) => item.id === payload.id);
       if (!skin) {
-        throw new Error("Skin not found");
+        throw new Error(tr("Skin not found", "Скин не найден"));
       }
       if (payload.patch.name !== undefined) {
         skin.name = payload.patch.name.trim().slice(0, 32) || skin.name;
@@ -130,7 +131,12 @@ export class SkinService {
     const activeSkinId = await this.store.update((data) => {
       data.skins = data.skins.filter((item) => item.id !== id);
       if (data.settings.activeSkinId === id) {
-        data.settings.activeSkinId = data.skins[0]?.id ?? null;
+        data.settings.activeSkinId = null;
+      }
+      for (const account of data.accounts) {
+        if (account.activeSkinId === id) {
+          account.activeSkinId = null;
+        }
       }
       return data.settings.activeSkinId;
     });
@@ -143,7 +149,7 @@ export class SkinService {
     const data = await this.store.getData();
     const meta = data.skins.find((item) => item.id === id);
     if (!meta) {
-      throw new Error("Skin not found");
+      throw new Error(tr("Skin not found", "Скин не найден"));
     }
     let uploaded = false;
     const active = getActiveAccount(data);
@@ -167,7 +173,7 @@ export class SkinService {
     const data = await this.store.getData();
     const active = getActiveAccount(data);
     if (!active || active.kind !== "microsoft" || active.status !== "signed-in" || !active.minecraftAccessToken) {
-      throw new Error("Sign in with Microsoft to manage capes");
+      throw new Error(tr("Sign in with Microsoft to manage capes", "Войдите через Microsoft, чтобы управлять плащами"));
     }
     return active.minecraftAccessToken;
   }
@@ -181,7 +187,7 @@ export class SkinService {
 
     try {
       const response = await fetch(`https://skinsystem.ely.by/textures/${encodeURIComponent(active.profileName)}?version=2`, {
-        headers: { "user-agent": "lynapp/1.1.0-beta.0" }
+        headers: { "user-agent": "lynapp/1.1.0-beta.1" }
       });
       if (!response.ok) {
         return null;
@@ -191,7 +197,7 @@ export class SkinService {
       if (!url) {
         return null;
       }
-      const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.1.0-beta.0" } });
+      const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.1.0-beta.1" } });
       if (!texture.ok) {
         return null;
       }
@@ -214,7 +220,7 @@ export class SkinService {
       headers: { Authorization: `Bearer ${token}` }
     });
     if (!response.ok) {
-      throw new Error(`Mojang profile failed (HTTP ${response.status})`);
+      throw new Error(tr(`Mojang profile failed (HTTP ${response.status})`, `Не удалось получить профиль Mojang (HTTP ${response.status})`));
     }
     const body = (await response.json()) as {
       capes?: Array<{ id: string; state: string; url: string; alias: string }>;
@@ -240,7 +246,7 @@ export class SkinService {
           headers: { Authorization: `Bearer ${token}` }
         });
     if (!response.ok) {
-      throw new Error(`Mojang rejected the cape (HTTP ${response.status})`);
+      throw new Error(tr(`Mojang rejected the cape (HTTP ${response.status})`, `Mojang отклонил плащ (HTTP ${response.status})`));
     }
     return this.listCapes();
   }

@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AccountState, LauncherInstance, LauncherSettings, SkinMeta } from "@shared/types";
+import { EFFECTS_DEFAULTS, type AccountState, type LauncherInstance, type LauncherSettings, type SkinMeta } from "@shared/types";
 import { THEME_DEFAULTS } from "@shared/theme";
+import { setMainLanguage } from "./i18n";
 import { getInstancesRoot, getLauncherRoot, getLegacyLauncherRoot, getStorePath } from "./paths";
 
 export interface LauncherData {
@@ -32,6 +33,8 @@ function defaultSettings(): LauncherSettings {
     glowSize: 100,
     glowSpeed: 100,
     animationsEnabled: true,
+    animationSpeed: 100,
+    effects: { ...EFFECTS_DEFAULTS },
     activeSkinId: null
   };
 }
@@ -91,12 +94,19 @@ function mergeData(input: Partial<LauncherData>): LauncherData {
   const settings = {
     ...defaults.settings,
     ...(input.settings ?? {}),
-    theme: { ...defaults.settings.theme, ...(input.settings?.theme ?? {}) }
+    theme: { ...defaults.settings.theme, ...(input.settings?.theme ?? {}) },
+    effects: {
+      ...defaults.settings.effects,
+      ...((input.settings as { juice?: Partial<LauncherSettings["effects"]> } | undefined)?.juice ?? {}),
+      ...(input.settings?.effects ?? {})
+    }
   };
+  delete (settings as Record<string, unknown>).juice;
   delete (settings as Record<string, unknown>).minMemoryMb;
   const instances = Array.isArray(input.instances) ? input.instances : defaults.instances;
   for (const item of instances) {
     delete (item as unknown as Record<string, unknown>).minMemoryMb;
+    delete item.javaPath;
   }
 
   let accounts = Array.isArray(input.accounts) ? input.accounts : [...defaults.accounts];
@@ -150,11 +160,24 @@ export class JsonStore {
 
   constructor(private readonly filePath = getStorePath()) {}
 
+  private loading: Promise<LauncherData> | null = null;
+
   async load(): Promise<LauncherData> {
     if (this.data) {
       return this.data;
     }
+    if (!this.loading) {
+      this.loading = this.loadFromDisk().then((data) => {
+        setMainLanguage(data.settings.language);
+        return data;
+      }).finally(() => {
+        this.loading = null;
+      });
+    }
+    return this.loading;
+  }
 
+  private async loadFromDisk(): Promise<LauncherData> {
     await migrateLegacyData();
     await mkdir(path.dirname(this.filePath), { recursive: true });
     await mkdir(getInstancesRoot(), { recursive: true });

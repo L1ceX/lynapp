@@ -110,6 +110,8 @@ export interface InstallModPayload {
   slug?: string;
   iconUrl?: string;
   projectType: ModrinthProjectType;
+  gameVersions?: string[];
+  loaders?: string[];
 }
 
 export interface LocalContentPayload {

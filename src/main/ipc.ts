@@ -4,6 +4,7 @@ import path from "node:path";
 import { IPC } from "@shared/ipc";
 import type { CreateInstancePayload, DownloadModpackPayload, InstallModPayload, LocalContentPayload, ModSearchPayload, SkinAddPayload, SkinUpdatePayload, UpdateInstancePayload } from "@shared/ipc";
 import type { AccountsState, LauncherSettings, ModLoader, ModrinthProjectType } from "@shared/types";
+import { setMainLanguage, tr } from "./i18n";
 import { getLauncherRoot, getStorePath } from "./paths";
 import { AuthService } from "./services/auth";
 import { ContentService } from "./services/content";
@@ -59,13 +60,13 @@ export function registerIpcHandlers(): void {
     const data = await store.getData();
     const instance = data.instances.find((item) => item.id === instanceId);
     if (!instance) {
-      throw new Error("Instance not found");
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
     const parent = BrowserWindow.fromWebContents(event.sender) ?? undefined;
     const saveOptions = {
-      title: "Export modpack",
+      title: tr("Export modpack", "Экспорт модпака"),
       defaultPath: `${instance.name}.mrpack`,
-      filters: [{ name: "Modrinth modpack", extensions: ["mrpack"] }]
+      filters: [{ name: tr("Modrinth modpack", "Модпак Modrinth"), extensions: ["mrpack"] }]
     };
     const picked = parent
       ? await dialog.showSaveDialog(parent, saveOptions)
@@ -135,7 +136,7 @@ export function registerIpcHandlers(): void {
     const data = await store.getData();
     const instance = data.instances.find((item) => item.id === id);
     if (!instance) {
-      throw new Error("Instance not found");
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
     return shell.openPath(instance.directory);
   });
@@ -149,6 +150,7 @@ export function registerIpcHandlers(): void {
         ...data.settings,
         ...patch
       };
+      setMainLanguage(data.settings.language);
       return data.settings;
     });
   });
@@ -202,7 +204,7 @@ export function registerIpcHandlers(): void {
     if (!found) {
       const data = await store.getData();
       const described = await java.describeInstallation(major, data.settings.javaPaths?.[String(major)]);
-      return { ...described, message: `No Java ${major} found on this PC` };
+      return { ...described, message: tr(`No Java ${major} found on this PC`, `Java ${major} на этом компьютере не найдена`) };
     }
 
     await store.update((data) => {
@@ -214,8 +216,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.browseJava, async (event, major: number) => {
     const parent = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined;
     const dialogOptions = {
-      title: `Select javaw.exe for Java ${major}`,
-      filters: [{ name: "Java executable", extensions: ["exe"] }],
+      title: tr(`Select javaw.exe for Java ${major}`, `Выберите javaw.exe для Java ${major}`),
+      filters: [{ name: tr("Java executable", "Исполняемый файл Java"), extensions: ["exe"] }],
       properties: ["openFile"] as Array<"openFile">
     };
     const picked = parent ? await dialog.showOpenDialog(parent, dialogOptions) : await dialog.showOpenDialog(dialogOptions);
@@ -227,7 +229,7 @@ export function registerIpcHandlers(): void {
     const inspected = await java.inspectPickedPath(picked.filePaths[0]);
 
     if (inspected.major !== major) {
-      throw new Error(`Selected Java is version ${inspected.major ?? "unknown"}, but Java ${major} is needed here.`);
+      throw new Error(tr(`Selected Java is version ${inspected.major ?? "unknown"}, but Java ${major} is needed here.`, `Выбрана Java ${inspected.major ?? "неизвестной версии"}, а здесь нужна Java ${major}.`));
     }
 
     await store.update((data) => {
@@ -238,7 +240,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.openExternal, async (_event, url: string) => {
     if (!url.startsWith("https://")) {
-      throw new Error("Only https URLs can be opened");
+      throw new Error(tr("Only https URLs can be opened", "Можно открывать только ссылки https"));
     }
 
     await shell.openExternal(url);

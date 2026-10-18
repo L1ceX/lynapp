@@ -3,7 +3,9 @@ import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/p
 import path from "node:path";
 import { promisify } from "node:util";
 import type { InstalledMod, LocalContentItem, LocalContentKind } from "@shared/types";
+import { getTarPath } from "../paths";
 import { JsonStore } from "../store";
+import { tr } from "../i18n";
 
 const kindDirs: Record<LocalContentKind, string> = {
   mod: "mods",
@@ -49,7 +51,7 @@ function toDataUrl(ext: string, data: Buffer): string {
 
 async function tarList(archive: string): Promise<string[]> {
   try {
-    const { stdout } = await execFileAsync("tar.exe", ["-tf", archive], {
+    const { stdout } = await execFileAsync(getTarPath(), ["-tf", archive], {
       windowsHide: true,
       timeout: 15000,
       maxBuffer: 8 * 1024 * 1024
@@ -65,7 +67,7 @@ async function tarList(archive: string): Promise<string[]> {
 
 async function tarRead(archive: string, internalPath: string): Promise<Buffer | null> {
   try {
-    const { stdout } = await execFileAsync("tar.exe", ["-xOf", archive, internalPath], {
+    const { stdout } = await execFileAsync(getTarPath(), ["-xOf", archive, internalPath], {
       windowsHide: true,
       timeout: 15000,
       encoding: "buffer",
@@ -185,7 +187,7 @@ export class ContentService {
     const instance = data.instances.find((item) => item.id === instanceId);
 
     if (!instance) {
-      throw new Error("Instance not found");
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
 
     const items: LocalContentItem[] = [];
@@ -285,23 +287,29 @@ export class ContentService {
     const instance = data.instances.find((item) => item.id === instanceId);
 
     if (!instance) {
-      throw new Error("Instance not found");
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
 
-    const location = await this.findEntry(instance.directory, fileName, kind);
+    const locations = await this.findEntries(instance.directory, fileName, kind);
+    const location = locations[0];
 
     if (!location) {
-      throw new Error(`File not found: ${fileName}`);
+      throw new Error(tr(`File not found: ${fileName}`, `Файл не найден: ${fileName}`));
     }
 
     const { enabled } = stripDisabled(location.name);
     const nextName = enabled ? `${location.name}${disabledSuffix}` : stripDisabled(location.name).base;
-    await rename(path.join(location.dir, location.name), path.join(location.dir, nextName));
+    for (const item of locations) {
+      const itemNext = enabled ? `${stripDisabled(item.name).base}${disabledSuffix}` : stripDisabled(item.name).base;
+      if (itemNext !== item.name) {
+        await rename(path.join(item.dir, item.name), path.join(item.dir, itemNext));
+      }
+    }
 
     await this.store.update((current) => {
       const target = current.instances.find((item) => item.id === instanceId);
       if (!target) {
-        throw new Error("Instance not found");
+        throw new Error(tr("Instance not found", "Инстанция не найдена"));
       }
 
       const record = target.mods.find(
@@ -325,17 +333,18 @@ export class ContentService {
     const instance = data.instances.find((item) => item.id === instanceId);
 
     if (!instance) {
-      throw new Error("Instance not found");
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
 
-    const location = await this.findEntry(instance.directory, fileName, kind);
+    const locations = await this.findEntries(instance.directory, fileName, kind);
+    const location = locations[0];
 
     if (!location) {
       const wanted = fileName.toLowerCase().replace(/\.disabled$/, "");
       await this.store.update((current) => {
         const target = current.instances.find((item) => item.id === instanceId);
         if (!target) {
-          throw new Error("Instance not found");
+          throw new Error(tr("Instance not found", "Инстанция не найдена"));
         }
         const before = target.mods.length;
         target.mods = target.mods.filter((mod) => {
@@ -348,7 +357,7 @@ export class ContentService {
           return false;
         });
         if (target.mods.length === before) {
-          throw new Error(`File not found: ${fileName}`);
+          throw new Error(tr(`File not found: ${fileName}`, `Файл не найден: ${fileName}`));
         }
         target.updatedAt = new Date().toISOString();
       });
@@ -357,8 +366,9 @@ export class ContentService {
       return this.list(instanceId);
     }
 
-    const targetPath = path.join(location.dir, location.name);
-    await rm(targetPath, { recursive: true, force: true });
+    for (const item of locations) {
+      await rm(path.join(item.dir, item.name), { recursive: true, force: true });
+    }
 
     try {
       const iconsDir = path.join(instance.directory, ".launcher", "icons");
@@ -376,7 +386,7 @@ export class ContentService {
     await this.store.update((current) => {
       const target = current.instances.find((item) => item.id === instanceId);
       if (!target) {
-        throw new Error("Instance not found");
+        throw new Error(tr("Instance not found", "Инстанция не найдена"));
       }
 
       target.mods = target.mods.filter(
@@ -449,7 +459,7 @@ export class ContentService {
 
     try {
       const response = await fetch(`https://api.modrinth.com/v2/project/${ref}`, {
-        headers: { "User-Agent": "lynapp/1.1.0-beta.0" }
+        headers: { "User-Agent": "lynapp/1.1.0-beta.1" }
       });
 
       if (!response.ok) {
@@ -497,16 +507,38 @@ export class ContentService {
     return out;
   }
 
+  private async findEntries(instanceDir: string, fileName: string, onlyKind?: LocalContentKind): Promise<Array<{ kind: LocalContentKind; dir: string; name: string }>> {
+    const first = await this.findEntry(instanceDir, fileName, onlyKind);
+    if (!first || first.kind !== "datapack") {
+      return first ? [first] : [];
+    }
+    const { base, enabled } = stripDisabled(fileName);
+    const variant = enabled ? `${fileName}${disabledSuffix}` : base;
+    const dirs = [path.join(instanceDir, kindDirs.datapack), ...(await this.worldDatapackDirs(instanceDir)).map((item) => item.dir)];
+    const found: Array<{ kind: LocalContentKind; dir: string; name: string }> = [];
+    for (const dir of dirs) {
+      for (const candidate of [fileName, variant]) {
+        try {
+          await stat(path.join(dir, candidate));
+          found.push({ kind: "datapack", dir, name: candidate });
+          break;
+        } catch {
+        }
+      }
+    }
+    return found.length ? found : [first];
+  }
+
   private async findEntry(instanceDir: string, fileName: string, onlyKind?: LocalContentKind): Promise<{ kind: LocalContentKind; dir: string; name: string } | null> {
     if (!fileName || fileName.includes("..") || fileName.includes("/") || fileName.includes("\\") || fileName.includes(":") || path.isAbsolute(fileName)) {
-      throw new Error(`Unsafe file name: ${fileName}`);
+      throw new Error(tr(`Unsafe file name: ${fileName}`, `Недопустимое имя файла: ${fileName}`));
     }
     const kinds = onlyKind ? [onlyKind] : kindOrder;
     for (const kind of kinds) {
       const dir = path.join(instanceDir, kindDirs[kind]);
       const direct = path.join(dir, fileName);
       if (path.resolve(direct) !== direct || !direct.startsWith(dir + path.sep)) {
-        throw new Error(`Unsafe file name: ${fileName}`);
+        throw new Error(tr(`Unsafe file name: ${fileName}`, `Недопустимое имя файла: ${fileName}`));
       }
 
       try {

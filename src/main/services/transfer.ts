@@ -1,3 +1,5 @@
+import { tr } from "../i18n";
+
 export type BytesCallback = (received: number, total: number | null) => void;
 
 export interface TransferProgress {
@@ -46,7 +48,7 @@ export async function readUrlBytes(
   try {
     const response = await fetch(url, { signal: ctrl.signal, headers });
     if (!response.ok) {
-      throw new Error(`Download failed with HTTP ${response.status}: ${url}`);
+      throw new Error(tr(`Download failed with HTTP ${response.status}: ${url}`, `Ошибка загрузки, HTTP ${response.status}: ${url}`));
     }
     const total = response.body ? parseTotal(response.headers) : null;
     if (!response.body) {
@@ -69,7 +71,7 @@ export async function readUrlBytes(
     return { buffer, total };
   } catch (error) {
     if (ctrl.signal.aborted && !signal?.aborted) {
-      throw new Error(`Download timed out: ${url}`);
+      throw new Error(tr(`Download timed out: ${url}`, `Время загрузки истекло: ${url}`));
     }
     throw error;
   } finally {
