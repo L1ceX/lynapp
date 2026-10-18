@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Check version
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') { throw "package.json version '$version' is not valid semver" }
+          if ("${{ github.ref_type }}" -eq "tag" -and "v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match package.json version $version" }
+          $stale = Get-ChildItem -Path src -Recurse -Include *.ts,*.tsx | Select-String -Pattern 'lynapp/(\d+\.\d+\.\d+[0-9A-Za-z.\-]*)|launcher_version: "([^"]+)"' -AllMatches | ForEach-Object { $_.Matches } | Where-Object { ($_.Groups[1].Value + $_.Groups[2].Value) -ne $version }
+          if ($stale) { $stale | ForEach-Object { Write-Host $_.Value }; throw "Version strings in src do not match $version" }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck and build
+        run: npm run build
+
+      - name: Package installers
+        run: npx electron-builder --win nsis portable --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: lynapp-${{ env.VERSION }}
+          path: |
+            release/lynapp-setup-${{ env.VERSION }}.exe
+            release/lynapp-setup-${{ env.VERSION }}.exe.blockmap
+            release/lynapp-portable-${{ env.VERSION }}.exe
+            release/latest.yml
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          if ((git cat-file -t $tag) -ne "tag") { throw "Tag $tag has no description. Create it with: git tag -a $tag -m ""release notes""" }
+          $notes = (git tag -l --format='%(contents)' $tag | Out-String).Trim()
+          if (-not $notes) { throw "Tag $tag has an empty description" }
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+          $files = @(
+            "release/lynapp-setup-$env:VERSION.exe",
+            "release/lynapp-setup-$env:VERSION.exe.blockmap",
+            "release/lynapp-portable-$env:VERSION.exe",
+            "release/latest.yml"
+          )
+          $flags = @()
+          if ($env:VERSION -match '-') { $flags += "--prerelease" }
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @files --clobber
+          } else {
+            gh release create $tag @files --title $env:VERSION --notes-file release-notes.md --verify-tag @flags
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Publishing failed" }
+          $assets = (gh release view $tag --json assets --jq '.assets | length')
+          if ([int]$assets -lt 4) { throw "Release has $assets files, expected 4" }
+          Write-Host "Published $tag with $assets files"
