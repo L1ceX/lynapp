@@ -54,6 +54,8 @@ export const EFFECTS_DEFAULTS: EffectsSettings = {
   details: true
 };
 
+export type AfterLaunchAction = "keep" | "hide" | "close";
+
 export interface LauncherSettings {
   javaPath: string;
   javaPaths: Record<string, string>;
@@ -61,7 +63,10 @@ export interface LauncherSettings {
   extraJvmArgs: string;
   launcherDataDir: string;
   concurrentDownloads: number;
-  closeOnLaunch: boolean;
+  afterLaunch: AfterLaunchAction;
+  discordPresence: boolean;
+  discordHideInstance: boolean;
+  betaUpdates: boolean;
   microsoftClientId: string;
   language: "en" | "ru";
   theme: Record<string, string>;
@@ -164,6 +169,33 @@ export interface LocalContentItem {
   modified: string;
   enabled: boolean;
   source: "modrinth" | "manual" | "missing";
+}
+
+export interface ContentImportResult {
+  added: Array<{ fileName: string; kind: LocalContentKind }>;
+  skipped: Array<{ fileName: string; reason: "exists" | "unknown" | "unsupported" | "failed" }>;
+}
+
+export interface ModVersionInfo {
+  id: string;
+  name: string;
+  versionNumber: string;
+  versionType: "release" | "beta" | "alpha";
+  datePublished: string;
+  gameVersions: string[];
+  loaders: string[];
+  fileName: string;
+  size: number;
+  compatible: boolean;
+}
+
+export interface ContentUpdateInfo {
+  projectId: string;
+  projectType: ModrinthProjectType;
+  fileName: string;
+  currentVersionId?: string;
+  currentVersionNumber?: string;
+  latest: ModVersionInfo | null;
 }
 
 export interface ModSearchResult {

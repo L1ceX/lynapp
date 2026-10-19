@@ -8,6 +8,7 @@ const api: LauncherApi = {
   createInstance: (payload) => ipcRenderer.invoke(IPC.createInstance, payload),
   updateInstance: (payload) => ipcRenderer.invoke(IPC.updateInstance, payload),
   removeInstance: (id) => ipcRenderer.invoke(IPC.removeInstance, id),
+  duplicateInstance: (id) => ipcRenderer.invoke(IPC.duplicateInstance, id),
   importMrpackStart: (filePath) => ipcRenderer.invoke(IPC.importMrpackStart, filePath),
   importMrpackStartToInstance: (filePath, instanceId) => ipcRenderer.invoke(IPC.importMrpackStartToInstance, filePath, instanceId),
   importMrpackCancel: (instanceId) => ipcRenderer.invoke(IPC.importMrpackCancel, instanceId),
@@ -75,7 +76,11 @@ const api: LauncherApi = {
   openInstanceFolder: (id) => ipcRenderer.invoke(IPC.openInstanceFolder, id),
   getLocalContent: (instanceId) => ipcRenderer.invoke(IPC.getLocalContent, instanceId),
   toggleLocalContent: (payload) => ipcRenderer.invoke(IPC.toggleLocalContent, payload),
-  removeLocalContent: (payload) => ipcRenderer.invoke(IPC.removeLocalContent, payload)
+  removeLocalContent: (payload) => ipcRenderer.invoke(IPC.removeLocalContent, payload),
+  detectLocalContent: (instanceId) => ipcRenderer.invoke(IPC.detectLocalContent, instanceId),
+  importLocalContent: (instanceId, paths) => ipcRenderer.invoke(IPC.importLocalContent, instanceId, paths),
+  listModVersions: (instanceId, projectId, projectType) => ipcRenderer.invoke(IPC.listModVersions, instanceId, projectId, projectType),
+  checkContentUpdates: (instanceId) => ipcRenderer.invoke(IPC.checkContentUpdates, instanceId)
 };
 
 contextBridge.exposeInMainWorld("launcher", api);

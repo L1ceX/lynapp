@@ -1,4 +1,5 @@
-import { BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { hideToTray, isHiddenForGame, restoreFromTray } from "./tray";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import { IPC } from "@shared/ipc";
@@ -8,6 +9,7 @@ import { setMainLanguage, tr } from "./i18n";
 import { getLauncherRoot, getStorePath } from "./paths";
 import { AuthService } from "./services/auth";
 import { ContentService } from "./services/content";
+import { DiscordPresence } from "./services/discord";
 import { InstanceService } from "./services/instances";
 import { JavaService } from "./services/java";
 import { MinecraftService } from "./services/minecraft";
@@ -15,7 +17,7 @@ import { ModpackService } from "./services/modpacks";
 import { ModService } from "./services/mods";
 import { SkinService } from "./services/skins";
 import { JsonStore } from "./store";
-import { downloadUpdate, installUpdate } from "./updater";
+import { downloadUpdate, installUpdate, setBetaUpdates } from "./updater";
 import { createThrottledEmitter } from "./services/transfer";
 
 export function registerIpcHandlers(): void {
@@ -28,8 +30,21 @@ export function registerIpcHandlers(): void {
   const skins = new SkinService(store, auth);
   const content = new ContentService(store);
   const modpacks = new ModpackService(store, instances, minecraft);
+  const discord = new DiscordPresence();
 
-  void instances.pruneRunning().catch(() => undefined);
+  void instances.getRunning().then(async (running) => {
+    const data = await store.getData();
+    for (const id of running) {
+      const instance = data.instances.find((item) => item.id === id);
+      if (instance) discord.gameStarted(instance, null);
+    }
+    discord.applySettings(data.settings);
+  }).catch(() => undefined);
+  void store.getData().then((data) => setBetaUpdates(data.settings.betaUpdates)).catch(() => undefined);
+  setInterval(() => {
+    if (!discord.hasSessions()) return;
+    void instances.getRunning().then((running) => discord.syncRunning(running)).catch(() => undefined);
+  }, 30000).unref();
   void rm(path.join(getLauncherRoot(), "cache", "modpacks"), { recursive: true, force: true }).catch(() => undefined);
 
   function publicAccounts(state: AccountsState): AccountsState {
@@ -53,6 +68,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.createInstance, (_event, payload: CreateInstancePayload) => instances.create(payload));  ipcMain.handle(IPC.updateInstance, (_event, payload: UpdateInstancePayload) => instances.updateInstance(payload));
   ipcMain.handle(IPC.removeInstance, (_event, id: string) => instances.remove(id));
+  ipcMain.handle(IPC.duplicateInstance, (_event, id: string) => instances.duplicate(id));
   ipcMain.handle(IPC.importMrpackStart, (_event, filePath: string) => modpacks.beginImport(filePath));
   ipcMain.handle(IPC.importMrpackStartToInstance, (_event, filePath: string, instanceId: string) => modpacks.beginImportToInstance(filePath, instanceId));
   ipcMain.handle(IPC.importMrpackCancel, (_event, instanceId: string) => modpacks.cancelImport(instanceId));
@@ -78,14 +94,23 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle(IPC.listExportEntries, (_event, instanceId: string) => modpacks.listExportEntries(instanceId));
   ipcMain.handle(IPC.importMrpackFiles, (event, instanceId: string) => modpacks.finishImport(instanceId, event.sender));
-  ipcMain.handle(IPC.launchInstance, (event, id: string) => {
+  instances.onGameExit = (id) => {
+    discord.gameStopped(id);
+    if (!isHiddenForGame()) return;
+    void instances.getRunning().then((running) => {
+      if (!running.length) restoreFromTray(BrowserWindow.getAllWindows()[0] ?? null);
+    }).catch(() => undefined);
+  };
+
+  ipcMain.handle(IPC.launchInstance, async (event, id: string) => {
     const sender = event.sender;
+    const window = BrowserWindow.fromWebContents(sender);
     const emit = createThrottledEmitter((update) => {
       if (!sender.isDestroyed()) {
         sender.send(IPC.transferProgress, update);
       }
     });
-    return instances.launch(id, (progress) => {
+    const result = await instances.launch(id, (progress) => {
       if (progress.phase === "java") {
         emit(`launch:${id}`, "Java", progress.received ?? 0, progress.totalBytes ?? null, {
           phase: "java",
@@ -100,6 +125,18 @@ export function registerIpcHandlers(): void {
         totalFiles: progress.total
       });
     });
+    if (result.ok && result.pid) {
+      const data = await store.getData();
+      const launched = data.instances.find((item) => item.id === id);
+      if (launched) discord.gameStarted(launched);
+      const action = data.settings.afterLaunch;
+      if (action === "hide" && window) {
+        setTimeout(() => hideToTray(window), 1200);
+      } else if (action === "close") {
+        setTimeout(() => app.quit(), 2000);
+      }
+    }
+    return result;
   });
   ipcMain.handle(IPC.getRunningInstances, () => instances.getRunning());
   ipcMain.handle(IPC.stopInstance, (_event, id: string) => instances.stop(id));
@@ -142,10 +179,14 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle(IPC.getLocalContent, (_event, instanceId: string) => content.list(instanceId));
   ipcMain.handle(IPC.toggleLocalContent, (_event, payload: LocalContentPayload) => content.toggle(payload.instanceId, payload.fileName, payload.kind));
+  ipcMain.handle(IPC.listModVersions, (_event, instanceId: string, projectId: string, projectType: ModrinthProjectType) => mods.listVersions(instanceId, projectId, projectType));
+  ipcMain.handle(IPC.checkContentUpdates, (_event, instanceId: string) => mods.checkUpdates(instanceId));
+  ipcMain.handle(IPC.importLocalContent, (_event, instanceId: string, paths: string[]) => content.importFiles(instanceId, paths));
+  ipcMain.handle(IPC.detectLocalContent, (_event, instanceId: string) => content.detectFromModrinth(instanceId));
   ipcMain.handle(IPC.removeLocalContent, (_event, payload: LocalContentPayload) => content.remove(payload.instanceId, payload.fileName, payload.kind));
 
-  ipcMain.handle(IPC.updateSettings, (_event, patch: Partial<LauncherSettings>) => {
-    return store.update((data) => {
+  ipcMain.handle(IPC.updateSettings, async (_event, patch: Partial<LauncherSettings>) => {
+    const settings = await store.update((data) => {
       data.settings = {
         ...data.settings,
         ...patch
@@ -153,6 +194,9 @@ export function registerIpcHandlers(): void {
       setMainLanguage(data.settings.language);
       return data.settings;
     });
+    discord.applySettings(settings);
+    setBetaUpdates(settings.betaUpdates);
+    return settings;
   });
 
   ipcMain.handle(IPC.searchMods, (_event, payload: ModSearchPayload) => mods.search(payload));

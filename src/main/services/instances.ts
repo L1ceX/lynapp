@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync } from "node:fs";
-import { mkdir, open, readFile, realpath, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, open, readFile, realpath, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -34,6 +34,19 @@ function buildInstanceFolderName(payload: CreateInstancePayload, uniqueSuffix: s
   const base = `${name}-${loader}-${version}${loaderVersion}`;
   return `${base.slice(0, Math.max(1, 80 - suffix.length))}${suffix}`;
 }
+
+function pickInstanceDirectory(payload: CreateInstancePayload, id: string): string {
+  let directory = path.join(getInstancesRoot(), buildInstanceFolderName(payload, id.slice(0, 6)));
+  for (let n = 2; n < 100 && existsSync(directory); n += 1) {
+    directory = path.join(getInstancesRoot(), buildInstanceFolderName(payload, `${id.slice(0, 6)}-${n}`));
+  }
+  if (existsSync(directory)) {
+    throw new Error(tr("Could not pick a free folder for the instance", "Не удалось подобрать свободную папку для инстанции"));
+  }
+  return directory;
+}
+
+const COPY_SKIP = new Set(["logs", "crash-reports", path.join(".launcher", "logs"), path.join(".launcher", "instance.json")]);
 
 function parseJvmFlags(input: string | undefined): string[] {  if (!input?.trim()) {
     return [];
@@ -120,6 +133,8 @@ export class InstanceService {
 
   private readonly launchAborts = new Map<string, AbortController>();
 
+  onGameExit?: (id: string) => void;
+
   async list(): Promise<LauncherInstance[]> {
     const data = await this.store.getData();
     return data.instances;
@@ -133,15 +148,7 @@ export class InstanceService {
     const now = new Date().toISOString();
     const id = randomUUID();
     const name = sanitizeFilePart(payload.name || `${payload.loader} ${gameVersion}`);
-    let folderName = buildInstanceFolderName({ ...payload, gameVersion }, id.slice(0, 6));
-    let directory = path.join(getInstancesRoot(), folderName);
-    for (let n = 2; n < 100 && existsSync(directory); n += 1) {
-      folderName = buildInstanceFolderName({ ...payload, gameVersion }, `${id.slice(0, 6)}-${n}`);
-      directory = path.join(getInstancesRoot(), folderName);
-    }
-    if (existsSync(directory)) {
-      throw new Error(tr("Could not pick a free folder for the instance", "Не удалось подобрать свободную папку для инстанции"));
-    }
+    const directory = pickInstanceDirectory({ ...payload, gameVersion }, id);
 
     const instance: LauncherInstance = {
       id,
@@ -169,6 +176,67 @@ export class InstanceService {
       data.instances.unshift(instance);
       data.activeInstanceId = instance.id;
       return instance;
+    });
+  }
+
+  async duplicate(id: string): Promise<LauncherInstance> {
+    const data = await this.store.getData();
+    const source = data.instances.find((item) => item.id === id);
+    if (!source) {
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
+    }
+    const pid = data.runningProcesses[id];
+    if (pid !== undefined && (await isJavaProcessAlive(pid))) {
+      throw new Error(tr(`${source.name} is running. Stop it before copying.`, `${source.name} запущена. Остановите её перед копированием.`));
+    }
+    if (!existsSync(source.directory)) {
+      throw new Error(tr("The instance folder is missing", "Папка инстанции не найдена"));
+    }
+
+    const names = new Set(data.instances.map((item) => item.name.toLowerCase()));
+    const suffix = tr("copy", "копия");
+    const baseName = source.name.replace(/(?:\s*\((?:copy|копия)(?:\s+\d+)?\))+\s*$/i, "").trim() || source.name;
+    let name = sanitizeFilePart(`${baseName} (${suffix})`);
+    for (let n = 2; n < 100 && names.has(name.toLowerCase()); n += 1) {
+      name = sanitizeFilePart(`${baseName} (${suffix} ${n})`);
+    }
+
+    const newId = randomUUID();
+    const directory = pickInstanceDirectory({ name, gameVersion: source.gameVersion, loader: source.loader, loaderVersion: source.loaderVersion }, newId);
+    try {
+      await cp(source.directory, directory, {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+        preserveTimestamps: true,
+        filter: (src) => {
+          const rel = path.relative(source.directory, src);
+          return !COPY_SKIP.has(rel) && path.basename(src) !== "session.lock";
+        }
+      });
+    } catch (error) {
+      await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(tr(`Could not copy the instance: ${reason}`, `Не удалось скопировать инстанцию: ${reason}`));
+    }
+
+    const now = new Date().toISOString();
+    const copy: LauncherInstance = {
+      ...source,
+      id: newId,
+      name,
+      directory,
+      createdAt: now,
+      updatedAt: now,
+      mods: source.mods.map((mod) => ({ ...mod }))
+    };
+    await writeInstanceManifest(copy);
+
+    return this.store.update((current) => {
+      const index = current.instances.findIndex((item) => item.id === id);
+      current.instances.splice(index >= 0 ? index + 1 : 0, 0, copy);
+      current.activeInstanceId = copy.id;
+      return copy;
     });
   }
 
@@ -485,7 +553,8 @@ export class InstanceService {
             delete current.runningProcesses[id];
           }
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .then(() => this.onGameExit?.(id));
     });
 
     await this.store.update((current) => {

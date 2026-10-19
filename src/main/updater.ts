@@ -7,6 +7,24 @@ import { tr } from "./i18n";
 const { autoUpdater } = electronUpdater;
 
 let mainWindow: BrowserWindow | null = null;
+let listening = false;
+let allowBeta: boolean | null = null;
+
+function check(): void {
+  if (!app.isPackaged || !listening || allowBeta === null) {
+    return;
+  }
+  autoUpdater.allowPrerelease = allowBeta;
+  void autoUpdater.checkForUpdates().catch(() => undefined);
+}
+
+export function setBetaUpdates(enabled: boolean): void {
+  if (allowBeta === enabled) {
+    return;
+  }
+  allowBeta = enabled;
+  check();
+}
 
 function send(status: UpdateStatus): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -17,12 +35,13 @@ function send(status: UpdateStatus): void {
 export function setupAutoUpdater(window: BrowserWindow): void {
   mainWindow = window;
 
-  if (!app.isPackaged) {
+  if (!app.isPackaged || listening) {
     return;
   }
 
   autoUpdater.autoDownload = false;
   autoUpdater.allowPrerelease = false;
+  autoUpdater.allowDowngrade = false;
 
   autoUpdater.on("update-available", (info) => {
     send({ kind: "available", version: info.version });
@@ -40,7 +59,8 @@ export function setupAutoUpdater(window: BrowserWindow): void {
     });
   });
 
-  void autoUpdater.checkForUpdates().catch(() => undefined);
+  listening = true;
+  check();
 }
 
 export async function downloadUpdate(): Promise<void> {

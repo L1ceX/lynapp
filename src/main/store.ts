@@ -1,3 +1,4 @@
+import { app } from "electron";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -25,7 +26,10 @@ function defaultSettings(): LauncherSettings {
     extraJvmArgs: "",
     launcherDataDir: getLauncherRoot(),
     concurrentDownloads: 8,
-    closeOnLaunch: false,
+    afterLaunch: "keep",
+    discordPresence: true,
+    discordHideInstance: false,
+    betaUpdates: app.getVersion().includes("-"),
     microsoftClientId: "",
     language: "en",
     theme: { ...THEME_DEFAULTS },
@@ -102,6 +106,14 @@ function mergeData(input: Partial<LauncherData>): LauncherData {
     }
   };
   delete (settings as Record<string, unknown>).juice;
+  const legacyClose = (input.settings as { closeOnLaunch?: boolean } | undefined)?.closeOnLaunch;
+  if (!input.settings?.afterLaunch && legacyClose) {
+    settings.afterLaunch = "close";
+  }
+  if (!["keep", "hide", "close"].includes(settings.afterLaunch)) {
+    settings.afterLaunch = "keep";
+  }
+  delete (settings as Record<string, unknown>).closeOnLaunch;
   delete (settings as Record<string, unknown>).minMemoryMb;
   const instances = Array.isArray(input.instances) ? input.instances : defaults.instances;
   for (const item of instances) {

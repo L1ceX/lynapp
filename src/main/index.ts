@@ -6,6 +6,7 @@ import { IPC } from "@shared/ipc";
 import { registerIpcHandlers } from "./ipc";
 import { getElectronUserDataDir, getLauncherRoot } from "./paths";
 import { setupAutoUpdater } from "./updater";
+import { restoreFromTray } from "./tray";
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -21,8 +22,7 @@ if (!singleInstance) {
   app.on("second-instance", () => {
     const window = BrowserWindow.getAllWindows()[0] ?? mainWindow;
     if (window) {
-      if (window.isMinimized()) window.restore();
-      window.focus();
+      restoreFromTray(window);
     }
   });
 }

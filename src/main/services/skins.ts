@@ -187,7 +187,7 @@ export class SkinService {
 
     try {
       const response = await fetch(`https://skinsystem.ely.by/textures/${encodeURIComponent(active.profileName)}?version=2`, {
-        headers: { "user-agent": "lynapp/1.1.0-beta.1" }
+        headers: { "user-agent": "lynapp/1.1.0-beta.2" }
       });
       if (!response.ok) {
         return null;
@@ -197,7 +197,7 @@ export class SkinService {
       if (!url) {
         return null;
       }
-      const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.1.0-beta.1" } });
+      const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.1.0-beta.2" } });
       if (!texture.ok) {
         return null;
       }

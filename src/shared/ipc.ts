@@ -1,5 +1,8 @@
 import type {
   AccountsState,
+  ContentImportResult,
+  ContentUpdateInfo,
+  ModVersionInfo,
   BootstrapState,
   CapeInfo,
   JavaInstallation,
@@ -23,6 +26,7 @@ export const IPC = {
   createInstance: "instances:create",
   updateInstance: "instances:update",
   removeInstance: "instances:remove",
+  duplicateInstance: "instances:duplicate",
   importMrpackStart: "instances:import-mrpack-start",
   importMrpackStartToInstance: "instances:import-mrpack-start-to",
   importMrpackCancel: "instances:import-mrpack-cancel",
@@ -55,6 +59,10 @@ export const IPC = {
   getLocalContent: "content:list",
   toggleLocalContent: "content:toggle",
   removeLocalContent: "content:remove",
+  detectLocalContent: "content:detect",
+  importLocalContent: "content:import",
+  listModVersions: "mods:versions",
+  checkContentUpdates: "mods:check-updates",
   getRunningInstances: "instances:running",
   stopInstance: "instances:stop",
   cancelLaunch: "instances:cancel-launch",
@@ -201,6 +209,7 @@ export interface LauncherApi {
   createInstance(payload: CreateInstancePayload): Promise<LauncherInstance>;
   updateInstance(payload: UpdateInstancePayload): Promise<LauncherInstance>;
   removeInstance(id: string): Promise<boolean>;
+  duplicateInstance(id: string): Promise<LauncherInstance>;
   importMrpackStart(filePath: string): Promise<MrpackBeginResult>;
   importMrpackStartToInstance(filePath: string, instanceId: string): Promise<MrpackTargetResult>;
   importMrpackCancel(instanceId: string): Promise<void>;
@@ -233,6 +242,10 @@ export interface LauncherApi {
   getLocalContent(instanceId: string): Promise<LocalContentItem[]>;
   toggleLocalContent(payload: LocalContentPayload): Promise<LocalContentItem[]>;
   removeLocalContent(payload: LocalContentPayload): Promise<LocalContentItem[]>;
+  detectLocalContent(instanceId: string): Promise<LauncherInstance>;
+  importLocalContent(instanceId: string, paths: string[]): Promise<ContentImportResult>;
+  listModVersions(instanceId: string, projectId: string, projectType: ModrinthProjectType): Promise<ModVersionInfo[]>;
+  checkContentUpdates(instanceId: string): Promise<ContentUpdateInfo[]>;
   getRunningInstances(): Promise<string[]>;
   stopInstance(id: string): Promise<LaunchResult>;
   cancelLaunch(id: string): Promise<LaunchResult>;
