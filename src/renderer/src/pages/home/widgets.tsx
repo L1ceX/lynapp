@@ -1,0 +1,97 @@
+import { Box, CheckCircle2, ChevronRight, Download, Gamepad2, Layers3, Play, Plus, RefreshCw, SlidersHorizontal, Sparkles, Square, UserRoundCog, X } from "lucide-react";
+import { formatRelative } from "../../lib/format";
+import { useApp } from "../../state/context";
+import type { HomeWidgetId } from "./layout";
+
+function ContinueWidget() {
+  const { busy, cancelSelected, isLaunching, isSelectedRunning, launchSelected, selected, stopSelected, switchSection, t } = useApp();
+  return (
+    <div className="widget-body widget-continue">
+      <div className="widget-title"><Box size={18} /><span>{t("Continue playing", "Продолжить игру")}</span></div>
+      <div className="widget-continue-main">
+        <h3>{selected?.name ?? t("No instance yet", "Инстанций пока нет")}</h3>
+        <span className="muted">{selected ? `${selected.gameVersion} / ${selected.loader}${selected.loaderVersion ? ` ${selected.loaderVersion}` : ""}` : t("Create an instance to start playing.", "Создайте инстанцию, чтобы начать играть")}</span>
+      </div>
+      <div className="button-row">
+        {isLaunching ? <button className="primary-button launch-button running" onClick={cancelSelected}><X size={16} /> {t("Cancel", "Отмена")}</button> : <button className={isSelectedRunning ? "primary-button launch-button running" : "primary-button launch-button"} disabled={!selected || busy} onClick={isSelectedRunning ? stopSelected : launchSelected}>{isSelectedRunning ? <><Square size={16} /> {t("Stop", "Остановить")}</> : <><Play size={17} /> {t("Launch", "Запустить")}</>}</button>}
+        {selected ? <button onClick={() => switchSection("instances")}><SlidersHorizontal size={16} /> {t("Manage instance", "Настроить инстанцию")}</button> : <button className="primary-button" onClick={() => switchSection("instances")}><Plus size={16} /> {t("New instance", "Новая инстанция")}</button>}
+      </div>
+    </div>
+  );
+}
+
+function StatWidget({ kind }: { kind: "statInstances" | "statMods" | "statRunning" | "statActivity" }) {
+  const { bootstrap, lastActivity, runningIds, t, totalMods } = useApp();
+  const value = kind === "statInstances" ? String(bootstrap.instances.length) : kind === "statMods" ? String(totalMods) : kind === "statRunning" ? String(runningIds.length) : lastActivity || "—";
+  const label = kind === "statInstances" ? t("Instances", "Инстанции") : kind === "statMods" ? t("Mods installed", "Установлено модов") : kind === "statRunning" ? t("Running now", "Сейчас запущено") : t("Last activity", "Последняя активность");
+  return (
+    <div className="widget-body stat-card widget-stat">
+      <span className="stat-value">{value}</span>
+      <span className="stat-label">{label}</span>
+    </div>
+  );
+}
+
+function RecentWidget() {
+  const { bootstrap, lang, runningIds, setSelectedId, switchSection, t } = useApp();
+  const recent = [...bootstrap.instances].sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "")).slice(0, 6);
+  return (
+    <div className="widget-body widget-recent">
+      <div className="widget-title"><Layers3 size={18} /><span>{t("Recent instances", "Недавние инстанции")}</span></div>
+      {recent.length ? <div className="widget-list">{recent.map((instance) => <button key={instance.id} type="button" className="widget-list-row" onClick={() => { setSelectedId(instance.id); switchSection("instances"); }}>
+        <Box size={16} />
+        <span className="widget-list-main"><strong>{instance.name}</strong><small className="muted">{instance.gameVersion} / {instance.loader}{instance.updatedAt ? ` · ${formatRelative(instance.updatedAt, lang)}` : ""}</small></span>
+        {runningIds.includes(instance.id) ? <span className="tag-chip widget-running">{t("Running", "Запущена")}</span> : null}
+        <ChevronRight size={15} />
+      </button>)}</div> : <span className="muted">{t("No instances yet.", "Инстанций пока нет.")}</span>}
+    </div>
+  );
+}
+
+function AccountWidget() {
+  const { activeAccount, switchSection, t } = useApp();
+  const kind = activeAccount?.kind === "microsoft" ? "Microsoft" : activeAccount?.kind === "ely" ? "Ely.by" : activeAccount ? t("Offline", "Офлайн") : "";
+  const name = activeAccount?.profileName ?? t("No account", "Нет аккаунта");
+  return (
+    <div className="widget-body widget-account">
+      <div className="widget-title"><UserRoundCog size={18} /><span>{t("Account", "Аккаунт")}</span></div>
+      <div className="widget-account-main">
+        <span className="widget-avatar">{name.trim()[0]?.toUpperCase() ?? "?"}</span>
+        <span className="widget-list-main"><strong>{name}</strong><small className="muted">{kind || t("Add an account to play", "Добавьте аккаунт, чтобы играть")}</small></span>
+      </div>
+      <button type="button" onClick={() => switchSection("accounts")}>{t("Accounts", "Аккаунты")} <ChevronRight size={15} /></button>
+    </div>
+  );
+}
+
+function LauncherWidget() {
+  const { bootstrap, downloadUpdate, installUpdate, settingsDraft, setSettingFlag, t, update } = useApp();
+  const beta = settingsDraft.betaUpdates ?? false;
+  return (
+    <div className="widget-body widget-launcher">
+      <div className="widget-title"><Gamepad2 size={18} /><span>lynapp {bootstrap.appVersion}</span></div>
+      <div className="widget-launcher-status">
+        {update?.kind === "available" ? <button type="button" className="primary-button" onClick={() => void downloadUpdate()}><Download size={15} /> {t(`Download ${update.version ?? ""}`, `Скачать ${update.version ?? ""}`)}</button>
+          : update?.kind === "downloading" ? <span className="muted"><RefreshCw size={14} className="spin" /> {t("Downloading update", "Загрузка обновления")} {update.percent ?? 0}%</span>
+            : update?.kind === "ready" ? <button type="button" className="primary-button" onClick={() => void installUpdate()}><Sparkles size={15} /> {t("Restart to update", "Перезапустить и обновить")}</button>
+              : <span className="muted"><CheckCircle2 size={14} /> {t("You have the latest version", "Установлена последняя версия")}</span>}
+      </div>
+      <div className="filter-row widget-beta"><strong>{t("Beta versions", "Бета-версии")}</strong><button type="button" className="switch" role="switch" aria-checked={beta} aria-label={t("Beta versions", "Бета-версии")} onClick={() => void setSettingFlag("betaUpdates", !beta)}><span className="knob" /></button></div>
+    </div>
+  );
+}
+
+export function HomeWidget({ id }: { id: HomeWidgetId }) {
+  switch (id) {
+    case "continue":
+      return <ContinueWidget />;
+    case "account":
+      return <AccountWidget />;
+    case "recent":
+      return <RecentWidget />;
+    case "launcher":
+      return <LauncherWidget />;
+    default:
+      return <StatWidget kind={id} />;
+  }
+}

@@ -64,6 +64,7 @@ export function registerIpcHandlers(): void {
       activeInstanceId: data.activeInstanceId,
       ...publicAccounts({ accounts: data.accounts, activeAccountId: data.activeAccountId }),
       storagePath: getStorePath(),
+      appVersion: app.getVersion(),
       javaCandidates: await java.listCandidatePaths([data.settings.javaPath])
     };
   });

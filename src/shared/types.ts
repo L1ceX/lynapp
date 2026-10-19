@@ -65,6 +65,15 @@ export interface GameVersionInfo {
 
 export type VersionTypeFilter = Record<GameVersionType, boolean>;
 
+export interface HomeWidgetLayout {
+  i: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  hidden?: boolean;
+}
+
 export const VERSION_TYPES_DEFAULTS: VersionTypeFilter = { release: true, snapshot: false, beta: false, alpha: false };
 
 export interface LauncherSettings {
@@ -79,6 +88,7 @@ export interface LauncherSettings {
   discordHideInstance: boolean;
   betaUpdates: boolean;
   versionTypes: VersionTypeFilter;
+  homeLayout?: HomeWidgetLayout[];
   microsoftClientId: string;
   language: "en" | "ru";
   theme: Record<string, string>;
@@ -151,6 +161,7 @@ export interface BootstrapState {
   activeAccountId: string | null;
   storagePath: string;
   javaCandidates: string[];
+  appVersion: string;
 }
 
 export interface JavaRuntimeState {
