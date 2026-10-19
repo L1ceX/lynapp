@@ -56,6 +56,17 @@ export const EFFECTS_DEFAULTS: EffectsSettings = {
 
 export type AfterLaunchAction = "keep" | "hide" | "close";
 
+export type GameVersionType = "release" | "snapshot" | "beta" | "alpha";
+
+export interface GameVersionInfo {
+  id: string;
+  type: GameVersionType;
+}
+
+export type VersionTypeFilter = Record<GameVersionType, boolean>;
+
+export const VERSION_TYPES_DEFAULTS: VersionTypeFilter = { release: true, snapshot: false, beta: false, alpha: false };
+
 export interface LauncherSettings {
   javaPath: string;
   javaPaths: Record<string, string>;
@@ -67,6 +78,7 @@ export interface LauncherSettings {
   discordPresence: boolean;
   discordHideInstance: boolean;
   betaUpdates: boolean;
+  versionTypes: VersionTypeFilter;
   microsoftClientId: string;
   language: "en" | "ru";
   theme: Record<string, string>;
@@ -174,6 +186,46 @@ export interface LocalContentItem {
 export interface ContentImportResult {
   added: Array<{ fileName: string; kind: LocalContentKind }>;
   skipped: Array<{ fileName: string; reason: "exists" | "unknown" | "unsupported" | "failed" }>;
+}
+
+export type ExternalLauncherId = "modrinth" | "prism" | "polymc" | "multimc" | "curseforge" | "minecraft";
+
+export interface ExternalInstance {
+  key: string;
+  launcher: ExternalLauncherId;
+  name: string;
+  gameVersion: string;
+  loader: ModLoader | null;
+  loaderVersion?: string;
+  directory: string;
+  mods: number;
+  worlds: number;
+  lastPlayed?: string;
+  iconDataUrl?: string;
+  maxMemoryMb?: number;
+  extraJvmArgs?: string;
+  issue?: string;
+}
+
+export interface ExternalLauncher {
+  key: string;
+  id: ExternalLauncherId;
+  root: string;
+  instances: ExternalInstance[];
+  error?: string;
+}
+
+export interface ExternalImportProgress {
+  key: string;
+  index: number;
+  total: number;
+  phase: "create" | "copy" | "detect" | "done" | "failed";
+  message?: string;
+}
+
+export interface ExternalImportResult {
+  imported: Array<{ key: string; instanceId: string; name: string }>;
+  failed: Array<{ key: string; name: string; reason: string }>;
 }
 
 export interface ModVersionInfo {

@@ -11,6 +11,13 @@ export function getTarPath(): string {
   return tarPath;
 }
 
+export function getAppIconPath(): string | undefined {
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, "icon.ico")]
+    : [path.join(app.getAppPath(), "build", "icon.ico"), path.join(process.cwd(), "build", "icon.ico")];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
 export function getLauncherRoot(): string {
   return path.join(app.getPath("appData"), "lynapp");
 }

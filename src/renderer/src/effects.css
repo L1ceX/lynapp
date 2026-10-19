@@ -120,6 +120,7 @@
   .dropdown-popup > .dropdown-option:nth-child(4) { animation-delay: 60ms; }
   .dropdown-popup > .dropdown-option:nth-child(5) { animation-delay: 80ms; }
   .dropdown-popup > .dropdown-option:nth-child(n+6) { animation-delay: 100ms; }
+  .dropdown-popup > .dropdown-option:nth-child(n+14) { animation: none; }
   .dropdown-option:hover:not(:disabled) { transform: translateX(3px); box-shadow: none; }
   .dropdown-button svg { transition: transform 380ms var(--spring); }
   .modal-backdrop { backdrop-filter: blur(6px) saturate(1.1); animation-duration: 260ms; }
@@ -172,10 +173,10 @@
   .settings-surface, .page-workspace, .instances-workspace { animation-duration: 380ms; }
 
   .mod-results > *, .instance-list > *, .file-group > .file-row, .account-list > *,
-  .skin-grid > *, .java-rows > *, .stat-grid > *, .theme-grid > *, .export-rows > * {
+  .skin-grid > *, .java-rows > *, .stat-grid > *, .theme-grid > *, .export-rows > *, .import-rows > * {
     animation: effects-surface-in 360ms var(--smooth) backwards;
   }
-  :is(.mod-results, .instance-list, .file-group, .account-list, .skin-grid, .java-rows, .stat-grid, .theme-grid, .export-rows) {
+  :is(.mod-results, .instance-list, .file-group, .account-list, .skin-grid, .java-rows, .stat-grid, .theme-grid, .export-rows, .import-rows) {
     > :nth-child(2) { animation-delay: 40ms; }
     > :nth-child(3) { animation-delay: 80ms; }
     > :nth-child(4) { animation-delay: 120ms; }
@@ -201,7 +202,7 @@
 
 
 :root.fx-cards {
-  .mod-card, .mod-result, .file-row, .account-row, .stat-card, .skin-card, .theme-row, .export-row {
+  .mod-card, .mod-result, .file-row, .account-row, .stat-card, .skin-card, .theme-row, .export-row, .import-row {
     transition: border-color 260ms ease, background 260ms ease, transform 460ms var(--spring), box-shadow 360ms var(--smooth);
   }
   .mod-card:hover, .mod-result:hover, .file-row:hover, .account-row:hover, .skin-card:hover, .theme-row:hover {

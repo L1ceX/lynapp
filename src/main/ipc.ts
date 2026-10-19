@@ -10,6 +10,7 @@ import { getLauncherRoot, getStorePath } from "./paths";
 import { AuthService } from "./services/auth";
 import { ContentService } from "./services/content";
 import { DiscordPresence } from "./services/discord";
+import { ExternalImportService } from "./services/importer";
 import { InstanceService } from "./services/instances";
 import { JavaService } from "./services/java";
 import { MinecraftService } from "./services/minecraft";
@@ -31,6 +32,7 @@ export function registerIpcHandlers(): void {
   const content = new ContentService(store);
   const modpacks = new ModpackService(store, instances, minecraft);
   const discord = new DiscordPresence();
+  const importer = new ExternalImportService(instances, content, minecraft);
 
   void instances.getRunning().then(async (running) => {
     const data = await store.getData();
@@ -69,6 +71,21 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.createInstance, (_event, payload: CreateInstancePayload) => instances.create(payload));  ipcMain.handle(IPC.updateInstance, (_event, payload: UpdateInstancePayload) => instances.updateInstance(payload));
   ipcMain.handle(IPC.removeInstance, (_event, id: string) => instances.remove(id));
   ipcMain.handle(IPC.duplicateInstance, (_event, id: string) => instances.duplicate(id));
+  const stringList = (value: unknown): string[] => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+  ipcMain.handle(IPC.scanExternalLaunchers, (_event, extraRoots?: string[]) => importer.scan(stringList(extraRoots)));
+  ipcMain.handle(IPC.pickExternalFolder, async (event) => {
+    const parent = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const options = { title: tr("Choose a launcher or instances folder", "Выберите папку лаунчера или инстанций"), properties: ["openDirectory"] as Array<"openDirectory"> };
+    const picked = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+    if (picked.canceled || !picked.filePaths[0]) return null;
+    return { folder: picked.filePaths[0], launcher: await importer.scanFolder(picked.filePaths[0]) };
+  });
+  ipcMain.handle(IPC.importExternalInstances, (event, keys: string[], extraRoots?: string[]) => {
+    const sender = event.sender;
+    return importer.importInstances(stringList(keys), stringList(extraRoots), (update) => {
+      if (!sender.isDestroyed()) sender.send(IPC.externalImportProgress, update);
+    });
+  });
   ipcMain.handle(IPC.importMrpackStart, (_event, filePath: string) => modpacks.beginImport(filePath));
   ipcMain.handle(IPC.importMrpackStartToInstance, (_event, filePath: string, instanceId: string) => modpacks.beginImportToInstance(filePath, instanceId));
   ipcMain.handle(IPC.importMrpackCancel, (_event, instanceId: string) => modpacks.cancelImport(instanceId));
@@ -166,7 +183,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.windowIsMaximized, (event) => {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
   });
-  ipcMain.handle(IPC.getGameVersions, () => minecraft.listReleaseVersions());
+  ipcMain.handle(IPC.getGameVersions, () => minecraft.listGameVersions());
   ipcMain.handle(IPC.getLoaderSupport, () => minecraft.getLoaderSupport());
   ipcMain.handle(IPC.getLoaderVersions, (_event, loader: ModLoader, gameVersion: string) => minecraft.listLoaderVersions(loader, gameVersion));
   ipcMain.handle(IPC.openInstanceFolder, async (_event, id: string) => {

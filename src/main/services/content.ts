@@ -36,7 +36,7 @@ const kindOrder: LocalContentKind[] = ["mod", "resourcepack", "shader", "datapac
 
 const execFileAsync = promisify(execFile);
 
-const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.2" };
+const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.3" };
 const unknownRecheckMs = 3 * 24 * 60 * 60 * 1000;
 
 interface HashCacheEntry {
@@ -805,7 +805,7 @@ export class ContentService {
 
     try {
       const response = await fetch(`https://api.modrinth.com/v2/project/${ref}`, {
-        headers: { "User-Agent": "lynapp/1.1.0-beta.2" }
+        headers: { "User-Agent": "lynapp/1.1.0-beta.3" }
       });
 
       if (!response.ok) {

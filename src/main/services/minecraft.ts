@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { AccountState, LauncherInstance, ModLoader } from "@shared/types";
+import type { AccountState, GameVersionInfo, GameVersionType, LauncherInstance, ModLoader } from "@shared/types";
 import { getLauncherRoot, getTarPath } from "../paths";
 import { getRequiredJavaMajor as fallbackJavaMajor } from "./java";
 import { readUrlBytes, type BytesCallback } from "./transfer";
@@ -92,6 +92,8 @@ interface AssetIndex {
       size: number;
     }
   >;
+  virtual?: boolean;
+  map_to_resources?: boolean;
 }
 
 export interface PreparedMinecraftLaunch {
@@ -163,7 +165,7 @@ async function downloadFile(url: string, filePath: string, expectedSha1?: string
 
   await mkdir(path.dirname(filePath), { recursive: true });
 
-  const { buffer } = await readUrlBytes(url, { "user-agent": "lynapp/1.1.0-beta.2" }, signal, (received, total) => onBytes?.(received, total), timeoutMs);
+  const { buffer } = await readUrlBytes(url, { "user-agent": "lynapp/1.1.0-beta.3" }, signal, (received, total) => onBytes?.(received, total), timeoutMs);
   const tmpPath = `${filePath}.${process.pid}.${(downloadTmpCounter += 1)}.tmp`;
   await writeFile(tmpPath, buffer);
   await rename(tmpPath, filePath);
@@ -232,7 +234,7 @@ async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
   const response = await fetch(url, {
     signal,
     headers: {
-      "user-agent": "lynapp/1.1.0-beta.2"
+      "user-agent": "lynapp/1.1.0-beta.3"
     }
   });
 
@@ -301,7 +303,7 @@ async function getCachedLoaderVersions(key: string, loader: () => Promise<string
 
 async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.1.0-beta.2" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.3" }
   });
   if (response.status === 400 || response.status === 404) {
     return [];
@@ -315,7 +317,7 @@ async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> 
 
 async function listQuiltLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.1.0-beta.2" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.3" }
   });
   if (response.status === 400 || response.status === 404) {
     return [];
@@ -357,7 +359,7 @@ function isGameVersionAtLeast(version: string, major: number, minor: number, pat
 async function getFabricGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.fabricmc.net/v2/versions/game", {
-      headers: { "user-agent": "lynapp/1.1.0-beta.2" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.3" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -370,7 +372,7 @@ async function getFabricGameVersions(): Promise<string[]> {
 async function getQuiltGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.quiltmc.org/v3/versions/game", {
-      headers: { "user-agent": "lynapp/1.1.0-beta.2" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.3" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -414,6 +416,7 @@ async function getLoaderSupportMap(): Promise<LoaderSupportMap> {
 
   const manifest = await getManifest();
   const releases = manifest.versions.filter((item) => item.type === "release").map((item) => item.id);
+  const everything = manifest.versions.map((item) => item.id);
   const [fabricLive, quiltLive, forgeLive, neoforgeLive] = await Promise.all([
     getFabricGameVersions(),
     getQuiltGameVersions(),
@@ -424,8 +427,8 @@ async function getLoaderSupportMap(): Promise<LoaderSupportMap> {
   const fabricSet = new Set(fabricLive);
   const quiltSet = new Set(quiltLive);
   const map: LoaderSupportMap = {
-    fabric: fabricLive.length ? releases.filter((item) => fabricSet.has(item)) : releases.filter((item) => isGameVersionAtLeast(item, 1, 14, 0)),
-    quilt: quiltLive.length ? releases.filter((item) => quiltSet.has(item)) : releases.filter((item) => isGameVersionAtLeast(item, 1, 14, 0)),
+    fabric: fabricLive.length ? everything.filter((item) => fabricSet.has(item)) : releases.filter((item) => isGameVersionAtLeast(item, 1, 14, 0)),
+    quilt: quiltLive.length ? everything.filter((item) => quiltSet.has(item)) : releases.filter((item) => isGameVersionAtLeast(item, 1, 14, 0)),
     forge: forgeLive.length ? forgeLive : releases,
     neoforge: neoforgeLive.length ? neoforgeLive : releases.filter((item) => isGameVersionAtLeast(item, 1, 20, 2))
   };
@@ -674,7 +677,7 @@ async function getManifest(): Promise<VersionManifest> {
   try {
     const response = await fetch(versionManifestUrl, {
       headers: {
-        "user-agent": "lynapp/1.1.0-beta.2"
+        "user-agent": "lynapp/1.1.0-beta.3"
       }
     });
     if (!response.ok) {
@@ -818,7 +821,7 @@ async function getFabricLoaderVersion(requested?: string, signal?: AbortSignal):
 
   const response = await fetch("https://meta.fabricmc.net/v2/versions/loader", {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.2" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.3" }
   });
   if (!response.ok) {
     throw new Error(tr(`Fabric loader versions returned ${response.status}`, `Сервер Fabric вернул ошибку при загрузке версий: ${response.status}`));
@@ -849,7 +852,7 @@ async function getQuiltLoaderVersion(gameVersion: string, requested?: string, si
 
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.2" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.3" }
   });
   if (!response.ok) {
     throw new Error(tr(`Quilt loader versions returned ${response.status}`, `Сервер Quilt вернул ошибку при загрузке версий: ${response.status}`));
@@ -1175,7 +1178,20 @@ async function applyLoaderProfile(version: VersionJson, instance: LauncherInstan
   }
 }
 
-async function prepareAssets(version: VersionJson, signal?: AbortSignal, onProgress?: (progress: LaunchProgress) => void, concurrency = 12): Promise<void> {
+async function placeLegacyAssets(assetIndex: AssetIndex, objectsDir: string, targetDir: string): Promise<void> {
+  await mapLimit(Object.entries(assetIndex.objects), 8, async ([name, asset]) => {
+    const target = path.join(targetDir, ...name.split("/"));
+    try {
+      const existing = await stat(target);
+      if (existing.size === asset.size) return;
+    } catch {
+    }
+    await mkdir(path.dirname(target), { recursive: true });
+    await copyFile(path.join(objectsDir, asset.hash.slice(0, 2), asset.hash), target);
+  });
+}
+
+async function prepareAssets(version: VersionJson, instance: LauncherInstance, signal?: AbortSignal, onProgress?: (progress: LaunchProgress) => void, concurrency = 12): Promise<string> {
   const indexesDir = path.join(getAssetsRoot(), "indexes");
   const objectsDir = path.join(getAssetsRoot(), "objects");
   const indexPath = path.join(indexesDir, `${version.assetIndex.id}.json`);
@@ -1192,6 +1208,18 @@ async function prepareAssets(version: VersionJson, signal?: AbortSignal, onProgr
     done += 1;
     onProgress?.({ phase: "assets", done, total: entries.length });
   });
+
+  if (assetIndex.map_to_resources) {
+    const resourcesDir = path.join(instance.directory, "resources");
+    await placeLegacyAssets(assetIndex, objectsDir, resourcesDir);
+    return resourcesDir;
+  }
+  if (assetIndex.virtual) {
+    const virtualDir = path.join(getAssetsRoot(), "virtual", version.assetIndex.id);
+    await placeLegacyAssets(assetIndex, objectsDir, virtualDir);
+    return virtualDir;
+  }
+  return getAssetsRoot();
 }
 
 function buildLaunchArgs(
@@ -1202,6 +1230,7 @@ function buildLaunchArgs(
   paths: {
     classpath: string;
     nativesDir: string;
+    gameAssets: string;
   }
 ): string[] {
   const playerName = getPlayerName(account);
@@ -1222,12 +1251,12 @@ function buildLaunchArgs(
     version_type: version.type,
     natives_directory: paths.nativesDir,
     launcher_name: "lynapp",
-        launcher_version: "1.1.0-beta.2",
+        launcher_version: "1.1.0-beta.3",
     classpath: paths.classpath,
     classpath_separator: ";",
     library_directory: getLibrariesRoot(),
     user_properties: "{}",
-    game_assets: getAssetsRoot(),
+    game_assets: paths.gameAssets,
     auth_session: offline ? accessToken : `token:${accessToken}:${uuid}`
   };
   const jvmArgs = version.arguments?.jvm
@@ -1253,7 +1282,7 @@ async function ensureAuthlibInjector(signal?: AbortSignal): Promise<string> {
   }
   const response = await fetch("https://api.github.com/repos/yushijinhun/authlib-injector/releases/latest", {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.2", accept: "application/vnd.github+json" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.3", accept: "application/vnd.github+json" }
   });
   if (!response.ok) {
     throw new Error(tr(`authlib-injector release lookup failed (HTTP ${response.status})`, `Не удалось найти выпуск authlib-injector (HTTP ${response.status})`));
@@ -1279,6 +1308,14 @@ export class MinecraftService {
     } catch {
     }
     return fallbackJavaMajor(gameVersion);
+  }
+
+  async listGameVersions(): Promise<GameVersionInfo[]> {
+    const manifest = await getManifest();
+    const kinds: Record<string, GameVersionType> = { release: "release", snapshot: "snapshot", old_beta: "beta", old_alpha: "alpha" };
+    return manifest.versions
+      .filter((item) => kinds[item.type])
+      .map((item) => ({ id: item.id, type: kinds[item.type] }));
   }
 
   async listReleaseVersions(): Promise<string[]> {
@@ -1343,12 +1380,13 @@ export class MinecraftService {
     const nativesDir = getNativesRoot(version.id);
     const clientJar = version.prebuiltClientJar ?? await prepareClientJar(vanillaVersion, version.id, signal);
     const libraryClasspath = await prepareLibraries(version, nativesDir, signal, onProgress);
-    await prepareAssets(version, signal, onProgress, concurrency);
+    const gameAssets = await prepareAssets(version, instance, signal, onProgress, concurrency);
 
     const classpath = [...new Set([...libraryClasspath, clientJar])].join(";");
     const args = buildLaunchArgs(version, instance, account, javaMemory, {
       classpath,
-      nativesDir
+      nativesDir,
+      gameAssets
     });
     if (account.kind === "ely") {
       const injector = await ensureAuthlibInjector(signal);

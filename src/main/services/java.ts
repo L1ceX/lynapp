@@ -285,7 +285,7 @@ async function downloadRuntimeZip(major: number, signal?: AbortSignal, onBytes?:
   }
 
   const tempPath = `${zipPath}.tmp`;
-  const { buffer } = await readUrlBytes(getAdoptiumDownloadUrl(major), { "user-agent": "lynapp/1.1.0-beta.2" }, signal, (received, total) =>
+  const { buffer } = await readUrlBytes(getAdoptiumDownloadUrl(major), { "user-agent": "lynapp/1.1.0-beta.3" }, signal, (received, total) =>
     onBytes?.(received, total), 15 * 60 * 1000
   );
   await writeFile(tempPath, buffer);

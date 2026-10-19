@@ -2,7 +2,7 @@ import { app } from "electron";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { EFFECTS_DEFAULTS, type AccountState, type LauncherInstance, type LauncherSettings, type SkinMeta } from "@shared/types";
+import { EFFECTS_DEFAULTS, VERSION_TYPES_DEFAULTS, type AccountState, type LauncherInstance, type LauncherSettings, type SkinMeta } from "@shared/types";
 import { THEME_DEFAULTS } from "@shared/theme";
 import { setMainLanguage } from "./i18n";
 import { getInstancesRoot, getLauncherRoot, getLegacyLauncherRoot, getStorePath } from "./paths";
@@ -30,6 +30,7 @@ function defaultSettings(): LauncherSettings {
     discordPresence: true,
     discordHideInstance: false,
     betaUpdates: app.getVersion().includes("-"),
+    versionTypes: { ...VERSION_TYPES_DEFAULTS },
     microsoftClientId: "",
     language: "en",
     theme: { ...THEME_DEFAULTS },
@@ -99,6 +100,7 @@ function mergeData(input: Partial<LauncherData>): LauncherData {
     ...defaults.settings,
     ...(input.settings ?? {}),
     theme: { ...defaults.settings.theme, ...(input.settings?.theme ?? {}) },
+    versionTypes: { ...defaults.settings.versionTypes, ...(input.settings?.versionTypes ?? {}) },
     effects: {
       ...defaults.settings.effects,
       ...((input.settings as { juice?: Partial<LauncherSettings["effects"]> } | undefined)?.juice ?? {}),

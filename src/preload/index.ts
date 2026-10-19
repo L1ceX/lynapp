@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { IPC, type LauncherApi } from "@shared/ipc";
-import type { UpdateStatus } from "@shared/types";
+import type { ExternalImportProgress, UpdateStatus } from "@shared/types";
 
 const api: LauncherApi = {
   getFilePath: (file) => Promise.resolve(webUtils.getPathForFile(file)),
@@ -9,6 +9,14 @@ const api: LauncherApi = {
   updateInstance: (payload) => ipcRenderer.invoke(IPC.updateInstance, payload),
   removeInstance: (id) => ipcRenderer.invoke(IPC.removeInstance, id),
   duplicateInstance: (id) => ipcRenderer.invoke(IPC.duplicateInstance, id),
+  scanExternalLaunchers: (extraRoots) => ipcRenderer.invoke(IPC.scanExternalLaunchers, extraRoots),
+  importExternalInstances: (keys, extraRoots) => ipcRenderer.invoke(IPC.importExternalInstances, keys, extraRoots),
+  pickExternalFolder: () => ipcRenderer.invoke(IPC.pickExternalFolder),
+  onExternalImportProgress: (listener) => {
+    const handler = (_event: unknown, update: ExternalImportProgress) => listener(update);
+    ipcRenderer.on(IPC.externalImportProgress, handler);
+    return () => ipcRenderer.removeListener(IPC.externalImportProgress, handler);
+  },
   importMrpackStart: (filePath) => ipcRenderer.invoke(IPC.importMrpackStart, filePath),
   importMrpackStartToInstance: (filePath, instanceId) => ipcRenderer.invoke(IPC.importMrpackStartToInstance, filePath, instanceId),
   importMrpackCancel: (instanceId) => ipcRenderer.invoke(IPC.importMrpackCancel, instanceId),

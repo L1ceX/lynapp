@@ -4,6 +4,7 @@ import type { AccountsState, AccountState, LoginStartResult } from "@shared/type
 import { bundledMicrosoftClientId } from "../config";
 import { JsonStore, getActiveAccount } from "../store";
 import { tr } from "../i18n";
+import { getAppIconPath } from "../paths";
 
 const microsoftAuthorizeUrl = "https://login.live.com/oauth20_authorize.srf";
 const microsoftNativeRedirectUri = "https://login.live.com/oauth20_desktop.srf";
@@ -139,6 +140,7 @@ function openMicrosoftLoginWindow(parentWindow: BrowserWindow | null, clientId: 
     minWidth: 420,
     minHeight: 560,
     title: "Microsoft Login",
+    icon: getAppIconPath(),
     autoHideMenuBar: true,
     parent: parentWindow ?? undefined,
     modal: Boolean(parentWindow),

@@ -1,17 +1,9 @@
 import { app, BrowserWindow, Menu, nativeImage, Tray } from "electron";
-import { existsSync } from "node:fs";
-import path from "node:path";
 import { tr } from "./i18n";
+import { getAppIconPath } from "./paths";
 
 let tray: Tray | null = null;
 let hiddenForGame = false;
-
-function trayIconPath(): string | null {
-  const candidates = app.isPackaged
-    ? [path.join(process.resourcesPath, "icon.ico")]
-    : [path.join(app.getAppPath(), "build", "icon.ico"), path.join(process.cwd(), "build", "icon.ico")];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-}
 
 export function isHiddenForGame(): boolean {
   return hiddenForGame;
@@ -20,7 +12,7 @@ export function isHiddenForGame(): boolean {
 export function hideToTray(window: BrowserWindow): void {
   if (window.isDestroyed()) return;
   if (!tray) {
-    const iconPath = trayIconPath();
+    const iconPath = getAppIconPath();
     tray = new Tray(iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty());
     tray.setToolTip("lynapp");
     tray.on("click", () => restoreFromTray(window));

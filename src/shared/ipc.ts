@@ -2,6 +2,10 @@ import type {
   AccountsState,
   ContentImportResult,
   ContentUpdateInfo,
+  ExternalImportProgress,
+  ExternalImportResult,
+  ExternalLauncher,
+  GameVersionInfo,
   ModVersionInfo,
   BootstrapState,
   CapeInfo,
@@ -27,6 +31,10 @@ export const IPC = {
   updateInstance: "instances:update",
   removeInstance: "instances:remove",
   duplicateInstance: "instances:duplicate",
+  scanExternalLaunchers: "import:scan",
+  importExternalInstances: "import:run",
+  pickExternalFolder: "import:pick-folder",
+  externalImportProgress: "import:progress",
   importMrpackStart: "instances:import-mrpack-start",
   importMrpackStartToInstance: "instances:import-mrpack-start-to",
   importMrpackCancel: "instances:import-mrpack-cancel",
@@ -210,6 +218,10 @@ export interface LauncherApi {
   updateInstance(payload: UpdateInstancePayload): Promise<LauncherInstance>;
   removeInstance(id: string): Promise<boolean>;
   duplicateInstance(id: string): Promise<LauncherInstance>;
+  scanExternalLaunchers(extraRoots?: string[]): Promise<ExternalLauncher[]>;
+  importExternalInstances(keys: string[], extraRoots?: string[]): Promise<ExternalImportResult>;
+  pickExternalFolder(): Promise<{ folder: string; launcher: ExternalLauncher | null } | null>;
+  onExternalImportProgress(listener: (update: ExternalImportProgress) => void): () => void;
   importMrpackStart(filePath: string): Promise<MrpackBeginResult>;
   importMrpackStartToInstance(filePath: string, instanceId: string): Promise<MrpackTargetResult>;
   importMrpackCancel(instanceId: string): Promise<void>;
@@ -235,7 +247,7 @@ export interface LauncherApi {
   installJava(major: number): Promise<JavaInstallation>;
   detectJava(major: number): Promise<JavaInstallation>;
   browseJava(major: number): Promise<JavaInstallation | null>;
-  getGameVersions(): Promise<string[]>;
+  getGameVersions(): Promise<GameVersionInfo[]>;
   getLoaderSupport(): Promise<Record<string, string[]>>;
   getLoaderVersions(loader: ModLoader, gameVersion: string): Promise<string[]>;
   openInstanceFolder(id: string): Promise<string>;

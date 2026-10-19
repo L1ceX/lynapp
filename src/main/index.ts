@@ -4,7 +4,7 @@ import { rm } from "node:fs/promises";
 import path from "node:path";
 import { IPC } from "@shared/ipc";
 import { registerIpcHandlers } from "./ipc";
-import { getElectronUserDataDir, getLauncherRoot } from "./paths";
+import { getAppIconPath, getElectronUserDataDir, getLauncherRoot } from "./paths";
 import { setupAutoUpdater } from "./updater";
 import { restoreFromTray } from "./tray";
 
@@ -81,6 +81,7 @@ function createWindow(): void {
     minWidth: 1040,
     minHeight: 680,
     title: "lynapp",
+    icon: getAppIconPath(),
     backgroundColor: "#0b111d",
     autoHideMenuBar: true,
     frame: false,

@@ -22,7 +22,7 @@ interface ModrinthVersion {
   loaders?: string[];
 }
 
-const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.2" };
+const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.3" };
 
 function contentFolder(projectType: ModrinthProjectType): string {
   const folders: Record<ModrinthProjectType, string> = {
@@ -119,7 +119,7 @@ async function targetDirectories(instance: LauncherInstance, projectType: Modrin
 }
 
 async function downloadFile(url: string, target: string, onBytes?: BytesCallback): Promise<void> {
-  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp/1.1.0-beta.2" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
+  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp/1.1.0-beta.3" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
   await writeFile(target, buffer);
 }
 
@@ -132,7 +132,7 @@ export class ModService {
   async getCategoryTags(projectType: ModrinthProjectType): Promise<string[]> {
     if (!this.categoryCache) {
       const response = await fetch("https://api.modrinth.com/v2/tag/category", {
-        headers: { "User-Agent": "lynapp/1.1.0-beta.2" }
+        headers: { "User-Agent": "lynapp/1.1.0-beta.3" }
       });
 
       if (!response.ok) {
@@ -184,7 +184,7 @@ export class ModService {
 
       url.searchParams.set("facets", JSON.stringify(facets));
 
-      const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.1.0-beta.2" } });
+      const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.1.0-beta.3" } });
       if (!response.ok) throw new Error(tr(`Modrinth returned ${response.status}`, `Modrinth вернул ошибку: ${response.status}`));
       const body = (await response.json()) as { hits: ModrinthHit[]; total_hits?: number };
       return {
@@ -412,7 +412,7 @@ export class ModService {
           ? ["minecraft"]
           : [];
     if (loaders.length) url.searchParams.set("loaders", JSON.stringify(loaders));
-    const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.1.0-beta.2" } });
+    const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.1.0-beta.3" } });
     if (!response.ok) return [];
     return (await response.json()) as ModrinthVersion[];
   }
