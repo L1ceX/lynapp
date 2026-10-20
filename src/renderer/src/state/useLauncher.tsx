@@ -7,7 +7,7 @@ import { useSkins } from "./hooks/useSkins";
 import { useAccounts } from "./hooks/useAccounts";
 import { useExternalImport } from "./hooks/useExternalImport";
 import { useDragDrop } from "./hooks/useDragDrop";
-import { useHomeLayout } from "./hooks/useHomeLayout";
+import { useLayoutEditor } from "./hooks/useLayoutEditor";
 
 export function useLauncher() {
   const core = useCore();
@@ -19,8 +19,8 @@ export function useLauncher() {
   const accounts = useAccounts({ ...core, ...skins });
   const externalImport = useExternalImport({ ...core });
   const dragDrop = useDragDrop({ ...core, ...instances, ...content });
-  const homeLayout = useHomeLayout({ ...core });
-  return { ...core, ...visuals, ...instances, ...versions, ...content, ...skins, ...accounts, ...externalImport, ...dragDrop, ...homeLayout };
+  const layoutEditor = useLayoutEditor({ ...core });
+  return { ...core, ...visuals, ...instances, ...versions, ...content, ...skins, ...accounts, ...externalImport, ...dragDrop, ...layoutEditor };
 }
 
 export type LauncherState = ReturnType<typeof useLauncher>;

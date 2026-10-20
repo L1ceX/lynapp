@@ -579,3 +579,17 @@ html .home-board .home-widget .stat-card:hover { transform: none; box-shadow: no
 html .home-board .home-widget .stat-value { transform-origin: left center; }
 .home-board:not(.editing) .home-widget { transition: transform 280ms cubic-bezier(.2, .8, .2, 1), width 220ms ease, height 220ms ease, border-color 260ms ease, box-shadow 320ms ease; }
 .home-board:not(.editing) .home-widget:hover { border-color: color-mix(in srgb, var(--t-accent), transparent 35%); box-shadow: 0 14px 30px -16px rgba(0, 0, 0, .6); }
+.rail-bottom { display: grid; gap: 9px; margin-top: auto; }
+.rail-layout { animation: surface-in 400ms cubic-bezier(.16, 1, .3, 1) 450ms backwards; }
+.reorder-editing { user-select: none; }
+.reorder-editing .reorderable { cursor: grab; touch-action: none; }
+.rail-nav.reorder-editing .rail-button { border: 1px dashed color-mix(in srgb, var(--t-accent), transparent 45%); }
+.instance-tabs.reorder-editing .tab-button { border-style: dashed; border-color: color-mix(in srgb, var(--t-accent), transparent 45%); }
+.reorder-editing .reorderable > svg:first-child { animation: reorder-wiggle 2.6s ease-in-out infinite; }
+.reorder-editing .reorderable:nth-child(2n) > svg:first-child { animation-delay: -1.3s; }
+.reorder-editing .reorder-dragging { cursor: grabbing; border-style: solid; border-color: var(--t-accent); background: var(--t-accentbg); box-shadow: 0 14px 28px -12px rgba(0, 0, 0, .75), 0 0 18px -6px var(--t-accent); }
+.reorder-editing .reorder-dragging > svg:first-child { animation: none; }
+@keyframes reorder-wiggle { 0%, 100% { transform: rotate(0deg); } 25% { transform: rotate(-4deg); } 75% { transform: rotate(4deg); } }
+.tab-hidden { opacity: .45; }
+.tab-visibility { display: inline-grid; width: 20px; height: 20px; place-items: center; margin-left: 4px; border-radius: 6px; color: var(--t-muted); transition: color 160ms ease, background 160ms ease; }
+.tab-visibility:hover { color: var(--t-text); background: color-mix(in srgb, var(--t-accent), transparent 78%); }

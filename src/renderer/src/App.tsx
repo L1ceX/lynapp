@@ -2,6 +2,7 @@ import { RefreshCw } from "lucide-react";
 import { Presence } from "./components/Presence";
 import { DropOverlay } from "./layout/DropOverlay";
 import { IconRail } from "./layout/IconRail";
+import { LayoutToolbar } from "./layout/LayoutToolbar";
 import { Titlebar } from "./layout/Titlebar";
 import { DeleteInstanceModal } from "./modals/DeleteInstanceModal";
 import { ExportModal } from "./modals/ExportModal";
@@ -45,6 +46,7 @@ export function App() {
       </div>
       <DeleteInstanceModal />
       <ModpackTargetModal />
+      <LayoutToolbar />
       <Presence>{renderImportModal()}</Presence>
       <VersionPickerModal /><ExportModal />
     </div>

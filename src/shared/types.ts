@@ -74,6 +74,12 @@ export interface HomeWidgetLayout {
   hidden?: boolean;
 }
 
+export interface NavLayout {
+  rail?: string[];
+  tabs?: string[];
+  hiddenTabs?: string[];
+}
+
 export const VERSION_TYPES_DEFAULTS: VersionTypeFilter = { release: true, snapshot: false, beta: false, alpha: false };
 
 export interface LauncherSettings {
@@ -89,6 +95,7 @@ export interface LauncherSettings {
   betaUpdates: boolean;
   versionTypes: VersionTypeFilter;
   homeLayout?: HomeWidgetLayout[];
+  navLayout?: NavLayout;
   microsoftClientId: string;
   language: "en" | "ru";
   theme: Record<string, string>;
