@@ -1,6 +1,6 @@
 export type ModLoader = "vanilla" | "fabric" | "forge" | "quilt" | "neoforge";
 
-export type ModProvider = "modrinth";
+export type ModProvider = "modrinth" | "curseforge";
 
 export type ModrinthProjectType = "mod" | "resourcepack" | "shader" | "datapack" | "modpack";
 
@@ -74,10 +74,23 @@ export interface HomeWidgetLayout {
   hidden?: boolean;
 }
 
+export type PageBoardId = "launcher" | "visuals" | "accounts" | "skins" | "instGeneral" | "instRuntime" | "instContent";
+
+export type PageLayouts = Partial<Record<PageBoardId, HomeWidgetLayout[]>>;
+
+export type RailSide = "left" | "right" | "top" | "bottom";
+
+export type LaunchPlace = "header" | "tabs" | "floating";
+
 export interface NavLayout {
   rail?: string[];
   tabs?: string[];
   hiddenTabs?: string[];
+  railSide?: RailSide;
+  sidebarSide?: "left" | "right";
+  sidebarWidth?: number;
+  tabsSide?: RailSide;
+  launchPlace?: LaunchPlace;
 }
 
 export const VERSION_TYPES_DEFAULTS: VersionTypeFilter = { release: true, snapshot: false, beta: false, alpha: false };
@@ -96,6 +109,7 @@ export interface LauncherSettings {
   versionTypes: VersionTypeFilter;
   homeLayout?: HomeWidgetLayout[];
   navLayout?: NavLayout;
+  pageLayouts?: PageLayouts;
   microsoftClientId: string;
   language: "en" | "ru";
   theme: Record<string, string>;
@@ -169,6 +183,7 @@ export interface BootstrapState {
   storagePath: string;
   javaCandidates: string[];
   appVersion: string;
+  curseforgeAvailable: boolean;
 }
 
 export interface JavaRuntimeState {
@@ -190,6 +205,8 @@ export interface JavaInstallation {
 
 export type LocalContentKind = "mod" | "resourcepack" | "shader" | "datapack";
 
+export type InstanceFolder = "root" | "logs" | LocalContentKind;
+
 export interface LocalContentItem {
   kind: LocalContentKind;
   fileName: string;
@@ -206,7 +223,7 @@ export interface ContentImportResult {
   skipped: Array<{ fileName: string; reason: "exists" | "unknown" | "unsupported" | "failed" }>;
 }
 
-export type ExternalLauncherId = "modrinth" | "prism" | "polymc" | "multimc" | "curseforge" | "minecraft";
+export type ExternalLauncherId = "modrinth" | "prism" | "polymc" | "multimc" | "curseforge" | "minecraft" | "legacy";
 
 export interface ExternalInstance {
   key: string;
@@ -266,6 +283,14 @@ export interface ContentUpdateInfo {
   currentVersionId?: string;
   currentVersionNumber?: string;
   latest: ModVersionInfo | null;
+  incompatible?: ContentIncompatibility;
+}
+
+export interface ContentIncompatibility {
+  gameVersion?: string;
+  loader?: string;
+  supportedGameVersions: string[];
+  supportedLoaders: string[];
 }
 
 export interface ModSearchResult {
@@ -281,6 +306,8 @@ export interface ModSearchResult {
   dateModified?: string;
   categories: string[];
   projectType: ModrinthProjectType;
+  websiteUrl?: string;
+  distributionBlocked?: boolean;
 }
 
 export type ModSortIndex = "relevance" | "downloads" | "follows" | "newest" | "updated";

@@ -5,6 +5,7 @@ import { copyFile, cp, mkdir, open, readdir, readFile, rename, rm, stat, writeFi
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ContentImportResult, InstalledMod, LauncherInstance, LocalContentItem, LocalContentKind } from "@shared/types";
+import { writeContentManifest } from "./manifest";
 import { getTarPath } from "../paths";
 import { sha1Cached } from "./hashes";
 import { JsonStore } from "../store";
@@ -36,7 +37,7 @@ const kindOrder: LocalContentKind[] = ["mod", "resourcepack", "shader", "datapac
 
 const execFileAsync = promisify(execFile);
 
-const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.3" };
+const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.4" };
 const unknownRecheckMs = 3 * 24 * 60 * 60 * 1000;
 
 interface HashCacheEntry {
@@ -805,7 +806,7 @@ export class ContentService {
 
     try {
       const response = await fetch(`https://api.modrinth.com/v2/project/${ref}`, {
-        headers: { "User-Agent": "lynapp/1.1.0-beta.3" }
+        headers: { "User-Agent": "lynapp/1.1.0-beta.4" }
       });
 
       if (!response.ok) {
@@ -931,6 +932,6 @@ export class ContentService {
     }
 
     await mkdir(path.join(instance.directory, ".launcher"), { recursive: true });
-    await writeFile(path.join(instance.directory, ".launcher", "content.json"), JSON.stringify(instance.mods, null, 2), "utf8");
+    await writeContentManifest(instance.directory, instance.mods);
   }
 }

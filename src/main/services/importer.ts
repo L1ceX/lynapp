@@ -234,6 +234,7 @@ interface VersionInfo {
   gameVersion?: string;
   loader: ModLoader;
   loaderVersion?: string;
+  family?: string;
 }
 
 function parseVersionId(id: string): VersionInfo | null {
@@ -260,27 +261,41 @@ function parseVersionId(id: string): VersionInfo | null {
 interface VersionJsonLite {
   id?: string;
   inheritsFrom?: string;
+  jar?: string;
+  family?: string;
   libraries?: Array<{ name?: string }>;
 }
+
+const GAME_VERSION_PATTERN = /^(\d+\.\d+(\.\d+)?|\d{2}w\d{2}[a-z]|[abc]\d[\w.]*|rd-\d+|inf-\d+)$/i;
 
 async function resolveVersionJson(root: string, id: string): Promise<VersionInfo | null> {
   const libraries: string[] = [];
   let current: string | undefined = id;
   let gameVersion: string | undefined;
+  let family: string | undefined;
   for (let depth = 0; current && depth < 6; depth += 1) {
     const json: VersionJsonLite | null = await readJson<VersionJsonLite>(path.join(root, "versions", current, `${current}.json`));
     if (!json) break;
+    family ??= json.family;
     for (const lib of json.libraries ?? []) {
       if (lib.name) libraries.push(lib.name);
     }
     if (!json.inheritsFrom) {
-      gameVersion = json.id ?? current;
+      gameVersion = json.jar && json.jar !== current && GAME_VERSION_PATTERN.test(json.jar) ? json.jar : json.id ?? current;
       break;
     }
     current = json.inheritsFrom;
   }
   if (!libraries.length && !gameVersion) return null;
   const find = (prefix: string): string | undefined => libraries.find((name) => name.toLowerCase().startsWith(prefix))?.split(":")[2];
+  if (gameVersion && !GAME_VERSION_PATTERN.test(gameVersion)) {
+    gameVersion = find("net.fabricmc:intermediary:") ?? find("org.quiltmc:hashed:") ?? parseVersionId(gameVersion)?.gameVersion ?? gameVersion;
+  }
+  const info = detectLoader(find, gameVersion);
+  return info ? { ...info, family } : null;
+}
+
+function detectLoader(find: (prefix: string) => string | undefined, gameVersion: string | undefined): VersionInfo | null {
   const fabric = find("net.fabricmc:fabric-loader:");
   if (fabric) return { loader: "fabric", loaderVersion: fabric, gameVersion };
   const quilt = find("org.quiltmc:quilt-loader:");
@@ -293,6 +308,46 @@ async function resolveVersionJson(root: string, id: string): Promise<VersionInfo
     return { loader: "forge", loaderVersion: short, gameVersion };
   }
   return gameVersion ? { loader: "vanilla", gameVersion } : null;
+}
+
+const LEGACY_LOADER_TITLES: Partial<Record<ModLoader, string>> = { fabric: "Fabric", forge: "Forge", quilt: "Quilt", neoforge: "NeoForge" };
+
+function legacyHomeDir(root: string, versionId: string, info: VersionInfo | null): string | null {
+  const home = path.join(root, "home");
+  if (!versionId || !existsSync(home)) return null;
+  const names = [versionId, ...(info?.family ? [info.family] : [])];
+  const gameVersion = info?.gameVersion;
+  if (gameVersion) {
+    const title = info ? LEGACY_LOADER_TITLES[info.loader] : undefined;
+    const release = /^\d+\.\d+/.exec(gameVersion)?.[0];
+    if (title) names.push(`${title} ${gameVersion}`);
+    names.push(release ? (title ? `${title}-${release}` : release) : "snapshots");
+  }
+  return names.map((name) => path.join(home, name)).find((dir) => existsSync(dir)) ?? null;
+}
+
+function unescapeProperty(value: string): string {
+  return value.replace(/\\(.)/g, (_, char: string) => char === "n" ? "\n" : char === "t" ? "\t" : char).trim();
+}
+
+async function legacyGameDir(installDir: string): Promise<string | null> {
+  const fallback = path.join(installDir, "game");
+  const raw = await readFile(path.join(installDir, "tl.properties"), "utf8").catch(() => "");
+  const line = raw.split(/\r?\n/).find((entry) => /^\s*minecraft\.gamedir\s*[=:]/.test(entry));
+  const configured = line ? unescapeProperty(line.replace(/^\s*minecraft\.gamedir\s*[=:]\s*/, "")) : "";
+  if (configured && existsSync(configured)) return configured;
+  return existsSync(fallback) ? fallback : null;
+}
+
+async function installedVersions(root: string): Promise<Array<{ id: string; inheritsFrom?: string }>> {
+  const entries = await readdir(path.join(root, "versions"), { withFileTypes: true }).catch(() => []);
+  const result: Array<{ id: string; inheritsFrom?: string }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const json = await readJson<VersionJsonLite>(path.join(root, "versions", entry.name, `${entry.name}.json`));
+    if (json) result.push({ id: entry.name, inheritsFrom: json.inheritsFrom });
+  }
+  return result;
 }
 
 export class ExternalImportService {
@@ -319,6 +374,7 @@ export class ExternalImportService {
       this.scanPrism(path.join(roaming, "PolyMC"), "polymc"),
       this.scanCurseForge(path.join(os.homedir(), "curseforge", "minecraft", "Instances")),
       this.scanMinecraft(path.join(roaming, ".minecraft")),
+      this.scanLegacy(path.join(roaming, ".tlauncher", "legacy", "Minecraft")),
       ...(await findPortableRoots()).map((root) => this.scanPrism(root)),
       ...extraRoots.map((root) => this.scanRoot(root))
     ];
@@ -336,7 +392,9 @@ export class ExternalImportService {
   private async scanRoot(folder: string): Promise<ScannedLauncher | null> {
     if (!folder || !existsSync(folder)) return null;
     if (existsSync(path.join(folder, "app.db"))) return this.scanModrinth([folder]);
-    if (existsSync(path.join(folder, "launcher_profiles.json"))) return this.scanMinecraft(folder);
+    if (existsSync(path.join(folder, "tl.properties"))) return this.scanLegacy(folder);
+    if (existsSync(path.join(folder, "tlauncher_profiles.json")) && existsSync(path.join(path.dirname(folder), "tl.properties"))) return this.scanMinecraft(folder, "legacy");
+    if (existsSync(path.join(folder, "launcher_profiles.json")) || existsSync(path.join(folder, "versions"))) return this.scanMinecraft(folder);
     if (existsSync(path.join(folder, "instance.cfg"))) return this.scanPrism(path.dirname(path.dirname(folder)), undefined, path.dirname(folder));
     if (PRISM_LIKE.some((kind) => existsSync(path.join(folder, kind.config)) || existsSync(path.join(folder, kind.exe)))) return this.scanPrism(folder);
     if (existsSync(path.join(folder, "minecraftinstance.json"))) return this.scanCurseForge(path.dirname(folder));
@@ -519,11 +577,19 @@ export class ExternalImportService {
     }
   }
 
-  private async scanMinecraft(root: string): Promise<ScannedLauncher | null> {
-    if (!existsSync(path.join(root, "launcher_profiles.json"))) return null;
+  private async scanLegacy(installDir: string): Promise<ScannedLauncher | null> {
+    const gameDir = await legacyGameDir(installDir);
+    return gameDir ? this.scanMinecraft(gameDir, "legacy") : null;
+  }
+
+  private async scanMinecraft(root: string, kind: "minecraft" | "legacy" = "minecraft"): Promise<ScannedLauncher | null> {
+    const hasProfiles = existsSync(path.join(root, "launcher_profiles.json"));
+    let versions = kind === "legacy" || !hasProfiles || existsSync(path.join(root, "home")) ? await installedVersions(root) : [];
+    if (!hasProfiles && !versions.length) return null;
     try {
-      const profiles = (await readJson<{ profiles?: Record<string, { name?: string; type?: string; lastVersionId?: string; gameDir?: string; javaArgs?: string; lastUsed?: string; icon?: string }> }>(path.join(root, "launcher_profiles.json")))?.profiles ?? {};
+      const profiles = hasProfiles ? (await readJson<{ profiles?: Record<string, { name?: string; type?: string; lastVersionId?: string; gameDir?: string; javaArgs?: string; lastUsed?: string; icon?: string }> }>(path.join(root, "launcher_profiles.json")))?.profiles ?? {} : {};
       const instances: ScannedInstance[] = [];
+      const covered = new Set<string>();
       let latestRelease: string | undefined;
       for (const [profileId, profile] of Object.entries(profiles)) {
         if (profile.type === "latest-snapshot") continue;
@@ -533,13 +599,14 @@ export class ExternalImportService {
           versionId = latestRelease ?? "";
         }
         const info = (versionId && (await resolveVersionJson(root, versionId))) || parseVersionId(versionId);
-        const gameDir = profile.gameDir && existsSync(profile.gameDir) ? profile.gameDir : root;
+        covered.add(versionId);
+        const gameDir = profile.gameDir && existsSync(profile.gameDir) ? profile.gameDir : legacyHomeDir(root, versionId, info) ?? root;
         const memoryMatch = profile.javaArgs?.match(/-Xmx(\d+)([GgMm])/);
         const memory = memoryMatch ? Number(memoryMatch[1]) * (memoryMatch[2].toLowerCase() === "g" ? 1024 : 1) : NaN;
         const name = profile.name?.trim() || (profile.type === "latest-release" ? tr("Latest release", "Последний релиз") : versionId || profileId);
         instances.push(await this.finish({
-          key: `minecraft:${root}|${profileId}`,
-          launcher: "minecraft",
+          key: `${kind}:${root}|${profileId}`,
+          launcher: kind,
           name,
           gameVersion: info?.gameVersion ?? "",
           loader: info ? info.loader : null,
@@ -551,9 +618,27 @@ export class ExternalImportService {
           copyMode: "whitelist"
         }));
       }
-      return instances.length ? { key: `minecraft:${root}`, id: "minecraft", root, instances } : null;
+      if (!instances.length && !versions.length) versions = await installedVersions(root);
+      const parents = new Set(versions.map((item) => item.inheritsFrom).filter((id): id is string => Boolean(id)));
+      for (const { id: versionId } of versions) {
+        if (covered.has(versionId)) continue;
+        const info = (await resolveVersionJson(root, versionId)) || parseVersionId(versionId);
+        const homeDir = legacyHomeDir(root, versionId, info);
+        if (parents.has(versionId) && !homeDir) continue;
+        instances.push(await this.finish({
+          key: `${kind}:${root}|version:${versionId}`,
+          launcher: kind,
+          name: versionId,
+          gameVersion: info?.gameVersion ?? "",
+          loader: info ? info.loader : null,
+          loaderVersion: info?.loaderVersion,
+          directory: homeDir ?? root,
+          copyMode: "whitelist"
+        }));
+      }
+      return instances.length ? { key: `${kind}:${root}`, id: kind, root, instances } : null;
     } catch (error) {
-      return this.failure("minecraft", root, error);
+      return this.failure(kind, root, error);
     }
   }
 

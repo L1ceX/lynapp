@@ -40,6 +40,8 @@ jobs:
 
       - name: Typecheck and build
         run: npm run build
+        env:
+          MAIN_VITE_CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
 
       - name: Package installers
         run: npx electron-builder --win nsis portable --publish never

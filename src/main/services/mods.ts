@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { InstallModPayload, ModSearchPayload } from "@shared/ipc";
-import type { ContentUpdateInfo, LauncherInstance, ModrinthProjectType, ModSearchResponse, ModVersionInfo } from "@shared/types";
+import type { ContentIncompatibility, ContentUpdateInfo, LauncherInstance, ModrinthProjectType, ModSearchResponse, ModVersionInfo } from "@shared/types";
+import { writeContentManifest } from "./manifest";
 import { JsonStore } from "../store";
 import { getLauncherRoot } from "../paths";
 import { readUrlBytes, type BytesCallback } from "./transfer";
@@ -22,7 +23,7 @@ interface ModrinthVersion {
   loaders?: string[];
 }
 
-const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.3" };
+const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.4" };
 
 function contentFolder(projectType: ModrinthProjectType): string {
   const folders: Record<ModrinthProjectType, string> = {
@@ -43,6 +44,21 @@ function loadersFor(projectType: ModrinthProjectType, instance: LauncherInstance
   if (projectType === "datapack") return ["datapack"];
   if (projectType === "resourcepack") return ["minecraft"];
   return ["iris", "optifine", "canvas", "vanilla"];
+}
+
+function incompatibility(version: ModrinthVersion, instance: LauncherInstance): ContentIncompatibility | undefined {
+  const supportedGameVersions = version.game_versions ?? [];
+  const supportedLoaders = version.loaders ?? [];
+  const loaders = loadersFor("mod", instance);
+  const wrongGame = supportedGameVersions.length > 0 && !supportedGameVersions.includes(instance.gameVersion);
+  const wrongLoader = loaders.length > 0 && supportedLoaders.length > 0 && !supportedLoaders.some((loader) => loaders.includes(loader));
+  if (!wrongGame && !wrongLoader) return undefined;
+  return {
+    gameVersion: wrongGame ? instance.gameVersion : undefined,
+    loader: wrongLoader ? instance.loader : undefined,
+    supportedGameVersions,
+    supportedLoaders
+  };
 }
 
 function toVersionInfo(version: ModrinthVersion, instance: LauncherInstance, projectType: ModrinthProjectType): ModVersionInfo {
@@ -83,7 +99,7 @@ interface ModrinthCategoryTag {
   project_type: ModrinthProjectType;
 }
 
-function sanitizeFilePart(value: string): string {
+export function sanitizeFilePart(value: string): string {
   return value.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-").trim().slice(0, 100) || "download";
 }
 
@@ -98,7 +114,7 @@ function targetDirectory(instance: LauncherInstance, projectType: ModrinthProjec
   return path.join(instance.directory, folders[projectType]);
 }
 
-async function targetDirectories(instance: LauncherInstance, projectType: ModrinthProjectType): Promise<string[]> {
+export async function targetDirectories(instance: LauncherInstance, projectType: ModrinthProjectType): Promise<string[]> {
   if (projectType !== "datapack") {
     return [targetDirectory(instance, projectType)];
   }
@@ -119,7 +135,7 @@ async function targetDirectories(instance: LauncherInstance, projectType: Modrin
 }
 
 async function downloadFile(url: string, target: string, onBytes?: BytesCallback): Promise<void> {
-  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp/1.1.0-beta.3" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
+  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp/1.1.0-beta.4" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
   await writeFile(target, buffer);
 }
 
@@ -132,7 +148,7 @@ export class ModService {
   async getCategoryTags(projectType: ModrinthProjectType): Promise<string[]> {
     if (!this.categoryCache) {
       const response = await fetch("https://api.modrinth.com/v2/tag/category", {
-        headers: { "User-Agent": "lynapp/1.1.0-beta.3" }
+        headers: { "User-Agent": "lynapp/1.1.0-beta.4" }
       });
 
       if (!response.ok) {
@@ -184,7 +200,7 @@ export class ModService {
 
       url.searchParams.set("facets", JSON.stringify(facets));
 
-      const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.1.0-beta.3" } });
+      const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.1.0-beta.4" } });
       if (!response.ok) throw new Error(tr(`Modrinth returned ${response.status}`, `Modrinth вернул ошибку: ${response.status}`));
       const body = (await response.json()) as { hits: ModrinthHit[]; total_hits?: number };
       return {
@@ -287,7 +303,7 @@ export class ModService {
       return target;
     });
 
-    await writeFile(path.join(launcherDir, "content.json"), JSON.stringify(updated.mods, null, 2), "utf8");
+    await writeContentManifest(updated.directory, updated.mods);
     return updated;
   }
 
@@ -364,14 +380,16 @@ export class ModService {
     const result = tracked.map((item) => {
       const now = current[item.sha1];
       const latest = latestByHash[item.sha1];
-      const newer = latest && now && latest.id !== now.id && (latest.date_published ?? "") > (now.date_published ?? "");
+      const nowCompatible = now ? toVersionInfo(now, instance, item.projectType).compatible : true;
+      const newer = latest && now && latest.id !== now.id && (!nowCompatible || (latest.date_published ?? "") > (now.date_published ?? ""));
       return {
         projectId: item.projectId,
         projectType: item.projectType,
         fileName: item.fileName,
         currentVersionId: now?.id,
         currentVersionNumber: now?.version_number,
-        latest: newer ? toVersionInfo(latest, instance, item.projectType) : null
+        latest: newer ? toVersionInfo(latest, instance, item.projectType) : null,
+        incompatible: now && item.projectType === "mod" ? incompatibility(now, instance) : undefined
       };
     });
     if (Object.keys(current).length) {
@@ -412,7 +430,7 @@ export class ModService {
           ? ["minecraft"]
           : [];
     if (loaders.length) url.searchParams.set("loaders", JSON.stringify(loaders));
-    const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.1.0-beta.3" } });
+    const response = await fetch(url, { headers: { "User-Agent": "lynapp/1.1.0-beta.4" } });
     if (!response.ok) return [];
     return (await response.json()) as ModrinthVersion[];
   }

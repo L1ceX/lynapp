@@ -32,7 +32,8 @@ export const EXTERNAL_LAUNCHERS: Record<ExternalLauncherId, { label: string; lab
   polymc: { label: "PolyMC", labelRu: "PolyMC", color: "#8bc34a" },
   multimc: { label: "MultiMC", labelRu: "MultiMC", color: "#90a4ae" },
   curseforge: { label: "CurseForge", labelRu: "CurseForge", color: "#f16436" },
-  minecraft: { label: "Official launcher / TLauncher", labelRu: "Официальный лаунчер / TLauncher", color: "#62b34a" }
+  minecraft: { label: "Official launcher / TLauncher", labelRu: "Официальный лаунчер / TLauncher", color: "#62b34a" },
+  legacy: { label: "Legacy Launcher", labelRu: "Legacy Launcher", color: "#e0a43c" }
 };
 
 export const LOADER_NAMES: Record<string, string> = { vanilla: "Vanilla", fabric: "Fabric", forge: "Forge", neoforge: "NeoForge", quilt: "Quilt" };

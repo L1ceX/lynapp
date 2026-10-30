@@ -9,6 +9,7 @@ import type {
   ModVersionInfo,
   BootstrapState,
   CapeInfo,
+  InstanceFolder,
   JavaInstallation,
   LaunchResult,
   LauncherInstance,
@@ -106,6 +107,7 @@ export interface UpdateInstancePayload {
 }
 
 export interface ModSearchPayload {
+  provider?: ModProvider;
   query: string;
   instanceId?: string;
   projectType: ModrinthProjectType;
@@ -137,6 +139,7 @@ export interface LocalContentPayload {
 }
 
 export interface DownloadModpackPayload {
+  provider?: ModProvider;
   instanceId: string;
   projectId: string;
   name: string;
@@ -161,6 +164,7 @@ export interface SkinActivateResult {
 export interface MrpackBeginResult {
   instance: LauncherInstance;
   totalFiles: number;
+  skipped?: string[];
 }
 
 export interface MrpackTargetResult {
@@ -168,6 +172,7 @@ export interface MrpackTargetResult {
   packName: string;
   packGameVersion: string;
   packLoader: string;
+  skipped?: string[];
 }
 
 export interface MrpackProgressUpdate {
@@ -233,7 +238,7 @@ export interface LauncherApi {
   launchInstance(id: string): Promise<LaunchResult>;
   updateSettings(patch: Partial<LauncherSettings>): Promise<LauncherSettings>;
   searchMods(payload: ModSearchPayload): Promise<ModSearchResponse>;
-  getCategoryTags(projectType: ModrinthProjectType): Promise<string[]>;
+  getCategoryTags(projectType: ModrinthProjectType, provider?: ModProvider): Promise<string[]>;
   installMod(payload: InstallModPayload): Promise<LauncherInstance>;
   downloadModpack(payload: DownloadModpackPayload): Promise<string>;
   beginMicrosoftLogin(): Promise<LoginStartResult>;
@@ -250,7 +255,7 @@ export interface LauncherApi {
   getGameVersions(): Promise<GameVersionInfo[]>;
   getLoaderSupport(): Promise<Record<string, string[]>>;
   getLoaderVersions(loader: ModLoader, gameVersion: string): Promise<string[]>;
-  openInstanceFolder(id: string): Promise<string>;
+  openInstanceFolder(id: string, folder?: InstanceFolder): Promise<string>;
   getLocalContent(instanceId: string): Promise<LocalContentItem[]>;
   toggleLocalContent(payload: LocalContentPayload): Promise<LocalContentItem[]>;
   removeLocalContent(payload: LocalContentPayload): Promise<LocalContentItem[]>;

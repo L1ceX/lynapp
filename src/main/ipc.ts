@@ -1,10 +1,10 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { hideToTray, isHiddenForGame, restoreFromTray } from "./tray";
-import { rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { IPC } from "@shared/ipc";
 import type { CreateInstancePayload, DownloadModpackPayload, InstallModPayload, LocalContentPayload, ModSearchPayload, SkinAddPayload, SkinUpdatePayload, UpdateInstancePayload } from "@shared/ipc";
-import type { AccountsState, LauncherSettings, ModLoader, ModrinthProjectType } from "@shared/types";
+import type { AccountsState, InstanceFolder, LauncherSettings, ModLoader, ModrinthProjectType } from "@shared/types";
 import { setMainLanguage, tr } from "./i18n";
 import { getLauncherRoot, getStorePath } from "./paths";
 import { AuthService } from "./services/auth";
@@ -18,8 +18,18 @@ import { ModpackService } from "./services/modpacks";
 import { ModService } from "./services/mods";
 import { SkinService } from "./services/skins";
 import { JsonStore } from "./store";
+import { CurseForgeService, curseForgeAvailable } from "./services/curseforge";
 import { downloadUpdate, installUpdate, setBetaUpdates } from "./updater";
 import { createThrottledEmitter } from "./services/transfer";
+
+const INSTANCE_FOLDERS: Record<InstanceFolder, string> = {
+  root: "",
+  logs: path.join(".launcher", "logs"),
+  mod: "mods",
+  resourcepack: "resourcepacks",
+  shader: "shaderpacks",
+  datapack: "datapacks"
+};
 
 export function registerIpcHandlers(): void {
   const store = new JsonStore();
@@ -28,9 +38,10 @@ export function registerIpcHandlers(): void {
   const auth = new AuthService(store);
   const instances = new InstanceService(store, java, minecraft, auth);
   const mods = new ModService(store);
+  const curseforge = new CurseForgeService(store);
   const skins = new SkinService(store, auth);
   const content = new ContentService(store);
-  const modpacks = new ModpackService(store, instances, minecraft);
+  const modpacks = new ModpackService(store, instances, minecraft, curseforge);
   const discord = new DiscordPresence();
   const importer = new ExternalImportService(instances, content, minecraft);
 
@@ -65,6 +76,7 @@ export function registerIpcHandlers(): void {
       ...publicAccounts({ accounts: data.accounts, activeAccountId: data.activeAccountId }),
       storagePath: getStorePath(),
       appVersion: app.getVersion(),
+      curseforgeAvailable: curseForgeAvailable,
       javaCandidates: await java.listCandidatePaths([data.settings.javaPath])
     };
   });
@@ -187,13 +199,16 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.getGameVersions, () => minecraft.listGameVersions());
   ipcMain.handle(IPC.getLoaderSupport, () => minecraft.getLoaderSupport());
   ipcMain.handle(IPC.getLoaderVersions, (_event, loader: ModLoader, gameVersion: string) => minecraft.listLoaderVersions(loader, gameVersion));
-  ipcMain.handle(IPC.openInstanceFolder, async (_event, id: string) => {
+  ipcMain.handle(IPC.openInstanceFolder, async (_event, id: string, folder: InstanceFolder = "root") => {
     const data = await store.getData();
     const instance = data.instances.find((item) => item.id === id);
     if (!instance) {
       throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
-    return shell.openPath(instance.directory);
+    const relative = INSTANCE_FOLDERS[folder] ?? "";
+    const target = path.join(instance.directory, relative);
+    if (relative) await mkdir(target, { recursive: true }).catch(() => undefined);
+    return shell.openPath(target);
   });
   ipcMain.handle(IPC.getLocalContent, (_event, instanceId: string) => content.list(instanceId));
   ipcMain.handle(IPC.toggleLocalContent, (_event, payload: LocalContentPayload) => content.toggle(payload.instanceId, payload.fileName, payload.kind));
@@ -217,8 +232,8 @@ export function registerIpcHandlers(): void {
     return settings;
   });
 
-  ipcMain.handle(IPC.searchMods, (_event, payload: ModSearchPayload) => mods.search(payload));
-  ipcMain.handle(IPC.getCategoryTags, (_event, projectType: ModrinthProjectType) => mods.getCategoryTags(projectType));
+  ipcMain.handle(IPC.searchMods, (_event, payload: ModSearchPayload) => (payload.provider === "curseforge" ? curseforge.search(payload) : mods.search(payload)));
+  ipcMain.handle(IPC.getCategoryTags, (_event, projectType: ModrinthProjectType, provider?: string) => (provider === "curseforge" ? curseforge.getCategoryTags(projectType) : mods.getCategoryTags(projectType)));
   ipcMain.handle(IPC.installMod, (event, payload: InstallModPayload) => {
     const sender = event.sender;
     const emit = createThrottledEmitter((update) => {
@@ -226,7 +241,8 @@ export function registerIpcHandlers(): void {
         sender.send(IPC.transferProgress, update);
       }
     });
-    return mods.install(payload, (received, total) => emit(`mod:${payload.projectId}`, payload.name, received, total));
+    const onBytes = (received: number, total: number | null): void => emit(`mod:${payload.projectId}`, payload.name, received, total);
+    return payload.provider === "curseforge" ? curseforge.install(payload, onBytes) : mods.install(payload, onBytes);
   });
   ipcMain.handle(IPC.downloadModpack, (event, payload: DownloadModpackPayload) => {
     const sender = event.sender;
@@ -235,9 +251,10 @@ export function registerIpcHandlers(): void {
         sender.send(IPC.transferProgress, update);
       }
     });
-    return mods.downloadModpackFile(payload.instanceId, payload.projectId, payload.name, (received, total) =>
-      emit(`modpack:${payload.projectId}`, payload.name, received, total)
-    );
+    const onBytes = (received: number, total: number | null): void => emit(`modpack:${payload.projectId}`, payload.name, received, total);
+    return payload.provider === "curseforge"
+      ? curseforge.downloadModpackFile(payload.instanceId, payload.projectId, payload.name, onBytes)
+      : mods.downloadModpackFile(payload.instanceId, payload.projectId, payload.name, onBytes);
   });
   ipcMain.handle(IPC.beginMicrosoftLogin, (event) => auth.beginMicrosoftLogin(BrowserWindow.fromWebContents(event.sender)));
   ipcMain.handle(IPC.refreshSession, async () => publicAccounts(await auth.trySilentRefresh()));

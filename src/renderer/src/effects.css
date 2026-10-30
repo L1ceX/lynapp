@@ -126,7 +126,7 @@
   .modal-backdrop { backdrop-filter: blur(6px) saturate(1.1); animation-duration: 260ms; }
   .modal-card { animation: modal-in 480ms var(--spring) backwards; }
   .surface-heading > svg { transition: transform 520ms var(--spring); }
-  .settings-surface:hover .surface-heading > svg { transform: rotate(-10deg) scale(1.12); }
+  .settings-surface:hover .surface-heading > svg, .board:not(.editing) .board-card:hover .surface-heading > svg { transform: rotate(-10deg) scale(1.12); }
 }
 @keyframes icon-pop { 0% { transform: scale(.7) rotate(-12deg); } 100% { transform: none; } }
 @keyframes tab-pop { 0% { transform: scale(.9); } 100% { transform: none; } }
@@ -171,6 +171,7 @@
     animation-timing-function: var(--smooth);
   }
   .settings-surface, .page-workspace, .instances-workspace { animation-duration: 380ms; }
+  .board-card { animation: effects-surface-in 420ms var(--smooth) backwards; animation-delay: calc(min(var(--board-index, 0), 9) * 45ms); }
 
   .mod-results > *, .instance-list > *, .file-group > .file-row, .account-list > *,
   .skin-grid > *, .java-rows > *, .stat-grid > *, .theme-grid > *, .export-rows > *, .import-rows > * {

@@ -1,5 +1,6 @@
 import { RefreshCw } from "lucide-react";
 import { Presence } from "./components/Presence";
+import { DockOverlay } from "./layout/DockOverlay";
 import { DropOverlay } from "./layout/DropOverlay";
 import { IconRail } from "./layout/IconRail";
 import { LayoutToolbar } from "./layout/LayoutToolbar";
@@ -23,13 +24,13 @@ export function App() {
     return <main className="loading-screen"><RefreshCw className="spin" size={24} /><span>{app.status}</span></main>;
   }
   const ctx = { ...app, bootstrap: app.bootstrap, settingsDraft: app.settingsDraft };
-  const { renderImportModal } = ctx;
+  const { navLayout, renderImportModal } = ctx;
   return (
     <AppContext.Provider value={ctx}>
     <div className="app-shell">
       <DropOverlay />
       <Titlebar />
-      <div className="app-body">
+      <div className={`app-body dock-${navLayout.railSide}`}>
       <IconRail />
 
       <HomePage />
@@ -47,6 +48,7 @@ export function App() {
       <DeleteInstanceModal />
       <ModpackTargetModal />
       <LayoutToolbar />
+      <DockOverlay />
       <Presence>{renderImportModal()}</Presence>
       <VersionPickerModal /><ExportModal />
     </div>

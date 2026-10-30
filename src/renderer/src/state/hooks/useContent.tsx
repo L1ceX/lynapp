@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ContentImportResult, ContentUpdateInfo, InstalledMod, LocalContentItem, LocalContentKind, ModrinthProjectType, ModSearchResult, ModSortIndex, ModVersionInfo } from "@shared/types";
+import type { ContentImportResult, ContentUpdateInfo, InstalledMod, LocalContentItem, LocalContentKind, ModProvider, ModrinthProjectType, ModSearchResult, ModSortIndex, ModVersionInfo } from "@shared/types";
 import type { FileRowActions } from "../../components/FileRow";
 import { getLauncherApi } from "../../lib/api";
 import { contentLabel, contentTypes, fileGroups, sortOptions } from "../../lib/content";
 import { motionMs } from "../../lib/motion";
 import type { CoreState } from "./useCore";
 import type { InstancesState } from "./useInstances";
+
+const UPDATE_CONCURRENCY = 4;
+
+const CONTENT_SCROLL_GAP = 24;
 
 export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaunching" | "bootstrapRef" | "busy" | "contentTimer" | "downloadingIds" | "finishModpackToInstance" | "importMrpackByPath" | "instanceTab" | "refresh" | "say" | "selected" | "selectedId" | "selectedIdRef" | "setBootstrap" | "setBusy" | "setContentExiting" | "setDownloadingIds" | "setModpackTarget" | "setStatus" | "setTransferPct" | "t">) {
   const { assertNotLaunching, bootstrapRef, busy, contentTimer, downloadingIds, finishModpackToInstance, importMrpackByPath, instanceTab, refresh, say, selected, selectedId, selectedIdRef, setBootstrap, setBusy, setContentExiting, setDownloadingIds, setModpackTarget, setStatus, setTransferPct, t } = deps;
@@ -28,6 +32,30 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
   }
 
   const [contentType, setContentType] = useState<ModrinthProjectType>("mod");
+
+  const [contentProvider, setContentProviderState] = useState<ModProvider>("modrinth");
+
+  const providerName = contentProvider === "curseforge" ? "CurseForge" : "Modrinth";
+
+  function hasCurseForgeKey(): boolean {
+    return Boolean(bootstrapRef.current?.curseforgeAvailable);
+  }
+
+  function setContentProvider(next: ModProvider): void {
+    if (next === contentProvider) return;
+    if (contentTimer.current !== null) {
+      window.clearTimeout(contentTimer.current);
+      contentTimer.current = null;
+    }
+    setContentExiting(true);
+    contentTimer.current = window.setTimeout(() => {
+      setContentProviderState(next);
+      setModResults([]);
+      setTotalHits(0);
+      setContentExiting(false);
+      contentTimer.current = null;
+    }, motionMs(225));
+  }
 
   const [modQuery, setModQuery] = useState("");
 
@@ -62,6 +90,10 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
   const [checkingUpdates, setCheckingUpdates] = useState(false);
 
   const [updatingKeys, setUpdatingKeys] = useState<string[]>([]);
+
+  const [updateAllProgress, setUpdateAllProgress] = useState<{ done: number; total: number } | null>(null);
+
+  const updatingAllRef = useRef(false);
 
   const [versionPicker, setVersionPicker] = useState<{ key: string; item: LocalContentItem; record: InstalledMod; versions: ModVersionInfo[] | null; showAll: boolean } | null>(null);
 
@@ -186,8 +218,8 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
     }
   }
 
-  async function installVersion(item: LocalContentItem, record: InstalledMod, versionId: string): Promise<boolean> {
-    if (!selected || !assertNotLaunching()) return false;
+  async function installVersion(item: LocalContentItem, record: InstalledMod, versionId: string, refreshFiles = true): Promise<boolean> {
+    if (!selected) return false;
     const key = contentKey(item.kind, item.fileName);
     setUpdatingKeys((current) => [...current, key]);
     try {
@@ -202,7 +234,7 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
         projectType: item.kind
       });
       setBootstrap((current) => current ? { ...current, instances: current.instances.map((entry) => entry.id === updated.id ? updated : entry) } : current);
-      setLocalContent(await getLauncherApi().getLocalContent(selected.id));
+      if (refreshFiles) setLocalContent(await getLauncherApi().getLocalContent(selected.id));
       return true;
     } catch (error) {
       say(error instanceof Error ? error.message : t("Failed to install the version", "Не удалось установить версию"));
@@ -215,23 +247,46 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
   async function updateItem(item: LocalContentItem): Promise<void> {
     const record = recordFor(item);
     const latest = updateInfo[contentKey(item.kind, item.fileName)]?.latest;
-    if (!record || !latest) return;
+    if (!record || !latest || !assertNotLaunching()) return;
     if (await installVersion(item, record, latest.id)) {
       say(t(`Updated ${record.name} to ${latest.versionNumber}`, `${record.name} обновлён до ${latest.versionNumber}`));
     }
   }
 
   async function updateAll(): Promise<void> {
-    if (!localContent) return;
-    const pending = localContent.filter((item) => recordFor(item) && updateInfo[contentKey(item.kind, item.fileName)]?.latest);
-    let done = 0;
-    for (const item of pending) {
-      say(t(`Updating ${done + 1} of ${pending.length}...`, `Обновление ${done + 1} из ${pending.length}...`));
+    if (!localContent || !selected || updatingAllRef.current || !assertNotLaunching()) return;
+    const instanceId = selected.id;
+    const queue = localContent.flatMap((item) => {
       const record = recordFor(item);
       const latest = updateInfo[contentKey(item.kind, item.fileName)]?.latest;
-      if (record && latest && await installVersion(item, record, latest.id)) done += 1;
+      return record && latest ? [{ item, record, versionId: latest.id }] : [];
+    });
+    const total = queue.length;
+    if (!total) return;
+    let finished = 0;
+    let done = 0;
+    updatingAllRef.current = true;
+    setUpdateAllProgress({ done: 0, total });
+    say(t(`Updating 0 of ${total}...`, `Обновление: 0 из ${total}...`));
+    const worker = async (): Promise<void> => {
+      for (let next = queue.shift(); next; next = queue.shift()) {
+        if (await installVersion(next.item, next.record, next.versionId, false)) done += 1;
+        finished += 1;
+        setUpdateAllProgress({ done: finished, total });
+        say(t(`Updating ${finished} of ${total}...`, `Обновление: ${finished} из ${total}...`));
+      }
+    };
+    try {
+      await Promise.all(Array.from({ length: Math.min(UPDATE_CONCURRENCY, total) }, worker));
+      if (selectedIdRef.current === instanceId) {
+        setLocalContent(await getLauncherApi().getLocalContent(instanceId).catch(() => localContent));
+      }
+    } finally {
+      updatingAllRef.current = false;
+      setUpdateAllProgress(null);
     }
-    say(t(`Updated ${done} of ${pending.length}`, `Обновлено: ${done} из ${pending.length}`));
+    say(t(`Updated ${done} of ${total}`, `Обновлено: ${done} из ${total}`));
+    if (selectedIdRef.current === instanceId) await checkUpdates(instanceId);
   }
 
   async function openVersionPicker(item: LocalContentItem): Promise<void> {
@@ -249,7 +304,7 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
   }
 
   async function pickVersion(version: ModVersionInfo): Promise<void> {
-    if (!versionPicker) return;
+    if (!versionPicker || !assertNotLaunching()) return;
     const { item, record } = versionPicker;
     setVersionPicker(null);
     if (await installVersion(item, record, version.id)) {
@@ -290,12 +345,16 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
     setLoaderOverride(null);
     setSelectedCategories([]);
     setHideInstalled(false);
-    getLauncherApi().getCategoryTags(contentType).then(setCategoryTags).catch(() => setCategoryTags([]));
-  }, [selectedId, contentType]);
+    if (contentProvider === "curseforge" && !hasCurseForgeKey()) {
+      setCategoryTags([]);
+      return;
+    }
+    getLauncherApi().getCategoryTags(contentType, contentProvider).then(setCategoryTags).catch(() => setCategoryTags([]));
+  }, [selectedId, contentType, contentProvider]);
 
   useEffect(() => {
     if (instanceTab !== "content" || !selectedId || busy) return;
-    const key = `${selectedId}|${contentType}`;
+    const key = `${selectedId}|${contentType}|${contentProvider}`;
     if (contentAutoKey.current === key || modResults.length > 0) return;
     contentAutoKey.current = key;
     void runContentSearch({ page: 1 });
@@ -312,7 +371,7 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
   }, [selectedId]);
 
   useEffect(() => {
-    if (instanceTab !== "files" || !selectedId) return;
+    if (instanceTab !== "files" || !selectedId || updatingAllRef.current) return;
     void checkUpdates(selectedId);
   }, [instanceTab, selectedId, selected?.updatedAt]);
 
@@ -357,12 +416,30 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
     };
   }
 
+  function scrollResultsToTop(): void {
+    window.requestAnimationFrame(() => {
+      const list = document.querySelector<HTMLElement>(".mod-results");
+      const scroller = list?.closest<HTMLElement>(".instance-workspace");
+      if (!list || !scroller) return;
+      const offset = list.getBoundingClientRect().top - scroller.getBoundingClientRect().top - CONTENT_SCROLL_GAP;
+      if (offset >= 0) return;
+      const instant = document.documentElement.classList.contains("no-anim");
+      scroller.scrollTo({ top: Math.max(0, scroller.scrollTop + offset), behavior: instant ? "auto" : "smooth" });
+    });
+  }
+
   async function runContentSearch(overrides: Partial<ContentQuery> = {}): Promise<void> {
     if (!selected) return setStatus(t("Select an instance first", "Сначала выберите инстанцию"));
     const query = currentContentQuery(overrides);
+    if (contentProvider === "curseforge" && !hasCurseForgeKey()) {
+      setModResults([]);
+      setTotalHits(0);
+      return;
+    }
     setBusy(true);
     try {
       const response = await getLauncherApi().searchMods({
+        provider: contentProvider,
         query: modQuery,
         instanceId: selected.id,
         projectType: contentType,
@@ -373,15 +450,19 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
         versions: query.versions,
         loaders: query.loaders
       });
+      const pageChanged = query.page !== contentPage;
       setModResults(response.results);
       setTotalHits(response.totalHits);
       setContentPage(query.page);
+      if (pageChanged) scrollResultsToTop();
       setContentSort(query.sort);
       setContentLimit(query.limit);
       setSelectedCategories(query.categories);
-      say(t(`Found ${response.totalHits} ${contentLabel(contentType).toLowerCase()} on Modrinth`, `Найдено: ${response.totalHits} — ${(contentTypes.find((c) => c.id === contentType)?.labelRu ?? "").toLowerCase()} на Modrinth`));
+      say(t(`Found ${response.totalHits} ${contentLabel(contentType).toLowerCase()} on ${providerName}`, `Найдено: ${response.totalHits} — ${(contentTypes.find((c) => c.id === contentType)?.labelRu ?? "").toLowerCase()} на ${providerName}`));
     } catch (error) {
-      say(error instanceof Error ? error.message : t("Modrinth search failed", "Поиск на Modrinth не удался"));
+      setModResults([]);
+      setTotalHits(0);
+      say(error instanceof Error ? error.message : t(`${providerName} search failed`, `Поиск на ${providerName} не удался`));
     } finally {
       setBusy(false);
     }
@@ -401,6 +482,7 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
       try {
         say(t(`Downloading ${result.title}...`, `Загрузка: ${result.title}...`));
         const filePath = await getLauncherApi().downloadModpack({
+          provider: result.provider,
           instanceId: selected.id,
           projectId: result.id,
           name: result.title
@@ -421,7 +503,7 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
     try {
       const updated = await getLauncherApi().installMod({
         instanceId: selected.id,
-        provider: "modrinth",
+        provider: result.provider,
         projectId: result.id,
         name: result.title,
         slug: result.slug,
@@ -452,6 +534,7 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
     try {
       say(t(`Downloading ${result.title}...`, `Загрузка: ${result.title}...`));
       const filePath = await getLauncherApi().downloadModpack({
+        provider: result.provider,
         instanceId: selected.id,
         projectId: result.id,
         name: result.title
@@ -463,7 +546,7 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
         return;
       }
       try {
-        await finishModpackToInstance(selected.id, selected.name);
+        await finishModpackToInstance(selected.id, selected.name, info.skipped);
       } finally {
         setDownloadingIds((current) => current.filter((id) => id !== result.id));
         setTransferPct((current) => {
@@ -485,6 +568,9 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
 
   return {
     switchContentType,
+    contentProvider,
+    setContentProvider,
+    providerName,
     contentType,
     setContentType,
     modQuery,
@@ -521,6 +607,7 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
     setCheckingUpdates,
     updatingKeys,
     setUpdatingKeys,
+    updateAllProgress,
     versionPicker,
     setVersionPicker,
     fileQuery,

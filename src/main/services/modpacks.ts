@@ -7,12 +7,14 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { IPC } from "@shared/ipc";
 import type { LauncherInstance, ModLoader } from "@shared/types";
+import { writeContentManifest } from "./manifest";
 import { getLauncherRoot } from "../paths";
 import { JsonStore } from "../store";
 import { InstanceService } from "./instances";
 import { MinecraftService, pickLatestLoaderVersion } from "./minecraft";
 import { readUrlBytes, createThrottledEmitter, type BytesCallback } from "./transfer";
 import { tr } from "../i18n";
+import { curseForgeDependencies, type CurseForgeManifest, type CurseForgeService, type ResolvedPackFile } from "./curseforge";
 
 const execFileAsync = promisify(execFile);
 
@@ -94,6 +96,23 @@ interface ExportVersion {
   files: ExportVersionFile[];
 }
 
+interface PendingImport {
+  tmp: string;
+  files: MrpackIndexFile[];
+  at: number;
+  created: boolean;
+  overrides: string[];
+  cfMeta: Map<string, ResolvedPackFile>;
+}
+
+interface UnpackedPack {
+  tmp: string;
+  index: MrpackIndex;
+  overrides: string[];
+  skipped: string[];
+  cfMeta: Map<string, ResolvedPackFile>;
+}
+
 function pickLoader(dependencies: Record<string, string>, gameVersion: string): { loader: ModLoader; loaderVersion?: string } {
   const fabric = (dependencies["fabric-loader"] ?? "").trim();
   if (fabric) return { loader: "fabric", loaderVersion: fabric };
@@ -172,14 +191,15 @@ export class ModpackService {
   constructor(
     private readonly store: JsonStore,
     private readonly instances: InstanceService,
-    private readonly minecraft: MinecraftService
+    private readonly minecraft: MinecraftService,
+    private readonly curseforge?: CurseForgeService
   ) {}
 
-  private readonly pending = new Map<string, { tmp: string; files: MrpackIndexFile[]; at: number; created: boolean }>();
+  private readonly pending = new Map<string, PendingImport>();
 
-  private async unpackIndex(filePath: string): Promise<{ tmp: string; index: MrpackIndex }> {
-    if (!/\.mrpack$/i.test(filePath) || !existsSync(filePath)) {
-      throw new Error(tr("Drop a Modrinth .mrpack file to import it", "Перетащите файл модпака Modrinth (.mrpack), чтобы импортировать его"));
+  private async unpackIndex(filePath: string): Promise<UnpackedPack> {
+    if (!/\.(mrpack|zip)$/i.test(filePath) || !existsSync(filePath)) {
+      throw new Error(tr("Drop a modpack file (.mrpack or a CurseForge .zip) to import it", "Перетащите файл сборки (.mrpack или .zip CurseForge), чтобы импортировать его"));
     }
     const tmp = path.join(getLauncherRoot(), "cache", "modpacks", `import-${randomUUID()}`);
     try {
@@ -187,7 +207,10 @@ export class ModpackService {
       try {
         await extractZip(filePath, tmp);
       } catch {
-        throw new Error(tr("Could not unpack the .mrpack file (corrupt archive?)", "Не удалось распаковать файл .mrpack (архив повреждён?)"));
+        throw new Error(tr("Could not unpack the modpack file (corrupt archive?)", "Не удалось распаковать файл сборки (архив повреждён?)"));
+      }
+      if (!existsSync(path.join(tmp, "modrinth.index.json")) && existsSync(path.join(tmp, "manifest.json"))) {
+        return await this.unpackCurseForge(tmp);
       }
       let index: MrpackIndex;
       try {
@@ -198,11 +221,41 @@ export class ModpackService {
       if (index.formatVersion !== 1 || index.game !== "minecraft") {
         throw new Error(tr("Unsupported .mrpack format (need formatVersion 1 for Minecraft)", "Неподдерживаемый формат .mrpack (нужен formatVersion 1 для Minecraft)"));
       }
-      return { tmp, index };
+      return { tmp, index, overrides: ["overrides", "client-overrides"], skipped: [], cfMeta: new Map() };
     } catch (error) {
       await rm(tmp, { recursive: true, force: true });
       throw error;
     }
+  }
+
+  private async unpackCurseForge(tmp: string): Promise<UnpackedPack> {
+    let manifest: CurseForgeManifest;
+    try {
+      manifest = JSON.parse(await readFile(path.join(tmp, "manifest.json"), "utf8")) as CurseForgeManifest;
+    } catch {
+      throw new Error(tr("manifest.json is broken: not a valid CurseForge modpack", "Файл manifest.json повреждён: это не сборка CurseForge"));
+    }
+    if (manifest.manifestType && manifest.manifestType !== "minecraftModpack") {
+      throw new Error(tr("This CurseForge archive is not a Minecraft modpack", "Этот архив CurseForge — не сборка Minecraft"));
+    }
+    if (!this.curseforge) {
+      throw new Error(tr("CurseForge modpacks are not supported here", "Сборки CurseForge здесь не поддерживаются"));
+    }
+    const resolved = await this.curseforge.resolveManifest(manifest);
+    const cfMeta = new Map<string, ResolvedPackFile>();
+    const files: MrpackIndexFile[] = resolved.files.map((file) => {
+      cfMeta.set(file.path, file);
+      return { path: file.path, hashes: file.sha1 ? { sha1: file.sha1 } : undefined, downloads: [file.url], fileSize: file.size };
+    });
+    const overridesName = (manifest.overrides ?? "overrides").replace(/[\\/]+$/g, "") || "overrides";
+    const index: MrpackIndex = {
+      formatVersion: 1,
+      game: "minecraft",
+      name: manifest.name,
+      dependencies: curseForgeDependencies(manifest),
+      files
+    };
+    return { tmp, index, overrides: [overridesName], skipped: resolved.skipped, cfMeta };
   }
 
   private wantedFiles(index: MrpackIndex): MrpackIndexFile[] {
@@ -211,14 +264,15 @@ export class ModpackService {
     );
   }
 
-  async beginImport(filePath: string): Promise<{ instance: LauncherInstance; totalFiles: number }> {
-    const { tmp, index } = await this.unpackIndex(filePath);
+  async beginImport(filePath: string): Promise<{ instance: LauncherInstance; totalFiles: number; skipped: string[] }> {
+    const unpacked = await this.unpackIndex(filePath);
+    const { tmp, index } = unpacked;
     let createdId: string | null = null;
     try {
       const dependencies = index.dependencies ?? {};
       const gameVersion = (dependencies.minecraft ?? "").trim();
       if (!gameVersion) {
-        throw new Error(tr("The .mrpack does not declare a Minecraft version", "В модпаке .mrpack не указана версия Minecraft"));
+        throw new Error(tr("The modpack does not declare a Minecraft version", "В сборке не указана версия Minecraft"));
       }
       await this.minecraft.assertVersionExists(gameVersion);
       const { loader, loaderVersion } = pickLoader(dependencies, gameVersion);
@@ -235,8 +289,8 @@ export class ModpackService {
 
       const wanted = this.wantedFiles(index);
       this.sweepPending();
-      this.pending.set(instance.id, { tmp, files: wanted, at: Date.now(), created: true });
-      return { instance, totalFiles: wanted.length };
+      this.pending.set(instance.id, { tmp, files: wanted, at: Date.now(), created: true, overrides: unpacked.overrides, cfMeta: unpacked.cfMeta });
+      return { instance, totalFiles: wanted.length, skipped: unpacked.skipped };
     } catch (error) {
       if (createdId) this.pending.delete(createdId);
       await rm(tmp, { recursive: true, force: true });
@@ -244,8 +298,9 @@ export class ModpackService {
     }
   }
 
-  async beginImportToInstance(filePath: string, instanceId: string): Promise<{ totalFiles: number; packName: string; packGameVersion: string; packLoader: string }> {
-    const { tmp, index } = await this.unpackIndex(filePath);
+  async beginImportToInstance(filePath: string, instanceId: string): Promise<{ totalFiles: number; packName: string; packGameVersion: string; packLoader: string; skipped: string[] }> {
+    const unpacked = await this.unpackIndex(filePath);
+    const { tmp, index } = unpacked;
     try {
       const data = await this.store.getData();
       const instance = data.instances.find((item) => item.id === instanceId);
@@ -263,8 +318,8 @@ export class ModpackService {
       }
       const wanted = this.wantedFiles(index);
       this.sweepPending();
-      this.pending.set(instanceId, { tmp, files: wanted, at: Date.now(), created: false });
-      return { totalFiles: wanted.length, packName: (index.name ?? "").trim() || path.basename(filePath, path.extname(filePath)), packGameVersion, packLoader };
+      this.pending.set(instanceId, { tmp, files: wanted, at: Date.now(), created: false, overrides: unpacked.overrides, cfMeta: unpacked.cfMeta });
+      return { totalFiles: wanted.length, packName: (index.name ?? "").trim() || path.basename(filePath, path.extname(filePath)), packGameVersion, packLoader, skipped: unpacked.skipped };
     } catch (error) {
       await rm(tmp, { recursive: true, force: true });
       throw error;
@@ -496,7 +551,7 @@ export class ModpackService {
   async finishImport(instanceId: string, sender: WebContents): Promise<LauncherInstance> {
     const job = this.pending.get(instanceId);
     if (!job) {
-      throw new Error(tr("Import session expired, drop the .mrpack again", "Сеанс импорта истёк, перетащите .mrpack ещё раз"));
+      throw new Error(tr("Import session expired, start the import again", "Сеанс импорта истёк, начните импорт заново"));
     }
     this.pending.delete(instanceId);
 
@@ -542,7 +597,7 @@ export class ModpackService {
         emit(done, job.files.length, file.path);
       });
 
-      for (const overridesName of ["overrides", "client-overrides"]) {
+      for (const overridesName of job.overrides) {
         const overrides = path.join(job.tmp, overridesName);
         if (existsSync(overrides)) {
           await this.copyOverrides(overrides, instance.directory);
@@ -550,6 +605,7 @@ export class ModpackService {
       }
 
       await this.linkModrinthEntries(instance.id, downloaded, limit).catch(() => undefined);
+      if (job.cfMeta.size) await this.linkCurseForgeEntries(instance.id, downloaded, job.cfMeta).catch(() => undefined);
 
       emit(job.files.length, job.files.length, "");
       const fresh = await this.store.getData();
@@ -562,6 +618,24 @@ export class ModpackService {
     } finally {
       await rm(job.tmp, { recursive: true, force: true });
     }
+  }
+
+  private async linkCurseForgeEntries(instanceId: string, downloaded: DownloadedEntry[], meta: Map<string, ResolvedPackFile>): Promise<void> {
+    const updated = await this.store.update((current) => {
+      const target = current.instances.find((item) => item.id === instanceId);
+      if (!target) throw new Error(tr("Instance not found", "Инстанция не найдена"));
+      const now = new Date().toISOString();
+      for (const entry of downloaded) {
+        const info = meta.get(entry.rel);
+        if (!info) continue;
+        const lower = entry.fileName.toLowerCase();
+        if (target.mods.some((mod) => (mod.fileName ?? "").replace(/\.disabled$/i, "").toLowerCase() === lower)) continue;
+        target.mods.push({ id: randomUUID(), provider: "curseforge", projectId: info.projectId, versionId: info.fileId, name: info.name, slug: info.slug, fileName: entry.fileName, iconUrl: info.iconUrl, installedAt: now, status: "installed", projectType: info.projectType });
+      }
+      target.updatedAt = now;
+      return target;
+    });
+    await writeContentManifest(updated.directory, updated.mods);
   }
 
   private async copyOverrides(from: string, instanceDir: string): Promise<void> {
@@ -746,6 +820,6 @@ export class ModpackService {
     for (const file of staleFiles) {
       await rm(file, { force: true }).catch(() => undefined);
     }
-    await writeFile(path.join(updated.directory, ".launcher", "content.json"), JSON.stringify(updated.mods, null, 2), "utf8");
+    await writeContentManifest(updated.directory, updated.mods);
   }
 }

@@ -1,4 +1,4 @@
-import { House, Layers3, LayoutGrid, Palette, RefreshCw, Settings, Shirt, UserRoundCog, type LucideIcon } from "lucide-react";
+import { GripHorizontal, GripVertical, House, Layers3, LayoutGrid, Palette, RefreshCw, Settings, Shirt, UserRoundCog, type LucideIcon } from "lucide-react";
 import { useReorder } from "../components/useReorder";
 import type { AppSection } from "../constants";
 import { useApp } from "../state/context";
@@ -13,10 +13,12 @@ const RAIL_ITEMS: Record<AppSection, { icon: LucideIcon; label: string; labelRu:
 };
 
 export function IconRail() {
-  const { layoutEditing, moveRailItem, navLayout, refresh, refreshVersions, section, startLayoutEditing, switchSection, t } = useApp();
-  const { containerRef, itemProps, draggingIndex } = useReorder<HTMLElement>({ axis: "y", enabled: layoutEditing, onMove: moveRailItem });
+  const { dockDrag, layoutEditing, moveRailItem, navLayout, refresh, refreshVersions, section, startDock, startLayoutEditing, switchSection, t } = useApp();
+  const horizontal = navLayout.railSide === "top" || navLayout.railSide === "bottom";
+  const { containerRef, itemProps, draggingIndex } = useReorder<HTMLElement>({ axis: horizontal ? "x" : "y", enabled: layoutEditing, onMove: moveRailItem });
   return (
-    <aside className="icon-rail" aria-label={t("Launcher navigation", "Навигация")}>
+    <aside className={dockDrag?.kind === "rail" ? "icon-rail docking" : "icon-rail"} aria-label={t("Launcher navigation", "Навигация")}>
+      {layoutEditing ? <button type="button" className="dock-handle rail-dock-handle" onPointerDown={(event) => startDock("rail", event)} title={t("Drag the panel to any edge of the window", "Перетащите панель к любому краю окна")} aria-label={t("Move the navigation panel", "Переместить панель навигации")}>{horizontal ? <GripVertical size={16} /> : <GripHorizontal size={16} />}</button> : null}
       <nav ref={containerRef} className={layoutEditing ? "rail-nav reorder-editing" : "rail-nav"}>
         {navLayout.rail.map((id, index) => {
           const item = RAIL_ITEMS[id];

@@ -1,6 +1,6 @@
 {
   "name": "lynapp",
-  "version": "1.1.0-beta.3",
+  "version": "1.1.0-beta.4",
   "productName": "lynapp",
   "private": true,
   "description": "lynapp Minecraft launcher",
@@ -67,7 +67,7 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "include": "build/installer.nsh",
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": false,
       "createStartMenuShortcut": true,
       "shortcutName": "lynapp",
       "uninstallDisplayName": "lynapp",

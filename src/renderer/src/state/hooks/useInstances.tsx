@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { JavaInstallation, LauncherInstance } from "@shared/types";
+import type { InstanceFolder, JavaInstallation, LauncherInstance } from "@shared/types";
 import { getLauncherApi } from "../../lib/api";
 import { detectCrash } from "../../lib/crash";
 import { transferLabel } from "../../lib/format";
@@ -17,7 +17,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
 
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const [modpackTarget, setModpackTarget] = useState<{ resultId: string; title: string; filePath: string; instanceId: string; instanceName: string; instanceVersion: string; instanceLoader: string; info: { totalFiles: number; packName: string; packGameVersion: string; packLoader: string } } | null>(null);
+  const [modpackTarget, setModpackTarget] = useState<{ resultId: string; title: string; filePath: string; instanceId: string; instanceName: string; instanceVersion: string; instanceLoader: string; info: { totalFiles: number; packName: string; packGameVersion: string; packLoader: string; skipped?: string[] } } | null>(null);
 
   const [exportModal, setExportModal] = useState<{ entries: Array<{ name: string; isDir: boolean; size: number; modified: string | null }>; checked: Record<string, boolean> } | null>(null);
 
@@ -39,8 +39,8 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
   }, []);
 
   async function importMrpackByPath(filePath: string): Promise<void> {
-    if (!/\.mrpack$/i.test(filePath)) {
-      setStatus(t("Only .mrpack modpack files can be dropped here", "Сюда можно перетаскивать только файлы .mrpack"));
+    if (!/\.(mrpack|zip)$/i.test(filePath)) {
+      setStatus(t("Only modpack files (.mrpack or a CurseForge .zip) can be dropped here", "Сюда можно перетаскивать только сборки (.mrpack или .zip CurseForge)"));
       return;
     }
     setBusy(true);
@@ -59,8 +59,9 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
       try {
         await getLauncherApi().importMrpackFiles(started.instance.id);
         await refresh({ setReadyStatus: false });
-        setInstanceStatus((current) => ({ ...current, [started.instance.id]: t(`Imported ${started.instance.name}`, `Импортировано: ${started.instance.name}`) }));
-        setStatus(t(`Imported ${started.instance.name}`, `Импортировано: ${started.instance.name}`));
+        const done = t(`Imported ${started.instance.name}`, `Импортировано: ${started.instance.name}`) + skippedNote(started.skipped);
+        setInstanceStatus((current) => ({ ...current, [started.instance.id]: done }));
+        setStatus(done);
       } finally {
         setMrpackProgress((current) => {
           const next = { ...current };
@@ -250,10 +251,10 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     }
   }
 
-  async function openSelectedFolder(): Promise<void> {
+  async function openSelectedFolder(folder: InstanceFolder = "root"): Promise<void> {
     if (!selected) return;
     try {
-      const error = await getLauncherApi().openInstanceFolder(selected.id);
+      const error = await getLauncherApi().openInstanceFolder(selected.id, folder);
       if (error) setStatus(t(`Could not open folder: ${error}`, `Не удалось открыть папку: ${error}`));
     } catch (err) {
       setStatus(err instanceof Error ? err.message : t("Could not open folder", "Не удалось открыть папку"));
@@ -368,7 +369,13 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     if (el) el.scrollTop = el.scrollHeight;
   }, [instanceTab, instanceLogs, logsFollow]);
 
-  async function finishModpackToInstance(instanceId: string, instanceName: string): Promise<void> {
+  function skippedNote(skipped: string[] | undefined): string {
+    if (!skipped?.length) return "";
+    const list = skipped.slice(0, 5).join(", ") + (skipped.length > 5 ? t(` and ${skipped.length - 5} more`, ` и ещё ${skipped.length - 5}`) : "");
+    return t(`. Not downloaded, the authors do not allow other launchers: ${list}. Download them from CurseForge and drop them onto the Files tab.`, `. Не скачано, авторы запретили сторонние лаунчеры: ${list}. Скачайте их на сайте CurseForge и перетащите на вкладку «Файлы».`);
+  }
+
+  async function finishModpackToInstance(instanceId: string, instanceName: string, skipped?: string[]): Promise<void> {
     setBusy(true);
     try {
       await refresh({ setReadyStatus: false });
@@ -376,8 +383,9 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
       setInstanceStatus((current) => ({ ...current, [instanceId]: t(`Importing into ${instanceName}...`, `Импорт в ${instanceName}...`) }));
       await getLauncherApi().importMrpackFiles(instanceId);
       await refresh({ setReadyStatus: false });
-      setInstanceStatus((current) => ({ ...current, [instanceId]: t(`Imported into ${instanceName}`, `Импортировано в ${instanceName}`) }));
-      setStatus(t(`Imported into ${instanceName}`, `Импортировано в ${instanceName}`));
+      const done = t(`Imported into ${instanceName}`, `Импортировано в ${instanceName}`) + skippedNote(skipped);
+      setInstanceStatus((current) => ({ ...current, [instanceId]: done }));
+      setStatus(done);
     } catch (error) {
       const message = error instanceof Error ? error.message : t("Modpack import failed", "Не удалось импортировать модпак");
       setInstanceStatus((current) => ({ ...current, [instanceId]: message }));
@@ -397,7 +405,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     const target = modpackTarget;
     setModpackTarget(null);
     try {
-      await finishModpackToInstance(target.instanceId, target.instanceName);
+      await finishModpackToInstance(target.instanceId, target.instanceName, target.info.skipped);
     } finally {
       setDownloadingIds((current) => current.filter((id) => id !== target.resultId));
       setTransferPct((current) => {

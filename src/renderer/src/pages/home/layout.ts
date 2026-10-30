@@ -1,4 +1,5 @@
 import type { HomeWidgetLayout } from "@shared/types";
+import { normalizeBoard, samePlacement } from "../../layout/boards";
 
 export type HomeWidgetId = "continue" | "account" | "statInstances" | "statMods" | "statRunning" | "statActivity" | "recent" | "launcher";
 
@@ -33,32 +34,9 @@ export function widgetMeta(id: string) {
 }
 
 export function normalizeHomeLayout(saved: HomeWidgetLayout[] | undefined): HomeWidgetLayout[] {
-  const known = new Set(HOME_WIDGETS.map((item) => item.id as string));
-  const result: HomeWidgetLayout[] = [];
-  const seen = new Set<string>();
-  for (const item of Array.isArray(saved) ? saved : DEFAULT_HOME_LAYOUT) {
-    if (!item || typeof item.i !== "string" || !known.has(item.i) || seen.has(item.i)) continue;
-    const meta = widgetMeta(item.i);
-    const w = Math.min(HOME_COLS, Math.max(meta?.minW ?? 1, Math.round(Number(item.w) || 0)));
-    const h = Math.max(meta?.minH ?? 1, Math.round(Number(item.h) || 0));
-    const x = Math.min(HOME_COLS - w, Math.max(0, Math.round(Number(item.x) || 0)));
-    const y = Math.max(0, Math.round(Number(item.y) || 0));
-    result.push({ i: item.i, x, y, w, h, ...(item.hidden ? { hidden: true } : {}) });
-    seen.add(item.i);
-  }
-  let bottom = result.reduce((max, item) => Math.max(max, item.y + item.h), 0);
-  for (const fallback of DEFAULT_HOME_LAYOUT) {
-    if (seen.has(fallback.i)) continue;
-    result.push({ ...fallback, x: 0, y: bottom });
-    bottom += fallback.h;
-  }
-  return result;
+  return normalizeBoard(HOME_WIDGETS, DEFAULT_HOME_LAYOUT, HOME_COLS, saved);
 }
 
 export function sameLayout(a: HomeWidgetLayout[], b: HomeWidgetLayout[]): boolean {
-  if (a.length !== b.length) return false;
-  const key = (item: HomeWidgetLayout) => `${item.i}:${item.x}:${item.y}:${item.w}:${item.h}:${item.hidden ? 1 : 0}`;
-  const left = a.map(key).sort().join("|");
-  const right = b.map(key).sort().join("|");
-  return left === right;
+  return samePlacement(a, b, true);
 }

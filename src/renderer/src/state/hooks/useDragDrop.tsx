@@ -77,11 +77,12 @@ export function useDragDrop(deps: Pick<CoreState & InstancesState & ContentState
         const mrpacks = paths.filter((item) => /\.mrpack$/i.test(item));
         const others = paths.filter((item) => !/\.mrpack$/i.test(item));
         if (zone === "sidebar") {
-          if (!mrpacks.length) {
-            setStatus(tRef.current("Drop .mrpack modpacks here. Mods, resource packs and shaders go to the Files tab of an instance.", "Сюда перетаскиваются модпаки .mrpack. Моды, ресурспаки и шейдеры — на вкладку «Файлы» инстанции."));
+          const packs = paths.filter((item) => /\.(mrpack|zip)$/i.test(item));
+          if (!packs.length) {
+            setStatus(tRef.current("Drop modpacks here (.mrpack or a CurseForge .zip). Mods, resource packs and shaders go to the Files tab of an instance.", "Сюда перетаскиваются сборки (.mrpack или .zip CurseForge). Моды, ресурспаки и шейдеры — на вкладку «Файлы» инстанции."));
             return;
           }
-          void importMrpackRef.current(mrpacks[0]);
+          void importMrpackRef.current(packs[0]);
           return;
         }
         if (mrpacks.length && !others.length) {
