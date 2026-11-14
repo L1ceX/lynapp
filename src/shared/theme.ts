@@ -133,7 +133,7 @@ export const THEME_PRESETS: ThemePreset[] = [
     borders: "#c0c9d8",
     buttons: "#dfe6f0",
     accent: "#2f6fed",
-    active: "#2f6fed",
+    active: "#cfe0ff",
     primary: "#2f6fed",
     text: "#16202e",
     muted: "#5c6b7e",

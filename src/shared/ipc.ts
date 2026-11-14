@@ -6,7 +6,14 @@ import type {
   ExternalImportResult,
   ExternalLauncher,
   GameVersionInfo,
+  ModInstallPlan,
+  ModProjectDetails,
   ModVersionInfo,
+  QuickPlayTarget,
+  ScreenshotInfo,
+  ServerEntry,
+  ServerPingResult,
+  WorldInfo,
   BootstrapState,
   CapeInfo,
   InstanceFolder,
@@ -48,6 +55,7 @@ export const IPC = {
   updateSettings: "settings:update",
   searchMods: "mods:search",
   installMod: "mods:install",
+  prepareModInstall: "mods:prepare-install",
   downloadModpack: "mods:download-modpack",
   beginMicrosoftLogin: "auth:microsoft:begin",
   refreshSession: "auth:refresh",
@@ -56,6 +64,7 @@ export const IPC = {
   setActiveAccount: "auth:set-active",
   removeAccount: "auth:remove",
   openExternal: "shell:open-external",
+  openDataFolder: "app:open-data-folder",
   getJavaInstallations: "java:list",
   installJava: "java:install",
   detectJava: "java:detect",
@@ -71,7 +80,20 @@ export const IPC = {
   detectLocalContent: "content:detect",
   importLocalContent: "content:import",
   listModVersions: "mods:versions",
+  getModDetails: "mods:details",
   checkContentUpdates: "mods:check-updates",
+  listWorlds: "worlds:list",
+  backupWorld: "worlds:backup",
+  restoreWorldBackup: "worlds:restore",
+  deleteWorldBackup: "worlds:delete-backup",
+  deleteWorld: "worlds:delete",
+  listServers: "servers:list",
+  addServer: "servers:add",
+  removeServer: "servers:remove",
+  pingServer: "servers:ping",
+  listScreenshots: "screenshots:list",
+  copyScreenshot: "screenshots:copy",
+  deleteScreenshot: "screenshots:delete",
   getRunningInstances: "instances:running",
   stopInstance: "instances:stop",
   cancelLaunch: "instances:cancel-launch",
@@ -83,6 +105,7 @@ export const IPC = {
   windowMaximized: "window:maximized",
   listSkins: "skins:list",
   elySkin: "skins:ely",
+  accountSkin: "skins:account",
   addSkin: "skins:add",
   updateSkin: "skins:update",
   removeSkin: "skins:remove",
@@ -124,9 +147,20 @@ export interface InstallModPayload {
   provider: ModProvider;
   projectId: string;
   versionId?: string;
+  replaceModId?: string;
   name: string;
   slug?: string;
   iconUrl?: string;
+  projectType: ModrinthProjectType;
+  gameVersions?: string[];
+  loaders?: string[];
+}
+
+export interface PrepareModInstallPayload {
+  instanceId: string;
+  provider: ModProvider;
+  projectId: string;
+  versionId?: string;
   projectType: ModrinthProjectType;
   gameVersions?: string[];
   loaders?: string[];
@@ -136,12 +170,14 @@ export interface LocalContentPayload {
   instanceId: string;
   fileName: string;
   kind?: LocalContentKind;
+  world?: string;
 }
 
 export interface DownloadModpackPayload {
   provider?: ModProvider;
   instanceId: string;
   projectId: string;
+  versionId?: string;
   name: string;
 }
 
@@ -149,11 +185,12 @@ export interface SkinAddPayload {
   name: string;
   dataUrl: string;
   slim: boolean;
+  accountId?: string | null;
 }
 
 export interface SkinUpdatePayload {
   id: string;
-  patch: Partial<Pick<SkinInfo, "name" | "slim">>;
+  patch: Partial<Pick<SkinInfo, "name" | "slim" | "accountId">>;
 }
 
 export interface SkinActivateResult {
@@ -196,7 +233,7 @@ export interface InstanceLogsResult {
   log: string;
   plan: string;
   hasLog: boolean;
-  crash: { file: string; description: string } | null;
+  crash: { file: string; description: string; text: string } | null;
 }
 
 export interface SkinRemoveResult {
@@ -235,19 +272,21 @@ export interface LauncherApi {
   importMrpackFiles(instanceId: string): Promise<LauncherInstance>;
   onMrpackProgress(listener: (update: MrpackProgressUpdate) => void): () => void;
   onDownloadProgress(listener: (update: TransferProgressUpdate) => void): () => void;
-  launchInstance(id: string): Promise<LaunchResult>;
+  launchInstance(id: string, quickPlay?: QuickPlayTarget): Promise<LaunchResult>;
   updateSettings(patch: Partial<LauncherSettings>): Promise<LauncherSettings>;
   searchMods(payload: ModSearchPayload): Promise<ModSearchResponse>;
   getCategoryTags(projectType: ModrinthProjectType, provider?: ModProvider): Promise<string[]>;
   installMod(payload: InstallModPayload): Promise<LauncherInstance>;
+  prepareModInstall(payload: PrepareModInstallPayload): Promise<ModInstallPlan>;
   downloadModpack(payload: DownloadModpackPayload): Promise<string>;
   beginMicrosoftLogin(): Promise<LoginStartResult>;
   refreshSession(): Promise<AccountsState>;
-  elyLogin(username: string, password: string, totp?: string): Promise<AccountsState>;
+  elyLogin(): Promise<AccountsState>;
   useOfflineProfile(username: string): Promise<AccountsState>;
   setActiveAccount(id: string): Promise<AccountsState>;
   removeAccount(id: string): Promise<AccountsState>;
   openExternal(url: string): Promise<boolean>;
+  openDataFolder(): Promise<string>;
   getJavaInstallations(): Promise<JavaInstallation[]>;
   installJava(major: number): Promise<JavaInstallation>;
   detectJava(major: number): Promise<JavaInstallation>;
@@ -261,14 +300,28 @@ export interface LauncherApi {
   removeLocalContent(payload: LocalContentPayload): Promise<LocalContentItem[]>;
   detectLocalContent(instanceId: string): Promise<LauncherInstance>;
   importLocalContent(instanceId: string, paths: string[]): Promise<ContentImportResult>;
-  listModVersions(instanceId: string, projectId: string, projectType: ModrinthProjectType): Promise<ModVersionInfo[]>;
+  listModVersions(instanceId: string, projectId: string, projectType: ModrinthProjectType, provider?: ModProvider): Promise<ModVersionInfo[]>;
+  getModDetails(projectId: string, projectType: ModrinthProjectType, provider: ModProvider): Promise<ModProjectDetails>;
   checkContentUpdates(instanceId: string): Promise<ContentUpdateInfo[]>;
+  listWorlds(instanceId: string): Promise<WorldInfo[]>;
+  backupWorld(instanceId: string, folderName: string): Promise<WorldInfo[]>;
+  restoreWorldBackup(instanceId: string, folderName: string, backupId: string): Promise<WorldInfo[]>;
+  deleteWorldBackup(instanceId: string, folderName: string, backupId: string): Promise<WorldInfo[]>;
+  deleteWorld(instanceId: string, folderName: string): Promise<WorldInfo[]>;
+  listServers(instanceId: string): Promise<ServerEntry[]>;
+  addServer(instanceId: string, name: string, ip: string): Promise<ServerEntry[]>;
+  removeServer(instanceId: string, ip: string): Promise<ServerEntry[]>;
+  pingServer(ip: string): Promise<ServerPingResult>;
+  listScreenshots(instanceId: string): Promise<ScreenshotInfo[]>;
+  copyScreenshot(instanceId: string, fileName: string): Promise<boolean>;
+  deleteScreenshot(instanceId: string, fileName: string): Promise<ScreenshotInfo[]>;
   getRunningInstances(): Promise<string[]>;
   stopInstance(id: string): Promise<LaunchResult>;
   cancelLaunch(id: string): Promise<LaunchResult>;
   getInstanceLogs(id: string): Promise<InstanceLogsResult>;
   listSkins(): Promise<SkinInfo[]>;
   elySkin(): Promise<ElySkinResult | null>;
+  accountSkin(): Promise<ElySkinResult | null>;
   addSkin(payload: SkinAddPayload): Promise<SkinInfo[]>;
   updateSkin(payload: SkinUpdatePayload): Promise<SkinInfo[]>;
   removeSkin(id: string): Promise<SkinRemoveResult>;

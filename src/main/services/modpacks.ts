@@ -130,16 +130,51 @@ function pickLoader(dependencies: Record<string, string>, gameVersion: string): 
 }
 
 
+function unsafePackPath(entryPath: string): Error {
+  return new Error(tr(`Unsafe path inside the modpack: ${entryPath}`, `Недопустимый путь внутри сборки: ${entryPath}`));
+}
+
+function isStrictlyInside(root: string, target: string): boolean {
+  const base = path.resolve(root);
+  const resolved = path.resolve(target);
+  const rel = path.relative(base, resolved);
+  return Boolean(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
 function resolveTarget(instanceDir: string, entryPath: string): string {
-  const normalized = path.normalize(entryPath.replace(/\//g, path.sep));
-  if (path.isAbsolute(normalized) || normalized.startsWith("..") || /^[a-zA-Z]:/.test(normalized)) {
-    throw new Error(tr(`Unsafe path inside .mrpack: ${entryPath}`, `Недопустимый путь внутри .mrpack: ${entryPath}`));
+  const raw = entryPath.replace(/[\\/]+/g, "/");
+  if (!raw || raw.startsWith("/") || /^[a-zA-Z]:/.test(raw) || raw.includes("\0")) {
+    throw unsafePackPath(entryPath);
   }
-  const target = path.join(instanceDir, normalized);
-  if (target !== instanceDir && !target.startsWith(instanceDir + path.sep)) {
-    throw new Error(tr(`Unsafe path inside .mrpack: ${entryPath}`, `Недопустимый путь внутри .mrpack: ${entryPath}`));
+  const segments = raw.split("/").filter((segment) => segment && segment !== ".");
+  if (!segments.length || segments.some((segment) => segment === ".." || segment.includes(":"))) {
+    throw unsafePackPath(entryPath);
+  }
+  const head = segments[0].replace(/[. ]+$/g, "").toLowerCase();
+  if (head === ".launcher" || head === "") {
+    throw unsafePackPath(entryPath);
+  }
+  const target = path.join(instanceDir, ...segments);
+  if (!isStrictlyInside(instanceDir, target)) {
+    throw unsafePackPath(entryPath);
   }
   return target;
+}
+
+function resolveOverridesDir(tmp: string, name: string): string {
+  const raw = name.replace(/[\\/]+/g, "/").replace(/\/+$/g, "");
+  if (!raw || raw.startsWith("/") || /^[a-zA-Z]:/.test(raw) || raw.includes("\0")) {
+    throw unsafePackPath(name);
+  }
+  const segments = raw.split("/").filter((segment) => segment && segment !== ".");
+  if (!segments.length || segments.some((segment) => segment === ".." || segment.includes(":"))) {
+    throw unsafePackPath(name);
+  }
+  const dir = path.join(tmp, ...segments);
+  if (!isStrictlyInside(tmp, dir)) {
+    throw unsafePackPath(name);
+  }
+  return dir;
 }
 
 function verifyBuffer(buffer: Buffer, hashes: MrpackIndexFile["hashes"], entryPath: string): void {
@@ -170,8 +205,8 @@ async function extractZip(zipPath: string, destination: string): Promise<void> {
   });
 }
 
-async function downloadBuffer(url: string, onBytes?: BytesCallback): Promise<Buffer> {
-  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
+async function downloadBuffer(url: string, onBytes?: BytesCallback, signal?: AbortSignal): Promise<Buffer> {
+  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp" }, signal, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
   return buffer;
 }
 
@@ -196,6 +231,7 @@ export class ModpackService {
   ) {}
 
   private readonly pending = new Map<string, PendingImport>();
+  private readonly activeImports = new Map<string, AbortController>();
 
   private async unpackIndex(filePath: string): Promise<UnpackedPack> {
     if (!/\.(mrpack|zip)$/i.test(filePath) || !existsSync(filePath)) {
@@ -248,6 +284,7 @@ export class ModpackService {
       return { path: file.path, hashes: file.sha1 ? { sha1: file.sha1 } : undefined, downloads: [file.url], fileSize: file.size };
     });
     const overridesName = (manifest.overrides ?? "overrides").replace(/[\\/]+$/g, "") || "overrides";
+    resolveOverridesDir(tmp, overridesName);
     const index: MrpackIndex = {
       formatVersion: 1,
       game: "minecraft",
@@ -259,9 +296,14 @@ export class ModpackService {
   }
 
   private wantedFiles(index: MrpackIndex): MrpackIndexFile[] {
-    return (index.files ?? []).filter(
+    const wanted = (index.files ?? []).filter(
       (file) => file?.path && file.downloads?.length && (file.env?.client ?? "required") !== "unsupported"
     );
+    const probe = path.join(getLauncherRoot(), "cache", "modpacks", "probe");
+    for (const file of wanted) {
+      resolveTarget(probe, file.path);
+    }
+    return wanted;
   }
 
   async beginImport(filePath: string): Promise<{ instance: LauncherInstance; totalFiles: number; skipped: string[] }> {
@@ -277,6 +319,7 @@ export class ModpackService {
       await this.minecraft.assertVersionExists(gameVersion);
       const { loader, loaderVersion } = pickLoader(dependencies, gameVersion);
       await this.minecraft.assertLoaderCompatible(loader, gameVersion);
+      const wanted = this.wantedFiles(index);
 
       const fallbackName = path.basename(filePath, path.extname(filePath));
       const instance = await this.instances.create({
@@ -287,7 +330,6 @@ export class ModpackService {
       });
       createdId = instance.id;
 
-      const wanted = this.wantedFiles(index);
       this.sweepPending();
       this.pending.set(instance.id, { tmp, files: wanted, at: Date.now(), created: true, overrides: unpacked.overrides, cfMeta: unpacked.cfMeta });
       return { instance, totalFiles: wanted.length, skipped: unpacked.skipped };
@@ -327,10 +369,17 @@ export class ModpackService {
   }
 
   async cancelImport(instanceId: string): Promise<void> {
+    const active = this.activeImports.get(instanceId);
+    if (active) {
+      active.abort();
+    }
     const job = this.pending.get(instanceId);
     if (!job) return;
     this.pending.delete(instanceId);
     await rm(job.tmp, { recursive: true, force: true }).catch(() => undefined);
+    if (job.created) {
+      await this.instances.remove(instanceId).catch(() => undefined);
+    }
   }
 
   async listExportEntries(instanceId: string): Promise<Array<{ name: string; isDir: boolean; size: number; modified: string | null }>> {
@@ -370,6 +419,7 @@ export class ModpackService {
     let total = 0;
     const entries = await readdir(target, { withFileTypes: true });
     for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
       const full = path.join(target, entry.name);
       if (entry.isDirectory()) {
         total += await this.dirSize(full);
@@ -409,6 +459,10 @@ export class ModpackService {
     }
     const withVersions = instance.mods.filter((mod) => mod.provider === "modrinth" && mod.projectId && mod.versionId);
     const versionMap = await this.fetchVersionsByIds([...new Set(withVersions.map((mod) => mod.versionId as string))]);
+    const worldFolders = (await readdir(path.join(instance.directory, "saves"), { withFileTypes: true }).catch(() => []))
+      .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+      .map((entry) => entry.name);
+    const indexedWorldDatapacks = new Set<string>();
     const files: MrpackIndexFile[] = [];
     const manual: Array<{ kind: string; fileName: string }> = [];
     for (const mod of instance.mods) {
@@ -420,25 +474,46 @@ export class ModpackService {
       if (included && !included.has(folder)) {
         continue;
       }
-      if (/\.disabled$/i.test(mod.fileName) || !existsSync(path.join(instance.directory, folder, mod.fileName))) {
+      if (/\.disabled$/i.test(mod.fileName)) {
+        continue;
+      }
+      const inRoot = existsSync(path.join(instance.directory, folder, mod.fileName));
+      const matchedWorlds = kind === "datapack"
+        ? worldFolders.filter((world) => existsSync(path.join(instance.directory, "saves", world, "datapacks", mod.fileName as string)))
+        : [];
+      if (!inRoot && !matchedWorlds.length) {
         continue;
       }
       const version = mod.versionId ? versionMap.get(mod.versionId) : undefined;
       const apiFile = version?.files.find((f) => f.primary) ?? version?.files[0];
-      if (version && apiFile?.hashes && apiFile.url && typeof apiFile.size === "number") {
-        files.push({
-          path: `${folder}/${apiFile.filename}`,
-          hashes: { sha1: apiFile.hashes.sha1, sha512: apiFile.hashes.sha512 },
-          env: kind === "mod"
-            ? { client: "required", server: "optional" }
-            : kind === "datapack"
-              ? { client: "required", server: "required" }
-              : { client: "required", server: "unsupported" },
-          downloads: [apiFile.url],
-          fileSize: apiFile.size
-        });
-      } else {
-        manual.push({ kind: folder, fileName: mod.fileName });
+      if (inRoot) {
+        if (version && apiFile?.hashes && apiFile.url && typeof apiFile.size === "number") {
+          files.push({
+            path: `${folder}/${apiFile.filename}`,
+            hashes: { sha1: apiFile.hashes.sha1, sha512: apiFile.hashes.sha512 },
+            env: kind === "mod"
+              ? { client: "required", server: "optional" }
+              : kind === "datapack"
+                ? { client: "required", server: "required" }
+                : { client: "required", server: "unsupported" },
+            downloads: [apiFile.url],
+            fileSize: apiFile.size
+          });
+        } else {
+          manual.push({ kind: folder, fileName: mod.fileName });
+        }
+      }
+      for (const world of matchedWorlds) {
+        if (version && apiFile?.hashes && apiFile.url && typeof apiFile.size === "number") {
+          files.push({
+            path: `saves/${world}/datapacks/${apiFile.filename}`,
+            hashes: { sha1: apiFile.hashes.sha1, sha512: apiFile.hashes.sha512 },
+            env: { client: "required", server: "required" },
+            downloads: [apiFile.url],
+            fileSize: apiFile.size
+          });
+          indexedWorldDatapacks.add(`${world}:${mod.fileName.toLowerCase()}`);
+        }
       }
     }
     const tmp = path.join(getLauncherRoot(), "cache", "modpacks", `export-${randomUUID()}`);
@@ -484,7 +559,26 @@ export class ModpackService {
         }
         const src = path.join(instance.directory, extra);
         if (existsSync(src)) {
-          await cp(src, path.join(tmp, "overrides", extra), { recursive: true });
+          await cp(src, path.join(tmp, "overrides", extra), {
+            recursive: true,
+            filter: (itemPath) => path.basename(itemPath).toLowerCase() !== "session.lock"
+          });
+        }
+      }
+      if ((!included || included.has("datapacks")) && !extras.includes("saves")) {
+        const worlds = await readdir(path.join(instance.directory, "saves"), { withFileTypes: true }).catch(() => []);
+        for (const world of worlds) {
+          if (!world.isDirectory()) continue;
+          const dpDir = path.join(instance.directory, "saves", world.name, "datapacks");
+          const dpEntries = await readdir(dpDir).catch(() => []);
+          for (const entryName of dpEntries) {
+            if (/\.disabled$/i.test(entryName) || indexedWorldDatapacks.has(`${world.name}:${entryName.toLowerCase()}`)) continue;
+            await mkdir(path.join(tmp, "overrides", "saves", world.name, "datapacks"), { recursive: true });
+            await cp(path.join(dpDir, entryName), path.join(tmp, "overrides", "saves", world.name, "datapacks", entryName), {
+              recursive: true,
+              filter: (itemPath) => path.basename(itemPath).toLowerCase() !== "session.lock"
+            });
+          }
         }
       }
       const index: MrpackIndex = {
@@ -573,23 +667,51 @@ export class ModpackService {
       }
     });
 
+    const controller = new AbortController();
+    this.activeImports.set(instanceId, controller);
+
     try {
       const settings = (await this.store.getData()).settings;
       const limit = Math.min(16, Math.max(1, Math.round(settings.concurrentDownloads) || 8));
+      const stageDir = path.join(job.tmp, "stage");
+      await mkdir(stageDir, { recursive: true });
       const downloaded: DownloadedEntry[] = [];
       let done = 0;
       await pool(job.files, limit, async (file) => {
-        const buffer = await downloadBuffer(file.downloads![0], (received, total) =>
-          emitBytes(`mrpack:${instanceId}`, file.path, received, total, { doneFiles: done, totalFiles: job.files.length })
-        );
-        verifyBuffer(buffer, file.hashes, file.path);
-        const target = resolveTarget(instance.directory, file.path);
-        await mkdir(path.dirname(target), { recursive: true });
-        await writeFile(target, buffer);
+        if (controller.signal.aborted) {
+          throw new Error(tr("Import cancelled", "Импорт отменён"));
+        }
+        const urls = (file.downloads ?? []).filter(Boolean);
+        let buffer: Buffer | null = null;
+        let lastError: unknown;
+        for (let i = 0; i < urls.length; i += 1) {
+          if (controller.signal.aborted) {
+            throw new Error(tr("Import cancelled", "Импорт отменён"));
+          }
+          try {
+            const candidate = await downloadBuffer(
+              urls[i],
+              (received, total) => emitBytes(`mrpack:${instanceId}`, file.path, received, total, { doneFiles: done, totalFiles: job.files.length }),
+              controller.signal
+            );
+            verifyBuffer(candidate, file.hashes, file.path);
+            buffer = candidate;
+            break;
+          } catch (err) {
+            lastError = err;
+            if (controller.signal.aborted) throw err;
+          }
+        }
+        if (!buffer) {
+          throw lastError ?? new Error(tr(`Failed to download ${file.path}`, `Не удалось скачать ${file.path}`));
+        }
+        const stagedTarget = resolveTarget(stageDir, file.path);
+        await mkdir(path.dirname(stagedTarget), { recursive: true });
+        await writeFile(stagedTarget, buffer);
         const rel = file.path.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
         downloaded.push({
           rel,
-          fileName: path.basename(target),
+          fileName: path.basename(stagedTarget),
           sha512: file.hashes?.sha512?.toLowerCase(),
           sha1: file.hashes?.sha1?.toLowerCase()
         });
@@ -597,12 +719,22 @@ export class ModpackService {
         emit(done, job.files.length, file.path);
       });
 
+      if (controller.signal.aborted) {
+        throw new Error(tr("Import cancelled", "Импорт отменён"));
+      }
+
       for (const overridesName of job.overrides) {
-        const overrides = path.join(job.tmp, overridesName);
+        const overrides = resolveOverridesDir(job.tmp, overridesName);
         if (existsSync(overrides)) {
-          await this.copyOverrides(overrides, instance.directory);
+          await this.copyOverrides(overrides, stageDir);
         }
       }
+
+      if (controller.signal.aborted) {
+        throw new Error(tr("Import cancelled", "Импорт отменён"));
+      }
+
+      await this.copyOverrides(stageDir, instance.directory);
 
       await this.linkModrinthEntries(instance.id, downloaded, limit).catch(() => undefined);
       if (job.cfMeta.size) await this.linkCurseForgeEntries(instance.id, downloaded, job.cfMeta).catch(() => undefined);
@@ -616,11 +748,14 @@ export class ModpackService {
       }
       throw error;
     } finally {
+      this.activeImports.delete(instanceId);
       await rm(job.tmp, { recursive: true, force: true });
     }
   }
 
   private async linkCurseForgeEntries(instanceId: string, downloaded: DownloadedEntry[], meta: Map<string, ResolvedPackFile>): Promise<void> {
+    const staleFiles: string[] = [];
+    const disabledRenames: Array<{ from: string; to: string }> = [];
     const updated = await this.store.update((current) => {
       const target = current.instances.find((item) => item.id === instanceId);
       if (!target) throw new Error(tr("Instance not found", "Инстанция не найдена"));
@@ -628,47 +763,93 @@ export class ModpackService {
       for (const entry of downloaded) {
         const info = meta.get(entry.rel);
         if (!info) continue;
+        const folder = dirKindFolder[info.projectType] ?? "mods";
         const lower = entry.fileName.toLowerCase();
-        if (target.mods.some((mod) => (mod.fileName ?? "").replace(/\.disabled$/i, "").toLowerCase() === lower)) continue;
+        const existing = target.mods.find(
+          (mod) =>
+            (mod.provider === "curseforge" && mod.projectId === info.projectId && (mod.projectType ?? "mod") === info.projectType) ||
+            ((mod.projectType ?? "mod") === info.projectType && (mod.fileName ?? "").replace(/\.disabled$/i, "").toLowerCase() === lower)
+        );
+        if (existing) {
+          const wasDisabled = Boolean(existing.fileName && /\.disabled$/i.test(existing.fileName));
+          const oldName = existing.fileName?.replace(/\.disabled$/i, "");
+          if (oldName && oldName.toLowerCase() !== entry.fileName.toLowerCase()) {
+            staleFiles.push(path.join(target.directory, folder, oldName), path.join(target.directory, folder, `${oldName}.disabled`));
+          }
+          if (wasDisabled) {
+            disabledRenames.push({
+              from: path.join(target.directory, folder, entry.fileName),
+              to: path.join(target.directory, folder, `${entry.fileName}.disabled`)
+            });
+            existing.fileName = `${entry.fileName}.disabled`;
+          } else {
+            existing.fileName = entry.fileName;
+          }
+          existing.provider = "curseforge";
+          existing.projectId = info.projectId;
+          existing.versionId = info.fileId;
+          existing.name = info.name;
+          existing.slug = info.slug ?? existing.slug;
+          existing.iconUrl = info.iconUrl ?? existing.iconUrl;
+          existing.installedAt = now;
+          continue;
+        }
         target.mods.push({ id: randomUUID(), provider: "curseforge", projectId: info.projectId, versionId: info.fileId, name: info.name, slug: info.slug, fileName: entry.fileName, iconUrl: info.iconUrl, installedAt: now, status: "installed", projectType: info.projectType });
       }
       target.updatedAt = now;
       return target;
     });
+    for (const pair of disabledRenames) {
+      await rm(pair.to, { force: true }).catch(() => undefined);
+      await rename(pair.from, pair.to).catch(() => undefined);
+    }
+    for (const file of staleFiles) {
+      await rm(file, { force: true }).catch(() => undefined);
+    }
     await writeContentManifest(updated.directory, updated.mods);
   }
 
-  private async copyOverrides(from: string, instanceDir: string): Promise<void> {
+  private async copyOverrides(from: string, instanceDir: string, prefix = ""): Promise<void> {
     const entries = await readdir(from, { withFileTypes: true });
     for (const entry of entries) {
-      const rel = entry.name;
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
       const target = resolveTarget(instanceDir, rel);
-      const src = path.join(from, rel);
+      const src = path.join(from, entry.name);
       if (entry.isDirectory()) {
         await mkdir(target, { recursive: true });
-        await this.copyOverrides(src, path.join(instanceDir, rel));
-      } else {
+        await this.copyOverrides(src, instanceDir, rel);
+      } else if (entry.isFile()) {
         await mkdir(path.dirname(target), { recursive: true });
-        await cp(src, target);
+        await cp(src, target, { force: true });
       }
     }
+  }
+
+  private chunkIds(ids: string[], size = 60): string[][] {
+    const chunks: string[][] = [];
+    for (let i = 0; i < ids.length; i += size) {
+      chunks.push(ids.slice(i, i + size));
+    }
+    return chunks;
   }
 
   private async fetchVersionsByIds(ids: string[]): Promise<Map<string, ExportVersion>> {
     const out = new Map<string, ExportVersion>();
     if (!ids.length) return out;
-    try {
-      const response = await fetch(`https://api.modrinth.com/v2/versions?ids=${encodeURIComponent(JSON.stringify(ids))}`, {
-        headers: { "User-Agent": "lynapp" },
-        signal: AbortSignal.timeout(30000)
-      });
-      if (!response.ok) return out;
-      const body = (await response.json()) as ExportVersion[];
-      for (const version of body ?? []) {
-        if (version?.id) out.set(version.id, version);
+    await Promise.all(this.chunkIds(ids).map(async (chunk) => {
+      try {
+        const response = await fetch(`https://api.modrinth.com/v2/versions?ids=${encodeURIComponent(JSON.stringify(chunk))}`, {
+          headers: { "User-Agent": "lynapp" },
+          signal: AbortSignal.timeout(30000)
+        });
+        if (!response.ok) return;
+        const body = (await response.json()) as ExportVersion[];
+        for (const version of body ?? []) {
+          if (version?.id) out.set(version.id, version);
+        }
+      } catch {
       }
-    } catch {
-    }
+    }));
     return out;
   }
 
@@ -732,18 +913,20 @@ export class ModpackService {
   private async fetchProjects(ids: string[]): Promise<Map<string, MrpackProject>> {
     const out = new Map<string, MrpackProject>();
     if (!ids.length) return out;
-    try {
-      const response = await fetch(`https://api.modrinth.com/v2/projects?ids=${encodeURIComponent(JSON.stringify(ids))}`, {
-        headers: { "User-Agent": "lynapp" },
-        signal: AbortSignal.timeout(20000)
-      });
-      if (!response.ok) return out;
-      const body = (await response.json()) as MrpackProject[];
-      for (const project of body ?? []) {
-        if (project?.id) out.set(project.id, project);
+    await Promise.all(this.chunkIds(ids).map(async (chunk) => {
+      try {
+        const response = await fetch(`https://api.modrinth.com/v2/projects?ids=${encodeURIComponent(JSON.stringify(chunk))}`, {
+          headers: { "User-Agent": "lynapp" },
+          signal: AbortSignal.timeout(20000)
+        });
+        if (!response.ok) return;
+        const body = (await response.json()) as MrpackProject[];
+        for (const project of body ?? []) {
+          if (project?.id) out.set(project.id, project);
+        }
+      } catch {
       }
-    } catch {
-    }
+    }));
     return out;
   }
 
@@ -776,6 +959,7 @@ export class ModpackService {
     }
 
     const staleFiles: string[] = [];
+    const disabledRenames: Array<{ from: string; to: string }> = [];
     const updated = await this.store.update((current) => {
       const target = current.instances.find((item) => item.id === instanceId);
       if (!target) throw new Error(tr("Instance not found", "Инстанция не найдена"));
@@ -784,16 +968,41 @@ export class ModpackService {
         const projectType = dirProjectType[folder.toLowerCase()];
         if (!projectType) continue;
         const fileName = rel.split("/").pop() ?? rel;
-        const existing = target.mods.find(
-          (mod) => mod.provider === "modrinth" && mod.projectId === meta.projectId && (mod.projectType ?? "mod") === projectType
-        );
-        if (existing) {
-          const oldName = existing.fileName?.replace(/\.disabled$/i, "");
-          if (oldName && oldName.toLowerCase() !== fileName.toLowerCase()) {
-            staleFiles.push(path.join(target.directory, folder, oldName), path.join(target.directory, folder, `${oldName}.disabled`));
+        const fileBase = fileName.replace(/\.disabled$/i, "");
+        const matchingIndices: number[] = [];
+        for (let i = 0; i < target.mods.length; i++) {
+          const mod = target.mods[i];
+          if ((mod.projectType ?? "mod") !== projectType) continue;
+          const sameProject = mod.provider === "modrinth" && mod.projectId === meta.projectId;
+          const sameFile = Boolean(mod.fileName && mod.fileName.replace(/\.disabled$/i, "").toLowerCase() === fileBase.toLowerCase());
+          if (sameProject || sameFile) matchingIndices.push(i);
+        }
+        const existing = matchingIndices.length ? target.mods[matchingIndices[0]] : undefined;
+        if (matchingIndices.length > 1) {
+          for (let k = matchingIndices.length - 1; k >= 1; k--) {
+            target.mods.splice(matchingIndices[k], 1);
           }
+        }
+        if (existing) {
+          const wasDisabled = Boolean((existing.fileName && /\.disabled$/i.test(existing.fileName)) || /\.disabled$/i.test(fileName));
+          const oldBase = existing.fileName?.replace(/\.disabled$/i, "");
+          if (oldBase && oldBase.toLowerCase() !== fileBase.toLowerCase()) {
+            staleFiles.push(path.join(target.directory, folder, oldBase), path.join(target.directory, folder, `${oldBase}.disabled`));
+          }
+          if (wasDisabled) {
+            if (!/\.disabled$/i.test(fileName)) {
+              disabledRenames.push({
+                from: path.join(target.directory, folder, fileName),
+                to: path.join(target.directory, folder, `${fileBase}.disabled`)
+              });
+            }
+            existing.fileName = `${fileBase}.disabled`;
+          } else {
+            existing.fileName = fileBase;
+          }
+          existing.provider = "modrinth";
+          existing.projectId = meta.projectId;
           existing.versionId = meta.versionId;
-          existing.fileName = fileName;
           existing.name = meta.name;
           existing.slug = meta.slug ?? existing.slug;
           existing.iconUrl = meta.iconUrl ?? existing.iconUrl;
@@ -817,6 +1026,10 @@ export class ModpackService {
       target.updatedAt = new Date().toISOString();
       return target;
     });
+    for (const pair of disabledRenames) {
+      await rm(pair.to, { force: true }).catch(() => undefined);
+      await rename(pair.from, pair.to).catch(() => undefined);
+    }
     for (const file of staleFiles) {
       await rm(file, { force: true }).catch(() => undefined);
     }

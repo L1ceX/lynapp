@@ -1,13 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import { clipboard, nativeImage } from "electron";
 import { existsSync } from "node:fs";
 import { copyFile, cp, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { ContentImportResult, InstalledMod, LauncherInstance, LocalContentItem, LocalContentKind } from "@shared/types";
+import { inflateRawSync } from "node:zlib";
+import type { ContentImportResult, InstalledMod, LauncherInstance, LocalContentItem, LocalContentKind, ModProvider, ScreenshotInfo } from "@shared/types";
+import { curseForgeAvailable, projectTypeForClass, type CurseForgeService } from "./curseforge";
 import { writeContentManifest } from "./manifest";
 import { getTarPath } from "../paths";
-import { sha1Cached } from "./hashes";
+import { cfFingerprintCached, sha1Cached } from "./hashes";
 import { JsonStore } from "../store";
 import { tr } from "../i18n";
 
@@ -37,13 +40,14 @@ const kindOrder: LocalContentKind[] = ["mod", "resourcepack", "shader", "datapac
 
 const execFileAsync = promisify(execFile);
 
-const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.4" };
+const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.5" };
 const unknownRecheckMs = 3 * 24 * 60 * 60 * 1000;
 
 interface HashCacheEntry {
   sha1: string;
   projectId: string | null;
   checkedAt: number;
+  cfChecked?: boolean;
 }
 
 interface UnlinkedFile {
@@ -198,13 +202,24 @@ async function readModIcon(archive: string, entries: string[]): Promise<{ ext: s
     }
   }
 
-  const quiltEntry = byLower.get("quilt.json");
+  const quiltEntry = byLower.get("quilt.mod.json") ?? byLower.get("quilt.json");
   if (quiltEntry) {
     const raw = await tarRead(archive, quiltEntry);
     if (raw) {
       try {
-        const meta = JSON.parse(raw.toString("utf8")) as { icon?: unknown; metadata?: { icon?: unknown } };
-        const icon = typeof meta.icon === "string" ? meta.icon : typeof meta.metadata?.icon === "string" ? meta.metadata.icon : null;
+        const meta = JSON.parse(raw.toString("utf8")) as {
+          icon?: unknown;
+          metadata?: { icon?: unknown };
+          quilt_loader?: { metadata?: { icon?: unknown } };
+        };
+        const icon =
+          typeof meta.icon === "string"
+            ? meta.icon
+            : typeof meta.metadata?.icon === "string"
+              ? meta.metadata.icon
+              : typeof meta.quilt_loader?.metadata?.icon === "string"
+                ? meta.quilt_loader.metadata.icon
+                : null;
         if (icon) {
           const hit = await readArchiveIcon(archive, entries, icon);
           if (hit) return hit;
@@ -214,13 +229,15 @@ async function readModIcon(archive: string, entries: string[]): Promise<{ ext: s
     }
   }
 
-  const modsToml = byLower.get("meta-inf/mods.toml");
-  if (modsToml) {
-    const raw = await tarRead(archive, modsToml);
-    const logo = raw ? /logoFile\s*=\s*"([^"]+)"/.exec(raw.toString("utf8"))?.[1] : null;
-    if (logo) {
-      const hit = await readArchiveIcon(archive, entries, logo);
-      if (hit) return hit;
+  for (const tomlName of ["meta-inf/neoforge.mods.toml", "meta-inf/mods.toml"]) {
+    const modsToml = byLower.get(tomlName);
+    if (modsToml) {
+      const raw = await tarRead(archive, modsToml);
+      const logo = raw ? /logoFile\s*=\s*"([^"]+)"/.exec(raw.toString("utf8"))?.[1] : null;
+      if (logo) {
+        const hit = await readArchiveIcon(archive, entries, logo);
+        if (hit) return hit;
+      }
     }
   }
 
@@ -230,6 +247,200 @@ async function readModIcon(archive: string, entries: string[]): Promise<{ ext: s
   }
 
   return null;
+}
+
+interface JarModMeta {
+  modIds: string[];
+  provides: string[];
+  depends: string[];
+}
+
+const jarMetaCache = new Map<string, JarModMeta>();
+const BUILTIN_MOD_IDS = new Set([
+  "minecraft",
+  "java",
+  "fabricloader",
+  "fabric_loader",
+  "fabric-loader",
+  "quilt_loader",
+  "quilt-loader",
+  "forge",
+  "neoforge",
+  "fml",
+  "mixinextras"
+]);
+
+async function readZipFiles(filePath: string, wantedLower: Set<string>): Promise<Map<string, Buffer>> {
+  const result = new Map<string, Buffer>();
+  const handle = await open(filePath, "r");
+  try {
+    const size = (await handle.stat()).size;
+    const tailSize = Math.min(size, 65557);
+    const tail = Buffer.alloc(tailSize);
+    await handle.read(tail, 0, tailSize, size - tailSize);
+    let eocd = -1;
+    for (let i = tailSize - 22; i >= 0; i -= 1) {
+      if (tail.readUInt32LE(i) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) return result;
+    const count = tail.readUInt16LE(eocd + 10);
+    const dirSize = tail.readUInt32LE(eocd + 12);
+    const dirOffset = tail.readUInt32LE(eocd + 16);
+    if (dirOffset === 0xffffffff || dirSize === 0xffffffff || dirOffset + dirSize > size) return result;
+    const dir = Buffer.alloc(dirSize);
+    await handle.read(dir, 0, dirSize, dirOffset);
+    let pos = 0;
+    for (let i = 0; i < count && pos + 46 <= dir.length; i += 1) {
+      if (dir.readUInt32LE(pos) !== 0x02014b50) break;
+      const flags = dir.readUInt16LE(pos + 8);
+      const method = dir.readUInt16LE(pos + 10);
+      const compSize = dir.readUInt32LE(pos + 20);
+      const uncompSize = dir.readUInt32LE(pos + 24);
+      const nameLength = dir.readUInt16LE(pos + 28);
+      const extraLength = dir.readUInt16LE(pos + 30);
+      const commentLength = dir.readUInt16LE(pos + 32);
+      const localOffset = dir.readUInt32LE(pos + 42);
+      const rawName = dir.subarray(pos + 46, pos + 46 + nameLength);
+      const name = (flags & 0x800 ? rawName.toString("utf8") : rawName.toString("latin1")).replace(/\\/g, "/").replace(/^\.\//, "");
+      const lower = name.toLowerCase();
+      pos += 46 + nameLength + extraLength + commentLength;
+      if (!wantedLower.has(lower) || compSize > 2 * 1024 * 1024 || uncompSize > 4 * 1024 * 1024) continue;
+      if (localOffset + 30 > size) continue;
+      const localHdr = Buffer.alloc(30);
+      await handle.read(localHdr, 0, 30, localOffset);
+      if (localHdr.readUInt32LE(0) !== 0x04034b50) continue;
+      const lNameLen = localHdr.readUInt16LE(26);
+      const lExtraLen = localHdr.readUInt16LE(28);
+      const dataStart = localOffset + 30 + lNameLen + lExtraLen;
+      if (dataStart + compSize > size) continue;
+      const compBuf = Buffer.alloc(compSize);
+      await handle.read(compBuf, 0, compSize, dataStart);
+      if (method === 0) {
+        result.set(lower, compBuf);
+      } else if (method === 8) {
+        try {
+          result.set(lower, inflateRawSync(compBuf));
+        } catch {
+        }
+      }
+    }
+    return result;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readJarModMeta(fullPath: string, size: number, mtimeMs: number): Promise<JarModMeta> {
+  const key = `${fullPath}|${size}|${Math.round(mtimeMs)}`;
+  const cached = jarMetaCache.get(key);
+  if (cached) return cached;
+
+  const modIds = new Set<string>();
+  const provides = new Set<string>();
+  const depends = new Set<string>();
+  const addId = (set: Set<string>, id: unknown): void => {
+    if (typeof id !== "string") return;
+    const clean = id.trim().toLowerCase();
+    if (clean && !BUILTIN_MOD_IDS.has(clean)) set.add(clean);
+  };
+
+  try {
+    const files = await readZipFiles(
+      fullPath,
+      new Set(["fabric.mod.json", "quilt.mod.json", "meta-inf/mods.toml", "meta-inf/neoforge.mods.toml", "mcmod.info"])
+    );
+
+    const fabricBuf = files.get("fabric.mod.json");
+    if (fabricBuf) {
+      try {
+        const parsed = JSON.parse(fabricBuf.toString("utf8").replace(/\r?\n/g, " ")) as {
+          id?: string;
+          provides?: unknown[];
+          depends?: Record<string, unknown>;
+          jars?: Array<{ file?: string }>;
+        };
+        addId(modIds, parsed.id);
+        if (Array.isArray(parsed.provides)) {
+          for (const p of parsed.provides) {
+            if (typeof p === "string") addId(provides, p);
+            else if (p && typeof p === "object" && "id" in p) addId(provides, (p as { id?: string }).id);
+          }
+        }
+        if (parsed.depends && typeof parsed.depends === "object") {
+          for (const depKey of Object.keys(parsed.depends)) {
+            addId(depends, depKey);
+          }
+        }
+      } catch {
+      }
+    }
+
+    const quiltBuf = files.get("quilt.mod.json");
+    if (quiltBuf) {
+      try {
+        const parsed = JSON.parse(quiltBuf.toString("utf8")) as {
+          quilt_loader?: {
+            id?: string;
+            provides?: Array<string | { id?: string }>;
+            depends?: Array<string | { id?: string; optional?: boolean }>;
+          };
+        };
+        const ql = parsed.quilt_loader;
+        if (ql) {
+          addId(modIds, ql.id);
+          if (Array.isArray(ql.provides)) {
+            for (const p of ql.provides) {
+              addId(provides, typeof p === "string" ? p : p?.id);
+            }
+          }
+          if (Array.isArray(ql.depends)) {
+            for (const d of ql.depends) {
+              if (typeof d === "string") addId(depends, d);
+              else if (d && !d.optional) addId(depends, d.id);
+            }
+          }
+        }
+      } catch {
+      }
+    }
+
+    for (const tomlName of ["meta-inf/mods.toml", "meta-inf/neoforge.mods.toml"]) {
+      const tomlBuf = files.get(tomlName);
+      if (!tomlBuf) continue;
+      const text = tomlBuf.toString("utf8");
+      const sections = text.split(/\[\[\s*(?:mods|dependencies\.[^\]]+)\s*\]\]/i);
+      const headers = [...text.matchAll(/\[\[\s*(mods|dependencies\.[^\]]+)\s*\]\]/gi)].map((m) => m[1].toLowerCase());
+      for (let i = 0; i < headers.length; i += 1) {
+        const body = sections[i + 1] ?? "";
+        const modIdMatch = /(?:^|\n)\s*modId\s*=\s*["']([^"']+)["']/i.exec(body);
+        if (!modIdMatch) continue;
+        const id = modIdMatch[1];
+        if (headers[i] === "mods") {
+          addId(modIds, id);
+        } else {
+          const mandatory = /(?:^|\n)\s*mandatory\s*=\s*(true|false)/i.exec(body);
+          const typeField = /(?:^|\n)\s*type\s*=\s*["']([^"']+)["']/i.exec(body);
+          const isReq = mandatory ? mandatory[1].toLowerCase() === "true" : (!typeField || typeField[1].toLowerCase() === "required");
+          if (isReq) addId(depends, id);
+        }
+      }
+    }
+  } catch {
+  }
+
+  for (const id of modIds) depends.delete(id);
+  for (const id of provides) depends.delete(id);
+
+  const meta: JarModMeta = {
+    modIds: [...modIds],
+    provides: [...provides],
+    depends: [...depends]
+  };
+  jarMetaCache.set(key, meta);
+  return meta;
 }
 
 function stripDisabled(fileName: string): { base: string; enabled: boolean } {
@@ -261,7 +472,10 @@ async function entrySize(target: string): Promise<number> {
 }
 
 export class ContentService {
-  constructor(private readonly store: JsonStore) {}
+  constructor(
+    private readonly store: JsonStore,
+    private readonly curseforge?: CurseForgeService
+  ) {}
 
   async list(instanceId: string): Promise<LocalContentItem[]> {
     const data = await this.store.getData();
@@ -271,7 +485,6 @@ export class ContentService {
       throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
 
-    await this.pruneMissing(instance);
     const items: LocalContentItem[] = [];
     const seen = new Set<string>();
 
@@ -308,17 +521,18 @@ export class ContentService {
           size,
           modified: fileStat.mtime.toISOString(),
           enabled,
-          source: record ? "modrinth" : "manual"
+          source: record ? (record.provider === "curseforge" ? "curseforge" : "modrinth") : "manual"
         });
       }
     }
 
+    const seenWorld = new Set<string>();
     for (const { world, dir } of await this.worldDatapackDirs(instance.directory)) {
       const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
       for (const entry of entries) {
         const { base, enabled } = stripDisabled(entry.name);
         const lowerBase = base.toLowerCase();
-        if (seen.has(`datapack:${lowerBase}`)) {
+        if (seenWorld.has(`${world}:${lowerBase}`)) {
           continue;
         }
         if (!entry.isDirectory() && !lowerBase.endsWith(".zip")) {
@@ -329,16 +543,18 @@ export class ContentService {
         const record = instance.mods.find(
           (mod) => (mod.projectType ?? "mod") === "datapack" && mod.fileName !== undefined && normalizeName(mod.fileName) === lowerBase
         );
+        seenWorld.add(`${world}:${lowerBase}`);
         seen.add(`datapack:${lowerBase}`);
         items.push({
           kind: "datapack",
           fileName: entry.name,
           displayName: `${record?.name ?? base} (${world})`,
-          iconUrl: undefined,
+          world,
+          iconUrl: await this.resolveIcon(instance.directory, instanceId, "datapack", dir, entry.name, entry.isDirectory(), fileStat, record),
           size: await entrySize(fullPath).catch(() => fileStat.size),
           modified: fileStat.mtime.toISOString(),
           enabled,
-          source: record ? "modrinth" : "manual"
+          source: record ? (record.provider === "curseforge" ? "curseforge" : "modrinth") : "manual"
         });
       }
     }
@@ -361,10 +577,144 @@ export class ContentService {
       });
     }
 
+    await this.annotateModRelations(instance, items);
+
     return items.sort((a, b) => kindOrder.indexOf(a.kind) - kindOrder.indexOf(b.kind) || a.displayName.localeCompare(b.displayName));
   }
 
-  async toggle(instanceId: string, fileName: string, kind?: LocalContentKind): Promise<LocalContentItem[]> {
+  private async annotateModRelations(instance: LauncherInstance, items: LocalContentItem[]): Promise<void> {
+    const modItems = items.filter((item) => item.kind === "mod" && item.source !== "missing");
+    if (modItems.length < 2) return;
+
+    const modsDir = path.join(instance.directory, kindDirs.mod);
+    const metaByFile = new Map<string, JarModMeta>();
+    const recordByFile = new Map<string, InstalledMod | undefined>();
+
+    for (const item of modItems) {
+      const lowerBase = normalizeName(item.fileName);
+      const record = instance.mods.find(
+        (mod) => (mod.projectType ?? "mod") === "mod" && mod.fileName !== undefined && normalizeName(mod.fileName) === lowerBase
+      );
+      recordByFile.set(item.fileName, record);
+      const fullPath = path.join(modsDir, item.fileName);
+      const mtimeMs = Date.parse(item.modified) || 0;
+      metaByFile.set(item.fileName, await readJarModMeta(fullPath, item.size, mtimeMs));
+    }
+
+    for (let i = 0; i < modItems.length; i += 1) {
+      const a = modItems[i];
+      if (!a.enabled) continue;
+      const recA = recordByFile.get(a.fileName);
+      const metaA = metaByFile.get(a.fileName);
+      const primaryIdA = metaA?.modIds[0];
+
+      for (let j = i + 1; j < modItems.length; j += 1) {
+        const b = modItems[j];
+        if (!b.enabled) continue;
+        const recB = recordByFile.get(b.fileName);
+        const metaB = metaByFile.get(b.fileName);
+        const primaryIdB = metaB?.modIds[0];
+
+        const sameProject = Boolean(recA?.projectId && recB?.projectId && recA.provider === recB.provider && recA.projectId === recB.projectId);
+        const sameModId = Boolean(primaryIdA && primaryIdB && primaryIdA === primaryIdB);
+        if (sameProject || sameModId) {
+          if (!a.duplicateOf) a.duplicateOf = b.fileName;
+          if (!b.duplicateOf) b.duplicateOf = a.fileName;
+        }
+      }
+    }
+
+    for (const providerItem of modItems) {
+      const recP = recordByFile.get(providerItem.fileName);
+      const metaP = metaByFile.get(providerItem.fileName);
+      const offeredIds = new Set<string>([
+        ...(metaP?.modIds ?? []),
+        ...(metaP?.provides ?? [])
+      ]);
+      if (recP?.slug) offeredIds.add(recP.slug.toLowerCase());
+      if (recP?.projectId === "P7dR8mSH" || recP?.projectId === "306612" || offeredIds.has("fabric-api") || offeredIds.has("fabric")) {
+        offeredIds.add("fabric");
+        offeredIds.add("fabric-api");
+      }
+      if (!offeredIds.size) continue;
+
+      const dependents: string[] = [];
+      for (const consumer of modItems) {
+        if (consumer === providerItem || !consumer.enabled) continue;
+        const metaC = metaByFile.get(consumer.fileName);
+        if (!metaC) continue;
+        const needsIt = metaC.depends.some((dep) => offeredIds.has(dep));
+        if (needsIt) {
+          dependents.push(consumer.displayName);
+        }
+      }
+      if (dependents.length > 0) {
+        providerItem.dependents = [...new Set(dependents)];
+      }
+    }
+  }
+
+  async listScreenshots(instanceId: string): Promise<ScreenshotInfo[]> {
+    const data = await this.store.getData();
+    const instance = data.instances.find((item) => item.id === instanceId);
+    if (!instance) {
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
+    }
+    const dir = path.join(instance.directory, "screenshots");
+    if (!existsSync(dir)) return [];
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    const out: ScreenshotInfo[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !/\.(png|jpg|jpeg|webp)$/i.test(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      const st = await stat(full).catch(() => null);
+      if (!st) continue;
+      try {
+        const buf = await readFile(full);
+        const ext = path.extname(entry.name).toLowerCase();
+        out.push({
+          fileName: entry.name,
+          size: st.size,
+          modified: st.mtime.toISOString(),
+          dataUrl: toDataUrl(ext, buf)
+        });
+      } catch {
+      }
+    }
+    out.sort((a, b) => b.modified.localeCompare(a.modified));
+    return out;
+  }
+
+  async copyScreenshot(instanceId: string, fileName: string): Promise<boolean> {
+    const safe = path.basename(fileName);
+    if (!safe || safe !== fileName) return false;
+    const data = await this.store.getData();
+    const instance = data.instances.find((item) => item.id === instanceId);
+    if (!instance) return false;
+    const full = path.join(instance.directory, "screenshots", safe);
+    if (!existsSync(full)) return false;
+    const img = nativeImage.createFromPath(full);
+    if (img.isEmpty()) return false;
+    clipboard.writeImage(img);
+    return true;
+  }
+
+  async deleteScreenshot(instanceId: string, fileName: string): Promise<ScreenshotInfo[]> {
+    const safe = path.basename(fileName);
+    if (!safe || safe !== fileName) {
+      throw new Error(tr("Invalid file name", "Недопустимое имя файла"));
+    }
+    const data = await this.store.getData();
+    const instance = data.instances.find((item) => item.id === instanceId);
+    if (!instance) {
+      throw new Error(tr("Instance not found", "Инстанция не найдена"));
+    }
+    const full = path.join(instance.directory, "screenshots", safe);
+    await rm(full, { force: true });
+    return this.listScreenshots(instanceId);
+  }
+
+  async toggle(instanceId: string, fileName: string, kind?: LocalContentKind, world?: string): Promise<LocalContentItem[]> {
     const data = await this.store.getData();
     const instance = data.instances.find((item) => item.id === instanceId);
 
@@ -372,8 +722,7 @@ export class ContentService {
       throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
 
-    const locations = await this.findEntries(instance.directory, fileName, kind);
-    const location = locations[0];
+    const location = await this.findEntry(instance.directory, fileName, kind, world);
 
     if (!location) {
       throw new Error(tr(`File not found: ${fileName}`, `Файл не найден: ${fileName}`));
@@ -381,10 +730,41 @@ export class ContentService {
 
     const { enabled } = stripDisabled(location.name);
     const nextName = enabled ? `${location.name}${disabledSuffix}` : stripDisabled(location.name).base;
-    for (const item of locations) {
-      const itemNext = enabled ? `${stripDisabled(item.name).base}${disabledSuffix}` : stripDisabled(item.name).base;
-      if (itemNext !== item.name) {
-        await rename(path.join(item.dir, item.name), path.join(item.dir, itemNext));
+    const destPath = path.join(location.dir, nextName);
+    const destStat = await stat(destPath).catch(() => null);
+    if (destStat) {
+      if (destStat.isDirectory()) {
+        const children = await readdir(destPath).catch(() => ["_nonempty"]);
+        if (children.length === 0) {
+          await rm(destPath, { recursive: true, force: true });
+        } else {
+          throw new Error(tr(`Cannot toggle ${location.name}: ${nextName} already exists`, `Не удалось переключить ${location.name}: ${nextName} уже существует`));
+        }
+      } else {
+        throw new Error(tr(`Cannot toggle ${location.name}: ${nextName} already exists`, `Не удалось переключить ${location.name}: ${nextName} уже существует`));
+      }
+    }
+    await rename(path.join(location.dir, location.name), destPath);
+
+    let datapackDirs: string[] = [];
+    if (location.kind === "datapack") {
+      datapackDirs = [
+        path.join(instance.directory, kindDirs.datapack),
+        ...(await this.worldDatapackDirs(instance.directory)).map((w) => w.dir)
+      ];
+    }
+
+    const { base: toggledBase } = stripDisabled(location.name);
+    let anotherEnabledCopy = false;
+    if (location.kind === "datapack") {
+      for (const dir of datapackDirs) {
+        if (dir === location.dir) continue;
+        try {
+          await stat(path.join(dir, toggledBase));
+          anotherEnabledCopy = true;
+          break;
+        } catch {
+        }
       }
     }
 
@@ -399,7 +779,11 @@ export class ContentService {
       );
 
       if (record) {
-        record.fileName = nextName;
+        if (location.kind === "datapack" && anotherEnabledCopy) {
+          record.fileName = toggledBase;
+        } else {
+          record.fileName = nextName;
+        }
       }
 
       target.updatedAt = new Date().toISOString();
@@ -410,7 +794,7 @@ export class ContentService {
     return this.list(instanceId);
   }
 
-  async remove(instanceId: string, fileName: string, kind?: LocalContentKind): Promise<LocalContentItem[]> {
+  async remove(instanceId: string, fileName: string, kind?: LocalContentKind, world?: string): Promise<LocalContentItem[]> {
     const data = await this.store.getData();
     const instance = data.instances.find((item) => item.id === instanceId);
 
@@ -418,8 +802,7 @@ export class ContentService {
       throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
 
-    const locations = await this.findEntries(instance.directory, fileName, kind);
-    const location = locations[0];
+    const location = await this.findEntry(instance.directory, fileName, kind, world);
 
     if (!location) {
       const wanted = fileName.toLowerCase().replace(/\.disabled$/, "");
@@ -448,21 +831,25 @@ export class ContentService {
       return this.list(instanceId);
     }
 
-    for (const item of locations) {
-      await rm(path.join(item.dir, item.name), { recursive: true, force: true });
-    }
+    await rm(path.join(location.dir, location.name), { recursive: true, force: true });
 
-    try {
-      const iconsDir = path.join(instance.directory, ".launcher", "icons");
-      const prefix = sanitizeIconPart(`${location.kind}-${normalizeName(location.name)}-`);
-      const cached = await readdir(iconsDir);
+    const remainingName = location.kind === "datapack"
+      ? await this.findRemainingDatapackName(instance.directory, location.name, location.dir)
+      : null;
 
-      for (const file of cached) {
-        if (file.startsWith(prefix)) {
-          await rm(path.join(iconsDir, file), { force: true });
+    if (!remainingName) {
+      try {
+        const iconsDir = path.join(instance.directory, ".launcher", "icons");
+        const prefix = sanitizeIconPart(`${location.kind}-${normalizeName(location.name)}-`);
+        const cached = await readdir(iconsDir);
+
+        for (const file of cached) {
+          if (file.startsWith(prefix)) {
+            await rm(path.join(iconsDir, file), { force: true });
+          }
         }
+      } catch {
       }
-    } catch {
     }
 
     await this.store.update((current) => {
@@ -471,10 +858,17 @@ export class ContentService {
         throw new Error(tr("Instance not found", "Инстанция не найдена"));
       }
 
-      target.mods = target.mods.filter(
-        (mod) =>
-          !((mod.projectType ?? "mod") === location.kind && mod.fileName !== undefined && normalizeName(mod.fileName) === normalizeName(location.name))
-      );
+      if (remainingName) {
+        const existing = target.mods.find(
+          (mod) => (mod.projectType ?? "mod") === location.kind && mod.fileName !== undefined && normalizeName(mod.fileName) === normalizeName(location.name)
+        );
+        if (existing) existing.fileName = remainingName;
+      } else {
+        target.mods = target.mods.filter(
+          (mod) =>
+            !((mod.projectType ?? "mod") === location.kind && mod.fileName !== undefined && normalizeName(mod.fileName) === normalizeName(location.name))
+        );
+      }
       target.updatedAt = new Date().toISOString();
       return target;
     });
@@ -499,13 +893,13 @@ export class ContentService {
         result.skipped.push({ fileName: name, reason: "failed" });
         continue;
       }
-      const lower = name.toLowerCase();
+      const baseLower = stripDisabled(name).base.toLowerCase();
       if (sourceStat.isDirectory()) {
         const entries = await readdir(source, { withFileTypes: true }).catch(() => []);
         pending.push({ source, name, isDir: true, kind: classifyEntries(entries.map((entry) => entry.isDirectory() ? `${entry.name}/` : entry.name)) });
-      } else if (lower.endsWith(".jar")) {
+      } else if (baseLower.endsWith(".jar")) {
         pending.push({ source, name, isDir: false, kind: "mod" });
-      } else if (lower.endsWith(".zip")) {
+      } else if (baseLower.endsWith(".zip")) {
         pending.push({ source, name, isDir: false, kind: classifyEntries(await listZipNames(source).catch(() => [])) });
       } else {
         result.skipped.push({ fileName: name, reason: "unsupported" });
@@ -519,28 +913,49 @@ export class ContentService {
         const sha1 = await sha1File(item.source).catch(() => "");
         if (sha1) hashes.set(item.source, sha1);
       }
-      try {
-        const response = await fetch("https://api.modrinth.com/v2/version_files", {
-          method: "POST",
-          headers: { ...modrinthHeaders, "Content-Type": "application/json" },
-          body: JSON.stringify({ hashes: [...new Set(hashes.values())], algorithm: "sha1" }),
-          signal: AbortSignal.timeout(20000)
-        });
-        if (response.ok) {
-          const versions = (await response.json()) as Record<string, { loaders?: string[] }>;
-          for (const item of unknown) {
-            const loaders = versions[hashes.get(item.source) ?? ""]?.loaders;
-            if (!loaders) continue;
-            item.kind = loaders.includes("datapack")
-              ? "datapack"
-              : loaders.includes("minecraft")
-                ? "resourcepack"
-                : loaders.some((loader) => ["iris", "optifine", "canvas", "vanilla"].includes(loader))
-                  ? "shader"
-                  : "mod";
+      if (hashes.size > 0) {
+        try {
+          const response = await fetch("https://api.modrinth.com/v2/version_files", {
+            method: "POST",
+            headers: { ...modrinthHeaders, "Content-Type": "application/json" },
+            body: JSON.stringify({ hashes: [...new Set(hashes.values())], algorithm: "sha1" }),
+            signal: AbortSignal.timeout(20000)
+          });
+          if (response.ok) {
+            const versions = (await response.json()) as Record<string, { loaders?: string[] }>;
+            for (const item of unknown) {
+              const loaders = versions[hashes.get(item.source) ?? ""]?.loaders;
+              if (!loaders) continue;
+              item.kind = loaders.includes("datapack")
+                ? "datapack"
+                : loaders.includes("minecraft")
+                  ? "resourcepack"
+                  : loaders.some((loader) => ["iris", "optifine", "canvas", "vanilla"].includes(loader))
+                    ? "shader"
+                    : "mod";
+            }
           }
+        } catch {
         }
-      } catch {
+      }
+
+      const stillUnknown = unknown.filter((item) => !item.kind);
+      if (stillUnknown.length && this.curseforge && curseForgeAvailable) {
+        const fps = new Map<string, number>();
+        for (const item of stillUnknown) {
+          const fp = await cfFingerprintCached(item.source).catch(() => 0);
+          if (fp > 0) fps.set(item.source, fp);
+        }
+        const matches = await this.curseforge.matchFingerprints([...fps.values()]);
+        const modIds = [...new Set([...matches.values()].map((m) => m.id))];
+        const mods = await this.curseforge.getModsByIds(modIds);
+        for (const item of stillUnknown) {
+          const match = matches.get(fps.get(item.source) ?? 0);
+          if (!match) continue;
+          const mod = mods.get(match.id);
+          const pt = projectTypeForClass(mod?.classId, "resourcepack");
+          if (pt !== "modpack") item.kind = pt;
+        }
       }
     }
 
@@ -604,8 +1019,6 @@ export class ContentService {
       throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
 
-    await this.pruneMissing(instance);
-
     const cachePath = path.join(instance.directory, ".launcher", "hash-cache.json");
     let cache: Record<string, HashCacheEntry> = {};
     try {
@@ -619,23 +1032,29 @@ export class ContentService {
         .map((mod) => `${mod.projectType ?? "mod"}:${normalizeName(mod.fileName as string)}`)
     );
     const unlinked: UnlinkedFile[] = [];
+    const seenUnlinked = new Set<string>();
+    const worldDirs = (await this.worldDatapackDirs(instance.directory)).map((w) => w.dir);
     for (const kind of kindOrder) {
-      const dir = path.join(instance.directory, kindDirs[kind]);
-      const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
-      for (const entry of entries) {
-        if (!entry.isFile()) {
-          continue;
+      const dirs = [path.join(instance.directory, kindDirs[kind]), ...(kind === "datapack" ? worldDirs : [])];
+      for (const dir of dirs) {
+        const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          if (!entry.isFile()) {
+            continue;
+          }
+          const { base } = stripDisabled(entry.name);
+          const lowerBase = base.toLowerCase();
+          if (!kindExtensions[kind].some((ext) => lowerBase.endsWith(ext)) || known.has(`${kind}:${lowerBase}`) || seenUnlinked.has(`${kind}:${lowerBase}`)) {
+            continue;
+          }
+          const fullPath = path.join(dir, entry.name);
+          const fileStat = await stat(fullPath).catch(() => null);
+          if (!fileStat) {
+            continue;
+          }
+          seenUnlinked.add(`${kind}:${lowerBase}`);
+          unlinked.push({ kind, fileName: entry.name, fullPath, cacheKey: `${kind}/${lowerBase}|${fileStat.size}|${Math.round(fileStat.mtimeMs)}` });
         }
-        const { base } = stripDisabled(entry.name);
-        if (!kindExtensions[kind].some((ext) => base.toLowerCase().endsWith(ext)) || known.has(`${kind}:${base.toLowerCase()}`)) {
-          continue;
-        }
-        const fullPath = path.join(dir, entry.name);
-        const fileStat = await stat(fullPath).catch(() => null);
-        if (!fileStat) {
-          continue;
-        }
-        unlinked.push({ kind, fileName: entry.name, fullPath, cacheKey: `${kind}/${base.toLowerCase()}|${fileStat.size}|${Math.round(fileStat.mtimeMs)}` });
       }
     }
     if (!unlinked.length) {
@@ -643,10 +1062,11 @@ export class ContentService {
     }
 
     const now = Date.now();
+    const canCheckCf = Boolean(this.curseforge && curseForgeAvailable);
     const toLookup: UnlinkedFile[] = [];
     for (const file of unlinked) {
       const cached = cache[file.cacheKey];
-      if (cached && cached.projectId === null && now - cached.checkedAt < unknownRecheckMs) {
+      if (cached && cached.projectId === null && (!canCheckCf || cached.cfChecked) && now - cached.checkedAt < unknownRecheckMs) {
         continue;
       }
       file.sha1 = cached?.sha1 ?? await sha1File(file.fullPath).catch(() => undefined);
@@ -658,7 +1078,7 @@ export class ContentService {
       return instance;
     }
 
-    let versions: Record<string, { id?: string; project_id?: string }>;
+    let versions: Record<string, { id?: string; project_id?: string }> = {};
     try {
       const response = await fetch("https://api.modrinth.com/v2/version_files", {
         method: "POST",
@@ -666,37 +1086,97 @@ export class ContentService {
         body: JSON.stringify({ hashes: [...new Set(toLookup.map((file) => file.sha1 as string))], algorithm: "sha1" }),
         signal: AbortSignal.timeout(20000)
       });
-      if (!response.ok) {
-        return instance;
+      if (response.ok) {
+        versions = (await response.json()) as Record<string, { id?: string; project_id?: string }>;
       }
-      versions = (await response.json()) as Record<string, { id?: string; project_id?: string }>;
     } catch {
-      return instance;
     }
 
     const projectIds = [...new Set(Object.values(versions).map((version) => version.project_id).filter((id): id is string => Boolean(id)))];
     const projects = new Map<string, { title?: string; slug?: string; icon_url?: string }>();
     if (projectIds.length) {
-      try {
-        const response = await fetch(`https://api.modrinth.com/v2/projects?ids=${encodeURIComponent(JSON.stringify(projectIds))}`, {
-          headers: modrinthHeaders,
-          signal: AbortSignal.timeout(20000)
-        });
-        if (response.ok) {
-          for (const project of (await response.json()) as Array<{ id: string; title?: string; slug?: string; icon_url?: string }>) {
-            projects.set(project.id, project);
+      const chunks: string[][] = [];
+      for (let i = 0; i < projectIds.length; i += 60) {
+        chunks.push(projectIds.slice(i, i + 60));
+      }
+      await Promise.all(chunks.map(async (chunk) => {
+        try {
+          const response = await fetch(`https://api.modrinth.com/v2/projects?ids=${encodeURIComponent(JSON.stringify(chunk))}`, {
+            headers: modrinthHeaders,
+            signal: AbortSignal.timeout(20000)
+          });
+          if (response.ok) {
+            for (const project of (await response.json()) as Array<{ id: string; title?: string; slug?: string; icon_url?: string }>) {
+              projects.set(project.id, project);
+            }
           }
+        } catch {
         }
-      } catch {
+      }));
+    }
+
+    const matched: Array<{
+      file: UnlinkedFile;
+      provider: ModProvider;
+      versionId: string;
+      projectId: string;
+      name?: string;
+      slug?: string;
+      iconUrl?: string;
+    }> = [];
+    const unmatchedForCf: UnlinkedFile[] = [];
+
+    for (const file of toLookup) {
+      const version = versions[file.sha1 as string];
+      if (version?.id && version.project_id) {
+        const project = projects.get(version.project_id);
+        cache[file.cacheKey] = { sha1: file.sha1 as string, projectId: version.project_id, checkedAt: now, cfChecked: true };
+        matched.push({
+          file,
+          provider: "modrinth",
+          versionId: version.id,
+          projectId: version.project_id,
+          name: project?.title,
+          slug: project?.slug,
+          iconUrl: project?.icon_url
+        });
+      } else {
+        unmatchedForCf.push(file);
       }
     }
 
-    const matched: Array<{ file: UnlinkedFile; versionId: string; projectId: string }> = [];
-    for (const file of toLookup) {
-      const version = versions[file.sha1 as string];
-      cache[file.cacheKey] = { sha1: file.sha1 as string, projectId: version?.project_id ?? null, checkedAt: now };
-      if (version?.id && version.project_id) {
-        matched.push({ file, versionId: version.id, projectId: version.project_id });
+    if (unmatchedForCf.length && this.curseforge && curseForgeAvailable) {
+      const fpByFile = new Map<UnlinkedFile, number>();
+      for (const file of unmatchedForCf) {
+        const fp = await cfFingerprintCached(file.fullPath).catch(() => 0);
+        if (fp > 0) fpByFile.set(file, fp);
+      }
+      const cfMatches = await this.curseforge.matchFingerprints([...fpByFile.values()]);
+      const cfModIds = [...new Set([...cfMatches.values()].map((m) => m.id))];
+      const cfMods = await this.curseforge.getModsByIds(cfModIds);
+
+      for (const file of unmatchedForCf) {
+        const fp = fpByFile.get(file);
+        const match = fp ? cfMatches.get(fp) : undefined;
+        if (match?.id && match.file?.id) {
+          const mod = cfMods.get(match.id);
+          cache[file.cacheKey] = { sha1: file.sha1 as string, projectId: String(match.id), checkedAt: now, cfChecked: true };
+          matched.push({
+            file,
+            provider: "curseforge",
+            versionId: String(match.file.id),
+            projectId: String(match.id),
+            name: mod?.name,
+            slug: mod?.slug,
+            iconUrl: mod?.logo?.thumbnailUrl || mod?.logo?.url || undefined
+          });
+        } else {
+          cache[file.cacheKey] = { sha1: file.sha1 as string, projectId: null, checkedAt: now, cfChecked: true };
+        }
+      }
+    } else {
+      for (const file of unmatchedForCf) {
+        cache[file.cacheKey] = { sha1: file.sha1 as string, projectId: null, checkedAt: now, cfChecked: false };
       }
     }
 
@@ -711,14 +1191,17 @@ export class ContentService {
       if (!target) {
         throw new Error(tr("Instance not found", "Инстанция не найдена"));
       }
-      for (const { file, versionId, projectId } of matched) {
-        const project = projects.get(projectId);
-        const existing = target.mods.find((mod) => mod.provider === "modrinth" && mod.projectId === projectId && (mod.projectType ?? "mod") === file.kind);
+      for (const item of matched) {
+        const { file, provider, versionId, projectId } = item;
+        const existing = target.mods.find((mod) => mod.provider === provider && mod.projectId === projectId && (mod.projectType ?? "mod") === file.kind);
         if (existing) {
           const oldBase = existing.fileName ? stripDisabled(existing.fileName).base : "";
-          const oldDir = path.join(target.directory, kindDirs[file.kind]);
+          const checkDirs = [
+            path.join(target.directory, kindDirs[file.kind]),
+            ...(file.kind === "datapack" ? worldDirs : [])
+          ];
           const stillThere = oldBase !== "" && normalizeName(oldBase) !== normalizeName(file.fileName)
-            && (existsSync(path.join(oldDir, oldBase)) || existsSync(path.join(oldDir, `${oldBase}${disabledSuffix}`)));
+            && checkDirs.some((d) => existsSync(path.join(d, oldBase)) || existsSync(path.join(d, `${oldBase}${disabledSuffix}`)));
           if (stillThere) {
             continue;
           }
@@ -728,13 +1211,13 @@ export class ContentService {
         }
         target.mods.push({
           id: randomUUID(),
-          provider: "modrinth",
+          provider,
           projectId,
           versionId,
-          name: project?.title || stripDisabled(file.fileName).base,
-          slug: project?.slug,
+          name: item.name || stripDisabled(file.fileName).base,
+          slug: item.slug,
           fileName: file.fileName,
-          iconUrl: project?.icon_url,
+          iconUrl: item.iconUrl,
           installedAt: new Date().toISOString(),
           status: "installed",
           projectType: file.kind
@@ -799,6 +1282,19 @@ export class ContentService {
   }
 
   private async fetchModrinthIcon(instanceId: string, record?: InstalledMod): Promise<string | undefined> {
+    if (record?.provider === "curseforge") {
+      if (!this.curseforge || !curseForgeAvailable || !/^\d+$/.test(record.projectId)) return undefined;
+      const mods = await this.curseforge.getModsByIds([Number(record.projectId)]);
+      const iconUrl = mods.get(Number(record.projectId))?.logo?.thumbnailUrl || mods.get(Number(record.projectId))?.logo?.url;
+      if (!iconUrl) return undefined;
+      await this.store.update((current) => {
+        const target = current.instances.find((item) => item.id === instanceId);
+        const entry = target?.mods.find((mod) => mod.id === record.id);
+        if (entry) entry.iconUrl = iconUrl;
+        return true;
+      });
+      return iconUrl;
+    }
     const ref = record?.slug || record?.projectId;
     if (!ref) {
       return undefined;
@@ -806,7 +1302,7 @@ export class ContentService {
 
     try {
       const response = await fetch(`https://api.modrinth.com/v2/project/${ref}`, {
-        headers: { "User-Agent": "lynapp/1.1.0-beta.4" }
+        headers: { "User-Agent": "lynapp/1.1.0-beta.5" }
       });
 
       if (!response.ok) {
@@ -854,32 +1350,47 @@ export class ContentService {
     return out;
   }
 
-  private async findEntries(instanceDir: string, fileName: string, onlyKind?: LocalContentKind): Promise<Array<{ kind: LocalContentKind; dir: string; name: string }>> {
-    const first = await this.findEntry(instanceDir, fileName, onlyKind);
-    if (!first || first.kind !== "datapack") {
-      return first ? [first] : [];
-    }
-    const { base, enabled } = stripDisabled(fileName);
-    const variant = enabled ? `${fileName}${disabledSuffix}` : base;
+  private async findRemainingDatapackName(instanceDir: string, fileName: string, excludeDir: string): Promise<string | null> {
+    const { base } = stripDisabled(fileName);
     const dirs = [path.join(instanceDir, kindDirs.datapack), ...(await this.worldDatapackDirs(instanceDir)).map((item) => item.dir)];
-    const found: Array<{ kind: LocalContentKind; dir: string; name: string }> = [];
     for (const dir of dirs) {
-      for (const candidate of [fileName, variant]) {
+      if (path.resolve(dir) === path.resolve(excludeDir)) continue;
+      for (const candidate of [base, `${base}${disabledSuffix}`]) {
         try {
           await stat(path.join(dir, candidate));
-          found.push({ kind: "datapack", dir, name: candidate });
-          break;
+          return candidate;
         } catch {
         }
       }
     }
-    return found.length ? found : [first];
+    return null;
   }
 
-  private async findEntry(instanceDir: string, fileName: string, onlyKind?: LocalContentKind): Promise<{ kind: LocalContentKind; dir: string; name: string } | null> {
+  private async findEntry(instanceDir: string, fileName: string, onlyKind?: LocalContentKind, world?: string): Promise<{ kind: LocalContentKind; dir: string; name: string } | null> {
     if (!fileName || fileName.includes("..") || fileName.includes("/") || fileName.includes("\\") || fileName.includes(":") || path.isAbsolute(fileName)) {
       throw new Error(tr(`Unsafe file name: ${fileName}`, `Недопустимое имя файла: ${fileName}`));
     }
+    const { base, enabled } = stripDisabled(fileName);
+    const variant = enabled ? `${fileName}${disabledSuffix}` : base;
+
+    if (world !== undefined) {
+      if (!world || world.includes("..") || world.includes("/") || world.includes("\\") || world.includes(":") || path.isAbsolute(world)) {
+        throw new Error(tr(`Unsafe world name: ${world}`, `Недопустимое имя мира: ${world}`));
+      }
+      const worldDir = path.join(instanceDir, "saves", world, "datapacks");
+      for (const candidate of [fileName, variant]) {
+        const candidatePath = path.join(worldDir, candidate);
+        if (path.resolve(candidatePath) === candidatePath && candidatePath.startsWith(worldDir + path.sep)) {
+          try {
+            await stat(candidatePath);
+            return { kind: "datapack", dir: worldDir, name: candidate };
+          } catch {
+          }
+        }
+      }
+      return null;
+    }
+
     const kinds = onlyKind ? [onlyKind] : kindOrder;
     for (const kind of kinds) {
       const dir = path.join(instanceDir, kindDirs[kind]);
@@ -894,29 +1405,12 @@ export class ContentService {
       } catch {
       }
 
-      const { base, enabled } = stripDisabled(fileName);
-      const variant = enabled ? `${fileName}${disabledSuffix}` : base;
       const variantPath = path.join(dir, variant);
 
       try {
         await stat(variantPath);
         return { kind, dir, name: variant };
       } catch {
-      }
-
-      if (kind === "datapack" && (!onlyKind || onlyKind === "datapack")) {
-        for (const { dir: worldDir } of await this.worldDatapackDirs(instanceDir)) {
-          for (const candidate of [fileName, variant]) {
-            const candidatePath = path.join(worldDir, candidate);
-            if (path.resolve(candidatePath) === candidatePath && candidatePath.startsWith(worldDir + path.sep)) {
-              try {
-                await stat(candidatePath);
-                return { kind, dir: worldDir, name: candidate };
-              } catch {
-              }
-            }
-          }
-        }
       }
     }
 

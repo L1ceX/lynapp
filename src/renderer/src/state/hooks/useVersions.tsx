@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { type GameVersionInfo, type GameVersionType, type LauncherInstance, type ModLoader, VERSION_TYPES_DEFAULTS } from "@shared/types";
 import { defaultCreateForm, loaders, NONE_OPTION } from "../../constants";
 import { getLauncherApi } from "../../lib/api";
+import { cleanIpcError } from "../../lib/format";
 import type { CoreState } from "./useCore";
 import type { InstancesState } from "./useInstances";
 
@@ -27,7 +28,7 @@ export function useVersions(deps: Pick<CoreState & InstancesState, "bootstrap" |
     try {
       setGameVersionList(await getLauncherApi().getGameVersions());
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to load Minecraft versions", "Не удалось загрузить версии Minecraft"));
+      setStatus(cleanIpcError(error, t("Failed to load Minecraft versions", "Не удалось загрузить версии Minecraft")));
     }
     try {
       setLoaderSupport(await getLauncherApi().getLoaderSupport());
@@ -87,7 +88,7 @@ export function useVersions(deps: Pick<CoreState & InstancesState, "bootstrap" |
     return () => {
       stale = true;
     };
-  }, [createForm.gameVersion]);
+  }, [createForm.gameVersion, loaderSupportSets]);
 
   useEffect(() => {
     if (!selected) return;
@@ -105,7 +106,7 @@ export function useVersions(deps: Pick<CoreState & InstancesState, "bootstrap" |
     return () => {
       stale = true;
     };
-  }, [selected?.id, selected?.gameVersion]);
+  }, [selected?.id, selected?.gameVersion, loaderSupportSets]);
 
   async function setVersionTypeFlag(id: GameVersionType, value: boolean): Promise<void> {
     const next = { ...versionTypes, [id]: value };
@@ -115,7 +116,7 @@ export function useVersions(deps: Pick<CoreState & InstancesState, "bootstrap" |
       setBootstrap((current) => current ? { ...current, settings } : current);
       setSettingsDraft(settings);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to save", "Не удалось сохранить"));
+      setStatus(cleanIpcError(error, t("Failed to save", "Не удалось сохранить")));
     }
   }
 
@@ -157,7 +158,7 @@ export function useVersions(deps: Pick<CoreState & InstancesState, "bootstrap" |
       setSelectedId(instance.id);
       say(t(`Created ${instance.name}`, `Создано: ${instance.name}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to create instance", "Не удалось создать инстанцию"));
+      setStatus(cleanIpcError(error, t("Failed to create instance", "Не удалось создать инстанцию")));
     } finally {
       setCreating(false);
     }

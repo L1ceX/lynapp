@@ -3,8 +3,17 @@ import { hexToRgb, resolveTheme, THEME_DEFAULTS, THEME_PRESETS, THEME_TOKENS, ty
 import { EFFECTS_DEFAULTS, type EffectsSettings, type LauncherSettings } from "@shared/types";
 import { effectGroups } from "../../constants";
 import { getLauncherApi } from "../../lib/api";
+import { cleanIpcError } from "../../lib/format";
 import { setMotionRate } from "../../lib/motion";
 import type { CoreState } from "./useCore";
+
+function srgbLuminance(hex: string): number {
+  const [r, g, b] = hexToRgb(hex).map((v) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
 
 export function useVisuals(deps: Pick<CoreState, "bootstrap" | "setBootstrap" | "setSettingsDraft" | "setStatus" | "t">) {
   const { bootstrap, setBootstrap, setSettingsDraft, setStatus, t } = deps;
@@ -42,6 +51,14 @@ export function useVisuals(deps: Pick<CoreState, "bootstrap" | "setBootstrap" | 
 
   const prefsSaveTimer = useRef<number | null>(null);
 
+  const themeInFlight = useRef(0);
+
+  const prefsInFlight = useRef(0);
+
+  const motionInFlight = useRef(0);
+
+  const syncedRef = useRef<{ theme: string; prefs: string; motion: string } | null>(null);
+
   useEffect(() => () => {
     if (themeSaveTimer.current !== null) window.clearTimeout(themeSaveTimer.current);
     if (prefsSaveTimer.current !== null) window.clearTimeout(prefsSaveTimer.current);
@@ -49,15 +66,40 @@ export function useVisuals(deps: Pick<CoreState, "bootstrap" | "setBootstrap" | 
   }, []);
 
   useEffect(() => {
-    if (bootstrap) {
-      setTheme(resolveTheme(bootstrap.settings.theme));
-      setGlowOn(bootstrap.settings.glowEnabled ?? true);
-      setGlowSize(bootstrap.settings.glowSize ?? 100);
-      setGlowSpeed(Math.min(bootstrap.settings.glowSpeed ?? 100, 150));
-      setAnimsOn(bootstrap.settings.animationsEnabled ?? true);
-      setAnimSpeed(Math.min(200, Math.max(50, bootstrap.settings.animationSpeed ?? 100)));
-      setEffects({ ...EFFECTS_DEFAULTS, ...(bootstrap.settings.effects ?? {}) });
+    if (!bootstrap) return;
+    const resolvedTheme = resolveTheme(bootstrap.settings.theme);
+    const themeSig = JSON.stringify(resolvedTheme);
+    const prefsVal = {
+      glowEnabled: bootstrap.settings.glowEnabled ?? true,
+      glowSize: bootstrap.settings.glowSize ?? 100,
+      glowSpeed: Math.min(bootstrap.settings.glowSpeed ?? 100, 150),
+      animationsEnabled: bootstrap.settings.animationsEnabled ?? true
+    };
+    const prefsSig = JSON.stringify(prefsVal);
+    const motionVal = {
+      animationSpeed: Math.min(200, Math.max(50, bootstrap.settings.animationSpeed ?? 100)),
+      effects: { ...EFFECTS_DEFAULTS, ...(bootstrap.settings.effects ?? {}) }
+    };
+    const motionSig = JSON.stringify(motionVal);
+    const prev = syncedRef.current;
+    if (themeSaveTimer.current === null && themeInFlight.current === 0 && themeSig !== prev?.theme) {
+      setTheme(resolvedTheme);
     }
+    if (prefsSaveTimer.current === null && prefsInFlight.current === 0 && prefsSig !== prev?.prefs) {
+      setGlowOn(prefsVal.glowEnabled);
+      setGlowSize(prefsVal.glowSize);
+      setGlowSpeed(prefsVal.glowSpeed);
+      setAnimsOn(prefsVal.animationsEnabled);
+    }
+    if (motionSaveTimer.current === null && motionInFlight.current === 0 && motionSig !== prev?.motion) {
+      setAnimSpeed(motionVal.animationSpeed);
+      setEffects(motionVal.effects);
+    }
+    syncedRef.current = {
+      theme: themeSaveTimer.current === null && themeInFlight.current === 0 ? themeSig : prev?.theme ?? themeSig,
+      prefs: prefsSaveTimer.current === null && prefsInFlight.current === 0 ? prefsSig : prev?.prefs ?? prefsSig,
+      motion: motionSaveTimer.current === null && motionInFlight.current === 0 ? motionSig : prev?.motion ?? motionSig
+    };
   }, [bootstrap]);
 
   useEffect(() => {
@@ -100,10 +142,19 @@ export function useVisuals(deps: Pick<CoreState, "bootstrap" | "setBootstrap" | 
       motionSaveTimer.current = null;
       const patch = pendingMotion.current;
       pendingMotion.current = {};
+      motionInFlight.current += 1;
       void getLauncherApi().updateSettings(patch).then((settings) => {
+        if (syncedRef.current) {
+          syncedRef.current.motion = JSON.stringify({
+            animationSpeed: Math.min(200, Math.max(50, settings.animationSpeed ?? 100)),
+            effects: { ...EFFECTS_DEFAULTS, ...(settings.effects ?? {}) }
+          });
+        }
         setBootstrap((current) => current ? { ...current, settings } : current);
         setSettingsDraft((current) => current ? { ...current, ...patch } : current);
-      }).catch((error) => setStatus(error instanceof Error ? error.message : t("Failed to save", "Не удалось сохранить")));
+      }).catch((error) => setStatus(cleanIpcError(error, t("Failed to save", "Не удалось сохранить")))).finally(() => {
+        motionInFlight.current = Math.max(0, motionInFlight.current - 1);
+      });
     }, 350);
   }
 
@@ -121,21 +172,30 @@ export function useVisuals(deps: Pick<CoreState, "bootstrap" | "setBootstrap" | 
   useEffect(() => {
     const root = document.documentElement;
     THEME_TOKENS.forEach((token) => token.vars.forEach((name) => root.style.setProperty(name, theme[token.id] ?? token.default)));
+    root.classList.toggle("theme-light", srgbLuminance(theme.background ?? "#0d1118") > 0.45);
+    root.style.setProperty("--t-on-primary", srgbLuminance(theme.primary ?? "#3b76e8") > 0.36 ? "#0e1624" : "#ffffff");
+    root.style.setProperty("--t-on-accent", srgbLuminance(theme.accent ?? "#55a4ed") > 0.36 ? "#071525" : "#ffffff");
     glowColor.current = hexToRgb(typeof theme.glow === "string" ? theme.glow : "#ffffff");
     glowOnRef.current = glowOn;
     glowSizeRef.current = glowSize;
     glowSpeedRef.current = glowSpeed;
     animsRef.current = animsOn;
     root.classList.toggle("no-anim", !animsOn);
-  }, [theme, glowOn, glowSize, glowSpeed, animsOn ]);
+  }, [theme, glowOn, glowSize, glowSpeed, animsOn]);
 
   async function persistTheme(next: Record<string, string>): Promise<void> {
+    themeInFlight.current += 1;
     try {
       const settings = await getLauncherApi().updateSettings({ theme: next });
+      if (syncedRef.current) {
+        syncedRef.current.theme = JSON.stringify(resolveTheme(settings.theme));
+      }
       setBootstrap((current) => current ? { ...current, settings } : current);
       setSettingsDraft((current) => current ? { ...current, theme: next } : current);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to save theme", "Не удалось сохранить тему"));
+      setStatus(cleanIpcError(error, t("Failed to save theme", "Не удалось сохранить тему")));
+    } finally {
+      themeInFlight.current = Math.max(0, themeInFlight.current - 1);
     }
   }
 
@@ -167,10 +227,21 @@ export function useVisuals(deps: Pick<CoreState, "bootstrap" | "setBootstrap" | 
     const snapshot = { ...next };
     prefsSaveTimer.current = window.setTimeout(() => {
       prefsSaveTimer.current = null;
+      prefsInFlight.current += 1;
       void getLauncherApi().updateSettings(snapshot).then((settings) => {
+        if (syncedRef.current) {
+          syncedRef.current.prefs = JSON.stringify({
+            glowEnabled: settings.glowEnabled ?? true,
+            glowSize: settings.glowSize ?? 100,
+            glowSpeed: Math.min(settings.glowSpeed ?? 100, 150),
+            animationsEnabled: settings.animationsEnabled ?? true
+          });
+        }
         setBootstrap((current) => current ? { ...current, settings } : current);
         setSettingsDraft((current) => current ? { ...current, ...snapshot } : current);
-      }).catch((error) => setStatus(error instanceof Error ? error.message : t("Failed to save", "Не удалось сохранить")));
+      }).catch((error) => setStatus(cleanIpcError(error, t("Failed to save", "Не удалось сохранить")))).finally(() => {
+        prefsInFlight.current = Math.max(0, prefsInFlight.current - 1);
+      });
     }, 350);
   }
 

@@ -106,6 +106,7 @@ export interface LauncherSettings {
   discordPresence: boolean;
   discordHideInstance: boolean;
   betaUpdates: boolean;
+  autoInstallDependencies: boolean;
   versionTypes: VersionTypeFilter;
   homeLayout?: HomeWidgetLayout[];
   navLayout?: NavLayout;
@@ -127,6 +128,7 @@ export interface SkinMeta {
   name: string;
   slim: boolean;
   addedAt: string;
+  accountId?: string | null;
 }
 
 export interface SkinInfo extends SkinMeta {
@@ -155,6 +157,8 @@ export interface AccountState {
   microsoftRefreshToken?: string;
   elyAccessToken?: string;
   elyClientToken?: string;
+  elyRefreshToken?: string;
+  elyAuthMode?: "oauth2" | "yggdrasil";
   xboxUhs?: string;
   activeSkinId?: string | null;
   addedAt?: string;
@@ -184,6 +188,8 @@ export interface BootstrapState {
   javaCandidates: string[];
   appVersion: string;
   curseforgeAvailable: boolean;
+  systemMemoryMb: number;
+  maxMemoryMb: number;
 }
 
 export interface JavaRuntimeState {
@@ -205,17 +211,20 @@ export interface JavaInstallation {
 
 export type LocalContentKind = "mod" | "resourcepack" | "shader" | "datapack";
 
-export type InstanceFolder = "root" | "logs" | LocalContentKind;
+export type InstanceFolder = "root" | "logs" | "saves" | "screenshots" | LocalContentKind;
 
 export interface LocalContentItem {
   kind: LocalContentKind;
   fileName: string;
   displayName: string;
+  world?: string;
   iconUrl?: string;
   size: number;
   modified: string;
   enabled: boolean;
-  source: "modrinth" | "manual" | "missing";
+  source: "modrinth" | "curseforge" | "manual" | "missing";
+  duplicateOf?: string;
+  dependents?: string[];
 }
 
 export interface ContentImportResult {
@@ -274,6 +283,32 @@ export interface ModVersionInfo {
   fileName: string;
   size: number;
   compatible: boolean;
+  provider?: ModProvider;
+  projectId?: string;
+}
+
+export interface ModDependencyItem {
+  projectId: string;
+  provider: ModProvider;
+  versionId?: string;
+  versionNumber?: string;
+  title: string;
+  slug?: string;
+  author?: string;
+  summary: string;
+  iconUrl?: string;
+  dependencyType: "required" | "optional";
+  installed: boolean;
+  compatible: boolean;
+  distributionBlocked?: boolean;
+  websiteUrl?: string;
+}
+
+export interface ModInstallPlan {
+  targetVersion: ModVersionInfo | null;
+  hasCompatibleVersion: boolean;
+  versions: ModVersionInfo[];
+  dependencies: ModDependencyItem[];
 }
 
 export interface ContentUpdateInfo {
@@ -328,4 +363,87 @@ export interface LaunchResult {
   logPath?: string;
   pid?: number;
   java?: JavaRuntimeState;
+}
+
+export interface QuickPlayTarget {
+  kind: "singleplayer" | "multiplayer";
+  value: string;
+}
+
+export interface WorldBackupInfo {
+  id: string;
+  fileName: string;
+  size: number;
+  createdAt: string;
+}
+
+export interface WorldInfo {
+  folderName: string;
+  name: string;
+  lastPlayed: string | null;
+  gameMode: "survival" | "creative" | "adventure" | "spectator";
+  hardcore: boolean;
+  cheats: boolean;
+  versionName?: string;
+  size: number;
+  iconDataUrl?: string;
+  backups: WorldBackupInfo[];
+}
+
+export interface ServerEntry {
+  name: string;
+  ip: string;
+  iconDataUrl?: string;
+}
+
+export interface ServerPingResult {
+  ip: string;
+  online: boolean;
+  latencyMs?: number;
+  playersOnline?: number;
+  playersMax?: number;
+  versionName?: string;
+  motd?: string;
+  iconDataUrl?: string;
+}
+
+export interface ScreenshotInfo {
+  fileName: string;
+  size: number;
+  modified: string;
+  dataUrl: string;
+}
+
+export interface ModGalleryItem {
+  url: string;
+  title?: string;
+  description?: string;
+}
+
+export interface ModProjectDetails {
+  id: string;
+  provider: ModProvider;
+  projectType: ModrinthProjectType;
+  title: string;
+  slug?: string;
+  author?: string;
+  summary: string;
+  body: string;
+  bodyFormat: "markdown" | "html";
+  iconUrl?: string;
+  downloads?: number;
+  follows?: number;
+  datePublished?: string;
+  dateModified?: string;
+  license?: string;
+  categories: string[];
+  gameVersions: string[];
+  loaders: string[];
+  gallery: ModGalleryItem[];
+  websiteUrl?: string;
+  sourceUrl?: string;
+  issuesUrl?: string;
+  wikiUrl?: string;
+  discordUrl?: string;
+  distributionBlocked?: boolean;
 }

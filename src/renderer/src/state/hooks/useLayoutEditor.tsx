@@ -6,6 +6,7 @@ import { clampSidebarWidth, defaultNav, LOCKED_TAB, moveItem, normalizeNav, same
 import { dockTarget, type DockKind } from "../../layout/dockZones";
 import { withViewTransition } from "../../lib/viewTransition";
 import { getLauncherApi } from "../../lib/api";
+import { cleanIpcError } from "../../lib/format";
 import { DEFAULT_HOME_LAYOUT, normalizeHomeLayout, sameLayout } from "../../pages/home/layout";
 import type { CoreState } from "./useCore";
 
@@ -59,7 +60,7 @@ export function useLayoutEditor(deps: Pick<CoreState, "bootstrap" | "instanceTab
       });
       setStatus(t("Layout restored to the standard one (Ctrl+Shift+R)", "Расположение сброшено к стандартному (Ctrl+Shift+R)"));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to reset the layout", "Не удалось сбросить расположение"));
+      setStatus(cleanIpcError(error, t("Failed to reset the layout", "Не удалось сбросить расположение")));
     }
   }
 
@@ -272,7 +273,7 @@ export function useLayoutEditor(deps: Pick<CoreState, "bootstrap" | "instanceTab
       leaveLayoutEditing();
       setStatus(t("Layout saved", "Расположение сохранено"));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to save", "Не удалось сохранить"));
+      setStatus(cleanIpcError(error, t("Failed to save", "Не удалось сохранить")));
     } finally {
       setLayoutSaving(false);
     }

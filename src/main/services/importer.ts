@@ -22,7 +22,7 @@ const SEARCH_LIMIT = 400;
 
 const KNOWN_LOADERS: ModLoader[] = ["vanilla", "fabric", "forge", "quilt", "neoforge"];
 const ICON_LIMIT = 512 * 1024;
-const FULL_COPY_SKIP = new Set(["logs", "crash-reports"]);
+const FULL_COPY_SKIP = new Set(["logs", "crash-reports", ".launcher"]);
 const MINECRAFT_WHITELIST = new Set([
   "mods",
   "resourcepacks",
@@ -272,10 +272,14 @@ async function resolveVersionJson(root: string, id: string): Promise<VersionInfo
   const libraries: string[] = [];
   let current: string | undefined = id;
   let gameVersion: string | undefined;
+  let missingParent: string | undefined;
   let family: string | undefined;
   for (let depth = 0; current && depth < 6; depth += 1) {
     const json: VersionJsonLite | null = await readJson<VersionJsonLite>(path.join(root, "versions", current, `${current}.json`));
-    if (!json) break;
+    if (!json) {
+      missingParent = current;
+      break;
+    }
     family ??= json.family;
     for (const lib of json.libraries ?? []) {
       if (lib.name) libraries.push(lib.name);
@@ -286,13 +290,27 @@ async function resolveVersionJson(root: string, id: string): Promise<VersionInfo
     }
     current = json.inheritsFrom;
   }
-  if (!libraries.length && !gameVersion) return null;
+  const parsedSelf = parseVersionId(id);
+  const parsedMissing = missingParent ? parseVersionId(missingParent) : null;
+  if (!libraries.length && !gameVersion) return parsedSelf ? { ...parsedSelf, family } : null;
   const find = (prefix: string): string | undefined => libraries.find((name) => name.toLowerCase().startsWith(prefix))?.split(":")[2];
-  if (gameVersion && !GAME_VERSION_PATTERN.test(gameVersion)) {
-    gameVersion = find("net.fabricmc:intermediary:") ?? find("org.quiltmc:hashed:") ?? parseVersionId(gameVersion)?.gameVersion ?? gameVersion;
+  if (!gameVersion || !GAME_VERSION_PATTERN.test(gameVersion)) {
+    gameVersion =
+      (missingParent && (GAME_VERSION_PATTERN.test(missingParent) ? missingParent : parsedMissing?.gameVersion)) ??
+      find("net.fabricmc:intermediary:") ??
+      find("org.quiltmc:hashed:") ??
+      (gameVersion ? parseVersionId(gameVersion)?.gameVersion : undefined) ??
+      parsedSelf?.gameVersion ??
+      gameVersion;
   }
   const info = detectLoader(find, gameVersion);
-  return info ? { ...info, family } : null;
+  if (!info) return parsedSelf ? { ...parsedSelf, gameVersion: parsedSelf.gameVersion ?? gameVersion, family } : null;
+  return {
+    loader: info.loader === "vanilla" && parsedSelf && parsedSelf.loader !== "vanilla" ? parsedSelf.loader : info.loader,
+    loaderVersion: info.loaderVersion ?? parsedSelf?.loaderVersion,
+    gameVersion: info.gameVersion ?? parsedSelf?.gameVersion,
+    family
+  };
 }
 
 function detectLoader(find: (prefix: string) => string | undefined, gameVersion: string | undefined): VersionInfo | null {
@@ -327,7 +345,12 @@ function legacyHomeDir(root: string, versionId: string, info: VersionInfo | null
 }
 
 function unescapeProperty(value: string): string {
-  return value.replace(/\\(.)/g, (_, char: string) => char === "n" ? "\n" : char === "t" ? "\t" : char).trim();
+  return value
+    .replace(/\\(?:u([0-9a-fA-F]{4})|(.))/g, (_, hex: string | undefined, char: string | undefined) => {
+      if (hex) return String.fromCharCode(parseInt(hex, 16));
+      return char === "n" ? "\n" : char === "t" ? "\t" : char === "r" ? "\r" : char ?? "";
+    })
+    .trim();
 }
 
 async function legacyGameDir(installDir: string): Promise<string | null> {
@@ -395,9 +418,9 @@ export class ExternalImportService {
     if (existsSync(path.join(folder, "tl.properties"))) return this.scanLegacy(folder);
     if (existsSync(path.join(folder, "tlauncher_profiles.json")) && existsSync(path.join(path.dirname(folder), "tl.properties"))) return this.scanMinecraft(folder, "legacy");
     if (existsSync(path.join(folder, "launcher_profiles.json")) || existsSync(path.join(folder, "versions"))) return this.scanMinecraft(folder);
-    if (existsSync(path.join(folder, "instance.cfg"))) return this.scanPrism(path.dirname(path.dirname(folder)), undefined, path.dirname(folder));
+    if (existsSync(path.join(folder, "instance.cfg"))) return this.scanPrism(path.dirname(path.dirname(folder)), undefined, path.dirname(folder), folder);
     if (PRISM_LIKE.some((kind) => existsSync(path.join(folder, kind.config)) || existsSync(path.join(folder, kind.exe)))) return this.scanPrism(folder);
-    if (existsSync(path.join(folder, "minecraftinstance.json"))) return this.scanCurseForge(path.dirname(folder));
+    if (existsSync(path.join(folder, "minecraftinstance.json"))) return this.scanCurseForge(path.dirname(folder), folder);
     const entries = await readdir(folder, { withFileTypes: true }).catch(() => []);
     const dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => path.join(folder, entry.name));
     if (dirs.some((dir) => existsSync(path.join(dir, "minecraftinstance.json")))) return this.scanCurseForge(folder);
@@ -484,8 +507,9 @@ export class ExternalImportService {
     }
   }
 
-  private async scanPrism(root: string, forced?: "prism" | "polymc" | "multimc", instancesOverride?: string): Promise<ScannedLauncher | null> {
-    if (!existsSync(root)) return null;
+  private async scanPrism(root: string, forced?: "prism" | "polymc" | "multimc", instancesOverride?: string, singleInstanceDir?: string): Promise<ScannedLauncher | null> {
+    const baseCheck = singleInstanceDir ?? root;
+    if (!existsSync(baseCheck)) return null;
     const kind = PRISM_LIKE.find((item) => item.id === forced) ?? PRISM_LIKE.find((item) => existsSync(path.join(root, item.config)) || existsSync(path.join(root, item.exe))) ?? PRISM_LIKE[0];
     const id = kind.id;
     try {
@@ -497,19 +521,22 @@ export class ExternalImportService {
         } catch {
         }
       }
-      const entries = await readdir(instancesDir, { withFileTypes: true }).catch(() => []);
+      const instanceFolders = singleInstanceDir
+        ? [{ name: path.basename(singleInstanceDir), dir: singleInstanceDir }]
+        : (await readdir(instancesDir, { withFileTypes: true }).catch(() => []))
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => ({ name: entry.name, dir: path.join(instancesDir, entry.name) }));
       const instances: ScannedInstance[] = [];
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const dir = path.join(instancesDir, entry.name);
+      for (const entry of instanceFolders) {
+        const dir = entry.dir;
         let cfg: Record<string, string>;
         try {
           cfg = parseIni(await readFile(path.join(dir, "instance.cfg"), "utf8"));
         } catch {
           continue;
         }
-        const pack = await readJson<{ components?: Array<{ uid?: string; version?: string }> }>(path.join(dir, "mmc-pack.json"));
-        const components = pack?.components ?? [];
+        const pack = await readJson<{ components?: Array<{ uid?: string; version?: string; disabled?: boolean }> }>(path.join(dir, "mmc-pack.json"));
+        const components = (pack?.components ?? []).filter((component) => !component.disabled);
         const version = (uid: string): string | undefined => components.find((component) => component.uid === uid)?.version;
         const loaders: Array<[string, ModLoader]> = [["net.fabricmc.fabric-loader", "fabric"], ["org.quiltmc.quilt-loader", "quilt"], ["net.neoforged", "neoforge"], ["net.minecraftforge", "forge"]];
         const found = loaders.find(([uid]) => version(uid));
@@ -538,24 +565,31 @@ export class ExternalImportService {
           copyMode: "full"
         }));
       }
-      return { key: `${id}:${instancesDir}`, id, root: instancesDir, instances };
+      const reportedRoot = singleInstanceDir ?? instancesDir;
+      return { key: `${id}:${reportedRoot}`, id, root: reportedRoot, instances };
     } catch (error) {
-      return this.failure(id, root, error);
+      return this.failure(id, singleInstanceDir ?? root, error);
     }
   }
 
-  private async scanCurseForge(root: string): Promise<ScannedLauncher | null> {
-    if (!existsSync(root)) return null;
+  private async scanCurseForge(root: string, singleInstanceDir?: string): Promise<ScannedLauncher | null> {
+    const checkPath = singleInstanceDir ?? root;
+    if (!existsSync(checkPath)) return null;
     try {
-      const entries = await readdir(root, { withFileTypes: true });
+      const instanceFolders = singleInstanceDir
+        ? [{ name: path.basename(singleInstanceDir), dir: singleInstanceDir }]
+        : (await readdir(root, { withFileTypes: true }))
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => ({ name: entry.name, dir: path.join(root, entry.name) }));
       const instances: ScannedInstance[] = [];
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const dir = path.join(root, entry.name);
+      for (const entry of instanceFolders) {
+        const dir = entry.dir;
         const manifest = await readJson<{ name?: string; gameVersion?: string; lastPlayed?: string; allocatedMemory?: number; javaArgsOverride?: string; baseModLoader?: { name?: string; minecraftVersion?: string } | null }>(path.join(dir, "minecraftinstance.json"));
         if (!manifest) continue;
         const loaderName = manifest.baseModLoader?.name ?? "";
-        const [kind, loaderVersion] = loaderName.split("-");
+        const dashIdx = loaderName.indexOf("-");
+        const kind = dashIdx >= 0 ? loaderName.slice(0, dashIdx) : loaderName;
+        const loaderVersion = dashIdx >= 0 ? loaderName.slice(dashIdx + 1) : undefined;
         const loader = loaderName ? toLoader(kind) : "vanilla";
         instances.push(await this.finish({
           key: `curseforge:${root}|${entry.name}`,
@@ -563,7 +597,7 @@ export class ExternalImportService {
           name: manifest.name || entry.name,
           gameVersion: manifest.gameVersion || manifest.baseModLoader?.minecraftVersion || "",
           loader,
-          loaderVersion: loaderName ? loaderVersion : undefined,
+          loaderVersion: loaderVersion || undefined,
           directory: dir,
           lastPlayed: fromDateString(manifest.lastPlayed),
           maxMemoryMb: typeof manifest.allocatedMemory === "number" && manifest.allocatedMemory >= 512 ? Math.round(manifest.allocatedMemory) : undefined,
@@ -571,9 +605,10 @@ export class ExternalImportService {
           copyMode: "full"
         }));
       }
-      return { key: `curseforge:${root}`, id: "curseforge", root, instances };
+      const reportedRoot = singleInstanceDir ?? root;
+      return { key: `curseforge:${reportedRoot}`, id: "curseforge", root: reportedRoot, instances };
     } catch (error) {
-      return this.failure("curseforge", root, error);
+      return this.failure("curseforge", checkPath, error);
     }
   }
 

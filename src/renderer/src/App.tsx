@@ -6,7 +6,9 @@ import { IconRail } from "./layout/IconRail";
 import { LayoutToolbar } from "./layout/LayoutToolbar";
 import { Titlebar } from "./layout/Titlebar";
 import { DeleteInstanceModal } from "./modals/DeleteInstanceModal";
+import { DependenciesModal } from "./modals/DependenciesModal";
 import { ExportModal } from "./modals/ExportModal";
+import { ModDetailsModal } from "./modals/ModDetailsModal";
 import { ModpackTargetModal } from "./modals/ModpackTargetModal";
 import { VersionPickerModal } from "./modals/VersionPickerModal";
 import { AccountsPage } from "./pages/AccountsPage";
@@ -46,11 +48,10 @@ export function App() {
       <AccountsPage />
       </div>
       <DeleteInstanceModal />
-      <ModpackTargetModal />
       <LayoutToolbar />
       <DockOverlay />
       <Presence>{renderImportModal()}</Presence>
-      <VersionPickerModal /><ExportModal />
+      <ModDetailsModal /><ModpackTargetModal /><VersionPickerModal /><DependenciesModal /><ExportModal />
     </div>
     </AppContext.Provider>
   );

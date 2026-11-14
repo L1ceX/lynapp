@@ -1,17 +1,12 @@
 import { useEffect, useState } from "react";
 import { getLauncherApi } from "../../lib/api";
+import { cleanIpcError } from "../../lib/format";
 import type { CoreState } from "./useCore";
 import type { SkinsState } from "./useSkins";
 
 export function useAccounts(deps: Pick<CoreState & SkinsState, "activeAccount" | "bootstrap" | "busy" | "refresh" | "setBusy" | "setSelectedSkinId" | "setStatus" | "t">) {
   const { activeAccount, bootstrap, busy, refresh, setBusy, setSelectedSkinId, setStatus, t } = deps;
   const [offlineName, setOfflineName] = useState("");
-
-  const [elyName, setElyName] = useState("");
-
-  const [elyPassword, setElyPassword] = useState("");
-
-  const [elyTotp, setElyTotp] = useState("");
 
   useEffect(() => {
     if (activeAccount?.status === "offline" && activeAccount?.profileName) setOfflineName(activeAccount.profileName);
@@ -36,6 +31,7 @@ export function useAccounts(deps: Pick<CoreState & SkinsState, "activeAccount" |
   }, [bootstrap?.activeAccountId]);
 
   async function beginLogin(): Promise<void> {
+    if (busy) return;
     setBusy(true);
     setStatus(t("Starting Microsoft login...", "Выполняется вход через Microsoft..."));
     try {
@@ -43,7 +39,7 @@ export function useAccounts(deps: Pick<CoreState & SkinsState, "activeAccount" |
       setStatus(result.message);
       await refresh({ setReadyStatus: false });
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Microsoft login failed", "Не удалось войти через Microsoft"));
+      setStatus(cleanIpcError(error, t("Microsoft login failed", "Не удалось войти через Microsoft")));
     } finally {
       setBusy(false);
     }
@@ -59,7 +55,7 @@ export function useAccounts(deps: Pick<CoreState & SkinsState, "activeAccount" |
       await refresh({ setReadyStatus: false });
       setStatus(t(`Playing as ${name}`, `Вы играете как ${name}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to switch account", "Не удалось сменить аккаунт"));
+      setStatus(cleanIpcError(error, t("Failed to switch account", "Не удалось сменить аккаунт")));
     } finally {
       setBusy(false);
     }
@@ -74,13 +70,14 @@ export function useAccounts(deps: Pick<CoreState & SkinsState, "activeAccount" |
       await refresh({ setReadyStatus: false });
       setStatus(t(`Removed ${name}`, `Удалено: ${name}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to remove account", "Не удалось удалить аккаунт"));
+      setStatus(cleanIpcError(error, t("Failed to remove account", "Не удалось удалить аккаунт")));
     } finally {
       setBusy(false);
     }
   }
 
   async function useOfflineProfile(): Promise<void> {
+    if (busy) return;
     setBusy(true);
     try {
       await getLauncherApi().useOfflineProfile(offlineName);
@@ -88,24 +85,24 @@ export function useAccounts(deps: Pick<CoreState & SkinsState, "activeAccount" |
       await refresh({ setReadyStatus: false });
       setStatus(t(`Offline profile: ${offlineName}`, `Офлайн-профиль: ${offlineName}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Offline profile failed", "Не удалось создать офлайн-профиль"));
+      setStatus(cleanIpcError(error, t("Offline profile failed", "Не удалось создать офлайн-профиль")));
     } finally {
       setBusy(false);
     }
   }
 
   async function elyLogin(): Promise<void> {
+    if (busy) return;
     setBusy(true);
     setStatus(t("Signing in with Ely.by...", "Выполняется вход через Ely.by..."));
     try {
-      await getLauncherApi().elyLogin(elyName, elyPassword, elyTotp || undefined);
-      setElyPassword("");
-      setElyTotp("");
+      const state = await getLauncherApi().elyLogin();
+      const signed = state.accounts.find((item) => item.id === state.activeAccountId);
       setSelectedSkinId(null);
       await refresh({ setReadyStatus: false });
-      setStatus(t(`Ely.by as ${elyName}`, `Ely.by: ${elyName}`));
+      setStatus(t(`Ely.by as ${signed?.profileName ?? "account"}`, `Ely.by: ${signed?.profileName ?? "аккаунт"}`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Ely.by login failed", "Не удалось войти через Ely.by"));
+      setStatus(cleanIpcError(error, t("Ely.by login failed", "Не удалось войти через Ely.by")));
     } finally {
       setBusy(false);
     }
@@ -114,12 +111,6 @@ export function useAccounts(deps: Pick<CoreState & SkinsState, "activeAccount" |
   return {
     offlineName,
     setOfflineName,
-    elyName,
-    setElyName,
-    elyPassword,
-    setElyPassword,
-    elyTotp,
-    setElyTotp,
     beginLogin,
     switchAccount,
     removeAccount,

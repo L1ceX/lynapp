@@ -37,7 +37,7 @@
 @keyframes drift-b { from { transform: translate(0, 0) scale(1.1); } to { transform: translate(220px, -120px) scale(.92); } }
 
 
-:root.fx-springs {
+:where(:root.fx-springs) {
   button {
     transition: border-color 240ms ease, background 240ms ease, color 240ms ease,
       transform 420ms var(--spring), box-shadow 320ms var(--smooth);
@@ -208,9 +208,9 @@
   }
   .mod-card:hover, .mod-result:hover, .file-row:hover, .account-row:hover, .skin-card:hover, .theme-row:hover {
     transform: translateY(-3px);
-    box-shadow: 0 14px 30px -14px rgba(0, 0, 0, .55), 0 0 0 1px var(--accent-faint);
+    box-shadow: 0 0 0 1px var(--accent-faint);
   }
-  .stat-card:hover { transform: translateY(-3px) rotate(-.6deg); box-shadow: 0 14px 30px -14px rgba(0, 0, 0, .55); border-color: var(--t-accent); }
+  .stat-card:hover { transform: translateY(-3px) rotate(-.6deg); border-color: var(--t-accent); }
   .stat-value { display: inline-block; transition: transform 460ms var(--spring), color 260ms ease; }
   .stat-card:hover .stat-value { transform: scale(1.12); color: var(--t-accent); }
   .mod-card-icon, .mod-result img, .mod-icon, .file-icon { transition: transform 520ms var(--spring); }

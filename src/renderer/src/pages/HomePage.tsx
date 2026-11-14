@@ -62,7 +62,7 @@ export function HomePage() {
 }
 
 function HomeContent() {
-  const { changeHomeLayout, hideHomeWidget, layoutEditing, homeLayout, instanceStatus, sectionExiting, selected, status, t } = useApp();
+  const { changeHomeLayout, hideHomeWidget, layoutEditing, homeLayout, sectionExiting, t } = useApp();
   const { width, containerRef, mounted } = useContainerWidth();
   const visible = useMemo(() => homeLayout.filter((item) => !item.hidden), [homeLayout]);
   const [fits, setFits] = useState<Record<string, number>>({});
@@ -172,7 +172,7 @@ function HomeContent() {
   return (
     <main className={sectionExiting ? "page-workspace section-exiting" : "page-workspace"}>
       <header className="workspace-header">
-        <div><span className="eyebrow">{t("Home", "Главная")}</span><h2>{t("Welcome back", "С возвращением")}</h2><span className="status-line">{selected !== null ? instanceStatus[selected.id] ?? status : status}</span></div>
+        <div><span className="eyebrow">{t("Home", "Главная")}</span><h2>{t("Welcome back", "С возвращением")}</h2></div>
       </header>
       <div ref={containerRef} className={layoutEditing ? "home-board editing" : "home-board"}>
         {mounted ? <>

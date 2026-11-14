@@ -11,21 +11,39 @@ export function drawSkinPreview(canvas: HTMLCanvasElement, image: HTMLImageEleme
   const bodyX = 40;
   const rowY = 44;
   const legY = 104;
+  const legacy = image.height <= 32;
   const part = (sx: number, sy: number, w: number, h: number, dx: number, dy: number) => {
     ctx.drawImage(image, sx, sy, w, h, dx, dy, w * u, h * u);
+  };
+  const mirrorPart = (sx: number, sy: number, w: number, h: number, dx: number, dy: number) => {
+    ctx.save();
+    ctx.translate(dx + w * u, dy);
+    ctx.scale(-1, 1);
+    ctx.drawImage(image, sx, sy, w, h, 0, 0, w * u, h * u);
+    ctx.restore();
   };
   part(8, 8, 8, 8, bodyX, 4);
   part(40, 8, 8, 8, bodyX, 4);
   part(44, 20, arm, 12, bodyX - arm * u, rowY);
-  part(44, 36, arm, 12, bodyX - arm * u, rowY);
-  part(36, 52, arm, 12, bodyX + 8 * u, rowY);
-  part(52, 52, arm, 12, bodyX + 8 * u, rowY);
+  if (!legacy) {
+    part(44, 36, arm, 12, bodyX - arm * u, rowY);
+    part(36, 52, arm, 12, bodyX + 8 * u, rowY);
+    part(52, 52, arm, 12, bodyX + 8 * u, rowY);
+  } else {
+    mirrorPart(44, 20, arm, 12, bodyX + 8 * u, rowY);
+  }
   part(20, 20, 8, 12, bodyX, rowY);
-  part(20, 36, 8, 12, bodyX, rowY);
+  if (!legacy) {
+    part(20, 36, 8, 12, bodyX, rowY);
+  }
   part(4, 20, 4, 12, bodyX, legY);
-  part(4, 36, 4, 12, bodyX, legY);
-  part(20, 52, 4, 12, bodyX + 4 * u, legY);
-  part(4, 52, 4, 12, bodyX + 4 * u, legY);
+  if (!legacy) {
+    part(4, 36, 4, 12, bodyX, legY);
+    part(20, 52, 4, 12, bodyX + 4 * u, legY);
+    part(4, 52, 4, 12, bodyX + 4 * u, legY);
+  } else {
+    mirrorPart(4, 20, 4, 12, bodyX + 4 * u, legY);
+  }
 }
 
 export function SkinPreview({ dataUrl, slim }: { dataUrl: string; slim: boolean }) {
@@ -40,6 +58,40 @@ export function SkinPreview({ dataUrl, slim }: { dataUrl: string; slim: boolean 
   }, [dataUrl, slim]);
 
   return <canvas ref={ref} width={120} height={176} className="skin-canvas" />;
+}
+
+export function drawSkinHead(canvas: HTMLCanvasElement, image: HTMLImageElement): void {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(image, 8, 8, 8, 8, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(image, 40, 8, 8, 8, 0, 0, canvas.width, canvas.height);
+}
+
+export function SkinHead({ dataUrl, className, onError }: { dataUrl: string; className?: string; onError?: () => void }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    let cancelled = false;
+    const image = document.createElement("img");
+    image.onload = () => {
+      if (!cancelled) drawSkinHead(canvas, image);
+    };
+    image.onerror = () => {
+      if (!cancelled) onErrorRef.current?.();
+    };
+    image.src = dataUrl;
+    return () => {
+      cancelled = true;
+    };
+  }, [dataUrl]);
+
+  return <canvas ref={ref} width={64} height={64} className={className} />;
 }
 
 export function CapeThumb({ url }: { url: string }) {
@@ -65,14 +117,13 @@ export function CapeThumb({ url }: { url: string }) {
 export function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | null; slim: boolean; capeUrl: string | null }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewerRef = useRef<SkinViewer | null>(null);
-  const loadSeq = useRef(0);
-  const latestReq = useRef<{ dataUrl: string | null; slim: boolean; capeUrl: string | null }>({ dataUrl, slim, capeUrl });
-  latestReq.current = { dataUrl, slim, capeUrl };
+  const applyQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const viewer = new SkinViewer({ canvas, width: 280, height: 340, pixelRatio: 1.5 });
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const viewer = new SkinViewer({ canvas, width: 280, height: 340, pixelRatio });
     viewer.autoRotate = false;
     viewer.controls.enablePan = false;
     viewerRef.current = viewer;
@@ -81,11 +132,13 @@ export function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | nul
         composer?: {
           renderTarget1?: { samples?: number };
           renderTarget2?: { samples?: number };
+          setPixelRatio?(ratio: number): void;
           setSize?(width: number, height: number): void;
         };
       };
       if (internal.composer?.renderTarget1) internal.composer.renderTarget1.samples = 4;
       if (internal.composer?.renderTarget2) internal.composer.renderTarget2.samples = 4;
+      internal.composer?.setPixelRatio?.(pixelRatio);
       internal.composer?.setSize?.(280, 340);
     } catch {
     }
@@ -216,7 +269,7 @@ export function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | nul
           const cape = player?.cape;
           if (cape) {
             cape.rotation.x = capeX;
-            cape.rotation.y = 0;
+            cape.rotation.y = Math.PI;
           }
         } catch {
         }
@@ -237,17 +290,16 @@ export function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | nul
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer) return;
-    const seq = (loadSeq.current += 1);
+    let cancelled = false;
     const apply = async (): Promise<void> => {
+      if (cancelled || viewerRef.current !== viewer) return;
       try {
         if (dataUrl) {
           await viewer.loadSkin(dataUrl, { model: slim ? "slim" : "default" });
         } else {
           viewer.loadSkin(null);
         }
-        if (seq !== loadSeq.current) {
-          return;
-        }
+        if (cancelled || viewerRef.current !== viewer) return;
         if (capeUrl) {
           await viewer.loadCape(capeUrl);
         } else {
@@ -255,27 +307,11 @@ export function SkinViewer3D({ dataUrl, slim, capeUrl }: { dataUrl: string | nul
         }
       } catch {
       }
-      if (seq !== loadSeq.current) {
-        const latest = latestReq.current;
-        const v = viewerRef.current;
-        if (v) {
-          try {
-            if (latest.dataUrl) {
-              await v.loadSkin(latest.dataUrl, { model: latest.slim ? "slim" : "default" });
-            } else {
-              v.loadSkin(null);
-            }
-            if (latest.capeUrl) {
-              await v.loadCape(latest.capeUrl);
-            } else {
-              v.resetCape();
-            }
-          } catch {
-          }
-        }
-      }
     };
-    void apply();
+    applyQueueRef.current = applyQueueRef.current.then(apply, apply);
+    return () => {
+      cancelled = true;
+    };
   }, [dataUrl, slim, capeUrl]);
 
   return <canvas ref={canvasRef} className="skin-stage-canvas" />;

@@ -36,6 +36,7 @@ export const PAGE_BOARDS: Record<PageBoardId, PageBoardDef> = {
       { id: "afterLaunch", label: "After the game starts", labelRu: "После запуска игры", minW: 3 },
       { id: "discord", label: "Discord", labelRu: "Discord", minW: 4 },
       { id: "updates", label: "Updates", labelRu: "Обновления", minW: 4 },
+      { id: "content", label: "Mods and dependencies", labelRu: "Моды и зависимости", minW: 4 },
       { id: "versionTypes", label: "Game versions", labelRu: "Версии игры", minW: 4 },
       { id: "memory", label: "Memory", labelRu: "Память", minW: 4 },
       { id: "java", label: "Java installations", labelRu: "Установленные версии Java", minW: 5 }
@@ -45,9 +46,10 @@ export const PAGE_BOARDS: Record<PageBoardId, PageBoardDef> = {
       { i: "afterLaunch", x: 0, y: 38, w: 6, h: 48 },
       { i: "discord", x: 0, y: 86, w: 6, h: 66 },
       { i: "updates", x: 0, y: 152, w: 6, h: 52 },
+      { i: "content", x: 6, y: 178, w: 6, h: 52 },
       { i: "memory", x: 6, y: 0, w: 6, h: 74 },
       { i: "versionTypes", x: 6, y: 74, w: 6, h: 104 },
-      { i: "java", x: 0, y: 210, w: 12, h: 120 }
+      { i: "java", x: 0, y: 230, w: 12, h: 120 }
     ]
   },
   visuals: {

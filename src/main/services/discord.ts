@@ -170,7 +170,11 @@ export class DiscordPresence {
     const header = Buffer.alloc(8);
     header.writeInt32LE(op, 0);
     header.writeInt32LE(body.length, 4);
-    this.socket.write(Buffer.concat([header, body]));
+    try {
+      this.socket.write(Buffer.concat([header, body]));
+    } catch {
+      this.socket.destroy();
+    }
   }
 
   private receive(chunk: Buffer): void {
@@ -178,6 +182,10 @@ export class DiscordPresence {
     while (this.buffer.length >= 8) {
       const op = this.buffer.readInt32LE(0);
       const length = this.buffer.readInt32LE(4);
+      if (length < 0 || length > 1024 * 1024) {
+        this.socket?.destroy();
+        return;
+      }
       if (this.buffer.length < 8 + length) {
         return;
       }

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu } from "electron";
+import { app, BrowserWindow, crashReporter, dialog, Menu } from "electron";
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import path from "node:path";
@@ -7,32 +7,46 @@ import { registerIpcHandlers } from "./ipc";
 import { getAppIconPath, getElectronUserDataDir, getLauncherRoot } from "./paths";
 import { setupAutoUpdater } from "./updater";
 import { restoreFromTray } from "./tray";
+import { getMainWindow, setMainWindow } from "./window";
 
 let mainWindow: BrowserWindow | null = null;
 
 app.setName("lynapp");
 app.setPath("userData", getElectronUserDataDir());
-void cleanupLegacyRootFiles();
+crashReporter.start({ submitURL: "", uploadToServer: false });
+const disabledFeatures = ["AutofillServerCommunication", "PasswordManager", "PasswordGeneration"];
+if (!app.isPackaged) {
+  disabledFeatures.push("CalculateNativeWinOcclusion");
+  app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+  app.commandLine.appendSwitch("disable-renderer-backgrounding");
+}
+app.commandLine.appendSwitch("disable-features", disabledFeatures.join(","));
 
-const singleInstance = app.requestSingleInstanceLock();
+const singleInstance = app.isPackaged ? app.requestSingleInstanceLock() : true;
 
 if (!singleInstance) {
   app.quit();
 } else {
+  void cleanupLegacyRootFiles();
   app.on("second-instance", () => {
-    const window = BrowserWindow.getAllWindows()[0] ?? mainWindow;
+    const window = getMainWindow();
     if (window) {
       restoreFromTray(window);
     }
   });
+  startApp();
 }
 
+function normalizeForCompare(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
 
 function isRunningInsideDataDir(): boolean {
   try {
-    const execDir = path.dirname(app.getPath("exe"));
-    const root = getLauncherRoot();
-    return execDir === root || execDir.startsWith(root + path.sep);
+    const execDir = normalizeForCompare(path.dirname(app.getPath("exe")));
+    const root = normalizeForCompare(getLauncherRoot());
+    return execDir === root || execDir.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
   } catch {
     return false;
   }
@@ -103,7 +117,9 @@ function createWindow(): void {
 
   mainWindow.on("closed", () => {
     mainWindow = null;
+    setMainWindow(null);
   });
+  setMainWindow(mainWindow);
 
   setupAutoUpdater(mainWindow);
 
@@ -114,22 +130,24 @@ function createWindow(): void {
   mainWindow.on("unmaximize", notifyMaximized);
 }
 
-if (isRunningInsideDataDir()) {
-  app.whenReady().then(() => {
-    dialog.showErrorBox(
-      "lynapp is installed into its data folder / lynapp установлен в папку с данными",
-      `This copy runs from:\n${path.dirname(app.getPath("exe"))}\n\nThat folder is reserved for instances and saves. Please reinstall lynapp into a different folder (for example %APPDATA%\\Programs\\lynapp).\n\nYour instances and worlds stay untouched.\n\n---\n\nЭта копия запущена из папки:\n${path.dirname(app.getPath("exe"))}\n\nЭта папка зарезервирована для инстанций и сохранений. Переустановите lynapp в другую папку (например, %APPDATA%\\Programs\\lynapp).\n\nВаши инстанции и миры останутся нетронутыми.`
-    );
-    app.quit();
-  });
-} else {
+function startApp(): void {
+  if (isRunningInsideDataDir()) {
+    app.whenReady().then(() => {
+      dialog.showErrorBox(
+        "lynapp is installed into its data folder / lynapp установлен в папку с данными",
+        `This copy runs from:\n${path.dirname(app.getPath("exe"))}\n\nThat folder is reserved for instances and saves. Please reinstall lynapp into a different folder (for example %APPDATA%\\Programs\\lynapp).\n\nYour instances and worlds stay untouched.\n\n---\n\nЭта копия запущена из папки:\n${path.dirname(app.getPath("exe"))}\n\nЭта папка зарезервирована для инстанций и сохранений. Переустановите lynapp в другую папку (например, %APPDATA%\\Programs\\lynapp).\n\nВаши инстанции и миры останутся нетронутыми.`
+      );
+      app.quit();
+    });
+    return;
+  }
   app.whenReady().then(() => {
     Menu.setApplicationMenu(null);
     registerIpcHandlers();
     createWindow();
 
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
+      if (!getMainWindow()) {
         createWindow();
       }
     });

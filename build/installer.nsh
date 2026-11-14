@@ -6,8 +6,12 @@
 !macroend
 
 Function .onVerifyInstDir
-  StrCmp $INSTDIR "$APPDATA\lynapp" 0 done
-  MessageBox MB_OK|MB_ICONSTOP "lynapp cannot be installed into its data folder:$\n$APPDATA\lynapp$\n$\nThat folder is reserved for instances and saves. Please choose another folder, for example $APPDATA\Programs\lynapp."
+  StrCmp $INSTDIR "$APPDATA\lynapp" bad_dir
+  StrLen $0 "$APPDATA\lynapp\"
+  StrCpy $1 $INSTDIR $0
+  StrCmp $1 "$APPDATA\lynapp\" bad_dir done
+  bad_dir:
+  MessageBox MB_OK|MB_ICONSTOP "lynapp cannot be installed inside its data folder:$\n$APPDATA\lynapp$\n$\nThat folder is reserved for instances and saves. Please choose another folder, for example $LOCALAPPDATA\Programs\lynapp."
   Abort
   done:
 FunctionEnd

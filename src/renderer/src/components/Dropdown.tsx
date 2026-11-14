@@ -44,6 +44,16 @@ export function Dropdown({ value, options, onChange, disabled, ariaLabel, search
   useEffect(() => () => {
     if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
   }, []);
+
+  useEffect(() => {
+    if (!disabled || !open) return;
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+    setOpen(false);
+    setClosing(false);
+  }, [disabled, open]);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
 

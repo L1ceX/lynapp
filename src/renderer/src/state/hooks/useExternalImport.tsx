@@ -3,7 +3,7 @@ import { type CSSProperties, useEffect, useState } from "react";
 import type { ExternalImportProgress } from "@shared/types";
 import { EXTERNAL_LAUNCHERS, type ImportModalState, LOADER_NAMES } from "../../constants";
 import { getLauncherApi } from "../../lib/api";
-import { formatRelative, ruPlural } from "../../lib/format";
+import { cleanIpcError, formatRelative, ruPlural } from "../../lib/format";
 import type { CoreState } from "./useCore";
 
 export function useExternalImport(deps: Pick<CoreState, "busy" | "lang" | "refresh" | "setBusy" | "setSelectedId" | "setStatus" | "t" | "update">) {
@@ -22,7 +22,7 @@ export function useExternalImport(deps: Pick<CoreState, "busy" | "lang" | "refre
       const active = launchers.find((launcher) => launcher.instances.some((item) => !item.issue))?.key ?? launchers[0]?.key ?? null;
       setImportModal((current) => current ? { ...current, launchers, active } : current);
     } catch (error) {
-      setImportModal((current) => current ? { ...current, launchers: [], error: error instanceof Error ? error.message : String(error) } : current);
+      setImportModal((current) => current ? { ...current, launchers: [], error: cleanIpcError(error, String(error)) } : current);
     }
   }
 
@@ -63,7 +63,7 @@ export function useExternalImport(deps: Pick<CoreState, "busy" | "lang" | "refre
         ? t(`Imported ${result.imported.length}, failed ${result.failed.length}`, `Импортировано: ${result.imported.length}, с ошибкой: ${result.failed.length}`)
         : t(`Imported ${result.imported.length}`, `Импортировано: ${result.imported.length}`));
     } catch (error) {
-      setImportModal((current) => current ? { ...current, running: false, error: error instanceof Error ? error.message : String(error) } : current);
+      setImportModal((current) => current ? { ...current, running: false, error: cleanIpcError(error, String(error)) } : current);
     } finally {
       setBusy(false);
     }
@@ -83,7 +83,7 @@ export function useExternalImport(deps: Pick<CoreState, "busy" | "lang" | "refre
         return { ...current, picking: false, launchers: [...others, found], active: found.key, extraRoots: [...new Set([...current.extraRoots, picked.folder])] };
       });
     } catch (error) {
-      setImportModal((current) => current ? { ...current, picking: false, error: error instanceof Error ? error.message : String(error) } : current);
+      setImportModal((current) => current ? { ...current, picking: false, error: cleanIpcError(error, String(error)) } : current);
     }
   }
 

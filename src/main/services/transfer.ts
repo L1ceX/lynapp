@@ -50,9 +50,13 @@ export async function readUrlBytes(
     if (!response.ok) {
       throw new Error(tr(`Download failed with HTTP ${response.status}: ${url}`, `Ошибка загрузки, HTTP ${response.status}: ${url}`));
     }
-    const total = response.body ? parseTotal(response.headers) : null;
+    const hasContentEncoding = Boolean(response.headers.get("content-encoding") && response.headers.get("content-encoding") !== "identity");
+    const total = response.body && !hasContentEncoding ? parseTotal(response.headers) : null;
     if (!response.body) {
       const buffer = Buffer.from(await response.arrayBuffer());
+      if (total !== null && buffer.length !== total) {
+        throw new Error(tr(`Incomplete download (${buffer.length}/${total} bytes): ${url}`, `Загрузка оборвалась (${buffer.length}/${total} байт): ${url}`));
+      }
       onBytes(buffer.length, total ?? buffer.length);
       return { buffer, total: total ?? buffer.length };
     }
@@ -67,7 +71,10 @@ export async function readUrlBytes(
       armIdle();
       onBytes(received, total);
     }
-    const buffer = Buffer.concat(chunks.map((c) => Buffer.from(c)));
+    if (total !== null && received !== total) {
+      throw new Error(tr(`Incomplete download (${received}/${total} bytes): ${url}`, `Загрузка оборвалась (${received}/${total} байт): ${url}`));
+    }
+    const buffer = Buffer.concat(chunks, received);
     return { buffer, total };
   } catch (error) {
     if (ctrl.signal.aborted && !signal?.aborted) {

@@ -92,15 +92,21 @@ export function useDragDrop(deps: Pick<CoreState & InstancesState & ContentState
         void importContentRef.current(others);
       })();
     }
+    function onBlur(): void {
+      setWindowDrag(false);
+      setZone(null);
+    }
     window.addEventListener("dragenter", onDragEnter);
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("dragleave", onDragLeave);
     window.addEventListener("drop", onDrop);
+    window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("dragenter", onDragEnter);
       window.removeEventListener("dragover", onDragOver);
       window.removeEventListener("dragleave", onDragLeave);
       window.removeEventListener("drop", onDrop);
+      window.removeEventListener("blur", onBlur);
     };
   }, []);
 

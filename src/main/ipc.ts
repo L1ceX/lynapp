@@ -1,12 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { hideToTray, isHiddenForGame, restoreFromTray } from "./tray";
+import { getMainWindow } from "./window";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { IPC } from "@shared/ipc";
-import type { CreateInstancePayload, DownloadModpackPayload, InstallModPayload, LocalContentPayload, ModSearchPayload, SkinAddPayload, SkinUpdatePayload, UpdateInstancePayload } from "@shared/ipc";
-import type { AccountsState, InstanceFolder, LauncherSettings, ModLoader, ModrinthProjectType } from "@shared/types";
+import type { CreateInstancePayload, DownloadModpackPayload, InstallModPayload, LocalContentPayload, ModSearchPayload, PrepareModInstallPayload, SkinAddPayload, SkinUpdatePayload, UpdateInstancePayload } from "@shared/ipc";
+import type { AccountsState, InstanceFolder, LauncherSettings, ModLoader, ModrinthProjectType, QuickPlayTarget } from "@shared/types";
 import { setMainLanguage, tr } from "./i18n";
 import { getLauncherRoot, getStorePath } from "./paths";
+import { getMaxAllocatableMemoryMb, getSystemMemoryMb } from "./store";
 import { AuthService } from "./services/auth";
 import { ContentService } from "./services/content";
 import { DiscordPresence } from "./services/discord";
@@ -19,12 +21,16 @@ import { ModService } from "./services/mods";
 import { SkinService } from "./services/skins";
 import { JsonStore } from "./store";
 import { CurseForgeService, curseForgeAvailable } from "./services/curseforge";
+import { ServerService } from "./services/servers";
+import { WorldService } from "./services/worlds";
 import { downloadUpdate, installUpdate, setBetaUpdates } from "./updater";
 import { createThrottledEmitter } from "./services/transfer";
 
 const INSTANCE_FOLDERS: Record<InstanceFolder, string> = {
   root: "",
   logs: path.join(".launcher", "logs"),
+  saves: "saves",
+  screenshots: "screenshots",
   mod: "mods",
   resourcepack: "resourcepacks",
   shader: "shaderpacks",
@@ -37,10 +43,12 @@ export function registerIpcHandlers(): void {
   const minecraft = new MinecraftService();
   const auth = new AuthService(store);
   const instances = new InstanceService(store, java, minecraft, auth);
-  const mods = new ModService(store);
   const curseforge = new CurseForgeService(store);
+  const mods = new ModService(store, curseforge);
   const skins = new SkinService(store, auth);
-  const content = new ContentService(store);
+  const content = new ContentService(store, curseforge);
+  const worlds = new WorldService(store);
+  const servers = new ServerService(store);
   const modpacks = new ModpackService(store, instances, minecraft, curseforge);
   const discord = new DiscordPresence();
   const importer = new ExternalImportService(instances, content, minecraft);
@@ -63,7 +71,7 @@ export function registerIpcHandlers(): void {
   function publicAccounts(state: AccountsState): AccountsState {
     return {
       activeAccountId: state.activeAccountId,
-      accounts: state.accounts.map(({ minecraftAccessToken, microsoftRefreshToken, elyAccessToken, elyClientToken, xboxUhs, ...rest }) => rest)
+      accounts: state.accounts.map(({ minecraftAccessToken, microsoftRefreshToken, elyAccessToken, elyClientToken, elyRefreshToken, xboxUhs, ...rest }) => rest)
     };
   }
 
@@ -77,6 +85,8 @@ export function registerIpcHandlers(): void {
       storagePath: getStorePath(),
       appVersion: app.getVersion(),
       curseforgeAvailable: curseForgeAvailable,
+      systemMemoryMb: getSystemMemoryMb(),
+      maxMemoryMb: getMaxAllocatableMemoryMb(),
       javaCandidates: await java.listCandidatePaths([data.settings.javaPath])
     };
   });
@@ -124,15 +134,24 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle(IPC.listExportEntries, (_event, instanceId: string) => modpacks.listExportEntries(instanceId));
   ipcMain.handle(IPC.importMrpackFiles, (event, instanceId: string) => modpacks.finishImport(instanceId, event.sender));
+  const afterLaunchTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const clearAfterLaunch = (id: string): void => {
+    const timer = afterLaunchTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      afterLaunchTimers.delete(id);
+    }
+  };
   instances.onGameExit = (id) => {
+    clearAfterLaunch(id);
     discord.gameStopped(id);
     if (!isHiddenForGame()) return;
     void instances.getRunning().then((running) => {
-      if (!running.length) restoreFromTray(BrowserWindow.getAllWindows()[0] ?? null);
+      if (!running.length) restoreFromTray(getMainWindow());
     }).catch(() => undefined);
   };
 
-  ipcMain.handle(IPC.launchInstance, async (event, id: string) => {
+  ipcMain.handle(IPC.launchInstance, async (event, id: string, quickPlay?: QuickPlayTarget) => {
     const sender = event.sender;
     const window = BrowserWindow.fromWebContents(sender);
     const emit = createThrottledEmitter((update) => {
@@ -154,16 +173,27 @@ export function registerIpcHandlers(): void {
         doneFiles: progress.done,
         totalFiles: progress.total
       });
-    });
+    }, quickPlay);
     if (result.ok && result.pid) {
       const data = await store.getData();
       const launched = data.instances.find((item) => item.id === id);
       if (launched) discord.gameStarted(launched);
       const action = data.settings.afterLaunch;
-      if (action === "hide" && window) {
-        setTimeout(() => hideToTray(window), 1200);
-      } else if (action === "close") {
-        setTimeout(() => app.quit(), 2000);
+      if (action === "hide" || action === "close") {
+        clearAfterLaunch(id);
+        const timer = setTimeout(() => {
+          afterLaunchTimers.delete(id);
+          void instances.getRunning().then((running) => {
+            if (!running.includes(id)) return;
+            if (action === "hide") {
+              const target = window && !window.isDestroyed() ? window : getMainWindow();
+              if (target) hideToTray(target);
+            } else {
+              app.quit();
+            }
+          }).catch(() => undefined);
+        }, action === "hide" ? 1200 : 2000);
+        afterLaunchTimers.set(id, timer);
       }
     }
     return result;
@@ -174,6 +204,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.getInstanceLogs, (_event, id: string) => instances.getLogs(id));
   ipcMain.handle(IPC.listSkins, () => skins.list());
   ipcMain.handle(IPC.elySkin, () => skins.elySkin());
+  ipcMain.handle(IPC.accountSkin, () => skins.accountSkin());
   ipcMain.handle(IPC.addSkin, (_event, payload: SkinAddPayload) => skins.add(payload));
   ipcMain.handle(IPC.updateSkin, (_event, payload: SkinUpdatePayload) => skins.update(payload));
   ipcMain.handle(IPC.removeSkin, (_event, id: string) => skins.remove(id));
@@ -211,18 +242,35 @@ export function registerIpcHandlers(): void {
     return shell.openPath(target);
   });
   ipcMain.handle(IPC.getLocalContent, (_event, instanceId: string) => content.list(instanceId));
-  ipcMain.handle(IPC.toggleLocalContent, (_event, payload: LocalContentPayload) => content.toggle(payload.instanceId, payload.fileName, payload.kind));
-  ipcMain.handle(IPC.listModVersions, (_event, instanceId: string, projectId: string, projectType: ModrinthProjectType) => mods.listVersions(instanceId, projectId, projectType));
+  ipcMain.handle(IPC.toggleLocalContent, (_event, payload: LocalContentPayload) => content.toggle(payload.instanceId, payload.fileName, payload.kind, payload.world));
+  ipcMain.handle(IPC.listModVersions, (_event, instanceId: string, projectId: string, projectType: ModrinthProjectType, provider?: string) => (provider === "curseforge" ? curseforge.listVersions(instanceId, projectId, projectType) : mods.listVersions(instanceId, projectId, projectType)));
   ipcMain.handle(IPC.checkContentUpdates, (_event, instanceId: string) => mods.checkUpdates(instanceId));
   ipcMain.handle(IPC.importLocalContent, (_event, instanceId: string, paths: string[]) => content.importFiles(instanceId, paths));
   ipcMain.handle(IPC.detectLocalContent, (_event, instanceId: string) => content.detectFromModrinth(instanceId));
-  ipcMain.handle(IPC.removeLocalContent, (_event, payload: LocalContentPayload) => content.remove(payload.instanceId, payload.fileName, payload.kind));
+  ipcMain.handle(IPC.removeLocalContent, (_event, payload: LocalContentPayload) => content.remove(payload.instanceId, payload.fileName, payload.kind, payload.world));
+  ipcMain.handle(IPC.listWorlds, (_event, instanceId: string) => worlds.list(instanceId));
+  ipcMain.handle(IPC.backupWorld, (_event, instanceId: string, folderName: string) => worlds.backup(instanceId, folderName));
+  ipcMain.handle(IPC.restoreWorldBackup, (_event, instanceId: string, folderName: string, backupId: string) => worlds.restore(instanceId, folderName, backupId));
+  ipcMain.handle(IPC.deleteWorldBackup, (_event, instanceId: string, folderName: string, backupId: string) => worlds.deleteBackup(instanceId, folderName, backupId));
+  ipcMain.handle(IPC.deleteWorld, (_event, instanceId: string, folderName: string) => worlds.deleteWorld(instanceId, folderName));
+  ipcMain.handle(IPC.listServers, (_event, instanceId: string) => servers.list(instanceId));
+  ipcMain.handle(IPC.addServer, (_event, instanceId: string, name: string, ip: string) => servers.add(instanceId, name, ip));
+  ipcMain.handle(IPC.removeServer, (_event, instanceId: string, ip: string) => servers.remove(instanceId, ip));
+  ipcMain.handle(IPC.pingServer, (_event, ip: string) => servers.ping(ip));
+  ipcMain.handle(IPC.listScreenshots, (_event, instanceId: string) => content.listScreenshots(instanceId));
+  ipcMain.handle(IPC.copyScreenshot, (_event, instanceId: string, fileName: string) => content.copyScreenshot(instanceId, fileName));
+  ipcMain.handle(IPC.deleteScreenshot, (_event, instanceId: string, fileName: string) => content.deleteScreenshot(instanceId, fileName));
 
   ipcMain.handle(IPC.updateSettings, async (_event, patch: Partial<LauncherSettings>) => {
     const settings = await store.update((data) => {
+      const current = data.settings;
       data.settings = {
-        ...data.settings,
-        ...patch
+        ...current,
+        ...patch,
+        theme: { ...current.theme, ...(patch.theme ?? {}) },
+        effects: { ...current.effects, ...(patch.effects ?? {}) },
+        versionTypes: { ...current.versionTypes, ...(patch.versionTypes ?? {}) },
+        javaPaths: { ...(current.javaPaths ?? {}), ...(patch.javaPaths ?? {}) }
       };
       setMainLanguage(data.settings.language);
       return data.settings;
@@ -233,7 +281,9 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(IPC.searchMods, (_event, payload: ModSearchPayload) => (payload.provider === "curseforge" ? curseforge.search(payload) : mods.search(payload)));
+  ipcMain.handle(IPC.getModDetails, (_event, projectId: string, projectType: ModrinthProjectType, provider?: string) => (provider === "curseforge" ? curseforge.getProjectDetails(projectId, projectType) : mods.getProjectDetails(projectId, projectType)));
   ipcMain.handle(IPC.getCategoryTags, (_event, projectType: ModrinthProjectType, provider?: string) => (provider === "curseforge" ? curseforge.getCategoryTags(projectType) : mods.getCategoryTags(projectType)));
+  ipcMain.handle(IPC.prepareModInstall, (_event, payload: PrepareModInstallPayload) => (payload.provider === "curseforge" ? curseforge.prepareInstall(payload) : mods.prepareInstall(payload)));
   ipcMain.handle(IPC.installMod, (event, payload: InstallModPayload) => {
     const sender = event.sender;
     const emit = createThrottledEmitter((update) => {
@@ -253,12 +303,12 @@ export function registerIpcHandlers(): void {
     });
     const onBytes = (received: number, total: number | null): void => emit(`modpack:${payload.projectId}`, payload.name, received, total);
     return payload.provider === "curseforge"
-      ? curseforge.downloadModpackFile(payload.instanceId, payload.projectId, payload.name, onBytes)
-      : mods.downloadModpackFile(payload.instanceId, payload.projectId, payload.name, onBytes);
+      ? curseforge.downloadModpackFile(payload.instanceId, payload.projectId, payload.name, onBytes, payload.versionId)
+      : mods.downloadModpackFile(payload.instanceId, payload.projectId, payload.name, onBytes, payload.versionId);
   });
   ipcMain.handle(IPC.beginMicrosoftLogin, (event) => auth.beginMicrosoftLogin(BrowserWindow.fromWebContents(event.sender)));
   ipcMain.handle(IPC.refreshSession, async () => publicAccounts(await auth.trySilentRefresh()));
-  ipcMain.handle(IPC.elyLogin, async (_event, username: string, password: string, totp?: string) => publicAccounts(await auth.elyLogin(username, password, totp)));
+  ipcMain.handle(IPC.elyLogin, async () => publicAccounts(await auth.elyLogin()));
   ipcMain.handle(IPC.useOfflineProfile, async (_event, username: string) => publicAccounts(await auth.useOfflineProfile(username)));
   ipcMain.handle(IPC.setActiveAccount, async (_event, id: string) => publicAccounts(await auth.setActiveAccount(id)));
   ipcMain.handle(IPC.removeAccount, async (_event, id: string) => publicAccounts(await auth.removeAccount(id)));
@@ -317,12 +367,19 @@ export function registerIpcHandlers(): void {
     return java.describeInstallation(major, inspected.javawPath);
   });
 
+  ipcMain.handle(IPC.openDataFolder, () => shell.openPath(path.dirname(getStorePath())));
   ipcMain.handle(IPC.openExternal, async (_event, url: string) => {
-    if (!url.startsWith("https://")) {
-      throw new Error(tr("Only https URLs can be opened", "Можно открывать только ссылки https"));
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error(tr("Invalid URL", "Некорректная ссылка"));
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw new Error(tr("Only http and https URLs can be opened", "Можно открывать только ссылки http и https"));
     }
 
-    await shell.openExternal(url);
+    await shell.openExternal(parsed.toString());
     return true;
   });
 }

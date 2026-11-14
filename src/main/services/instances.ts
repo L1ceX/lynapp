@@ -5,9 +5,9 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import type { CreateInstancePayload, UpdateInstancePayload } from "@shared/ipc";
-import type { AccountState, LaunchResult, LauncherInstance } from "@shared/types";
+import type { AccountState, LaunchResult, LauncherInstance, QuickPlayTarget } from "@shared/types";
 import { getInstancesRoot } from "../paths";
-import { JsonStore, getActiveAccount, type LauncherData } from "../store";
+import { JsonStore, getActiveAccount, getMaxAllocatableMemoryMb, type LauncherData } from "../store";
 import type { AuthService } from "./auth";
 import { JavaService } from "./java";
 import { MinecraftService } from "./minecraft";
@@ -46,17 +46,41 @@ function pickInstanceDirectory(payload: CreateInstancePayload, id: string): stri
   return directory;
 }
 
-const COPY_SKIP = new Set(["logs", "crash-reports", path.join(".launcher", "logs"), path.join(".launcher", "instance.json")]);
+const COPY_SKIP = new Set(["logs", "crash-reports", path.join(".launcher", "logs"), path.join(".launcher", "natives"), path.join(".launcher", "instance.json")]);
 
-function parseJvmFlags(input: string | undefined): string[] {  if (!input?.trim()) {
+function parseJvmFlags(input: string | undefined): string[] {
+  if (!input?.trim()) {
     return [];
   }
-  return [...input.matchAll(/(?:[^\s"]+|"[^"]*")+/g)]
-    .map((match) => match[0].replace(/^"|"$/g, "").trim())
-    .filter(Boolean);
+  const args: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let hasToken = false;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (ch === "\"") {
+      inQuotes = !inQuotes;
+      hasToken = true;
+      continue;
+    }
+    if (!inQuotes && /\s/.test(ch)) {
+      if (hasToken && current) {
+        args.push(current);
+      }
+      current = "";
+      hasToken = false;
+      continue;
+    }
+    current += ch;
+    hasToken = true;
+  }
+  if (hasToken && current) {
+    args.push(current);
+  }
+  return args;
 }
 
-async function readNewestCrash(instanceDir: string): Promise<{ file: string; description: string } | null> {
+async function readNewestCrash(instanceDir: string, logMtimeMs = 0): Promise<{ file: string; description: string; text: string } | null> {
   let entries: Array<{ name: string; mtime: number }> = [];
   try {
     const dir = path.join(instanceDir, "crash-reports");
@@ -75,6 +99,7 @@ async function readNewestCrash(instanceDir: string): Promise<{ file: string; des
   if (!entries.length) return null;
   entries.sort((a, b) => b.mtime - a.mtime);
   const newest = entries[0];
+  if (logMtimeMs > 0 && newest.mtime + 60000 < logMtimeMs) return null;
   try {
     const text = await readFile(path.join(instanceDir, "crash-reports", newest.name), "utf8");
     const head = text.slice(0, 20000);
@@ -87,7 +112,7 @@ async function readNewestCrash(instanceDir: string): Promise<{ file: string; des
       mixin ? "Remove or update the mod, or drop Sinytra Connector test" : exc?.[0]?.trim(),
       !mixin && sinytra ? "Sinytra Connector is present, verify it is not the cause" : ""
     ].filter(Boolean);
-    return { file: newest.name, description: parts.slice(0, 2).join(" / ").slice(0, 220) || "Crash report saved" };
+    return { file: newest.name, description: parts.slice(0, 2).join(" / ").slice(0, 220) || "Crash report saved", text: text.slice(0, 120000) };
   } catch {
     return null;
   }
@@ -105,11 +130,27 @@ async function writeInstanceManifest(instance: LauncherInstance): Promise<void> 
 
 const execFileAsync = promisify(execFile);
 
+async function killProcessTree(pid: number): Promise<void> {
+  if (process.platform === "win32") {
+    await new Promise<void>((resolve) => {
+      execFile("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => resolve());
+    });
+  }
+  try {
+    process.kill(pid);
+  } catch {
+  }
+}
+
 async function isJavaProcessAlive(pid: number): Promise<boolean> {
+  let accessDenied = false;
   try {
     process.kill(pid, 0);
   } catch (error) {
-    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+    if ((error as NodeJS.ErrnoException)?.code !== "EPERM") {
+      return false;
+    }
+    accessDenied = true;
   }
   if (process.platform !== "win32") {
     return true;
@@ -119,7 +160,7 @@ async function isJavaProcessAlive(pid: number): Promise<boolean> {
     const image = (stdout.split(",")[0] ?? "").replace(/"/g, "").trim().toLowerCase();
     return image === "java.exe" || image === "javaw.exe";
   } catch {
-    return true;
+    return !accessDenied;
   }
 }
 
@@ -132,6 +173,7 @@ export class InstanceService {
   ) {}
 
   private readonly launchAborts = new Map<string, AbortController>();
+  private readonly managedPids = new Set<number>();
 
   onGameExit?: (id: string) => void;
 
@@ -185,6 +227,9 @@ export class InstanceService {
     if (!source) {
       throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
+    if (this.launchAborts.has(id)) {
+      throw new Error(tr(`${source.name} is launching. Cancel launch before copying.`, `${source.name} запускается. Отмените запуск перед копированием.`));
+    }
     const pid = data.runningProcesses[id];
     if (pid !== undefined && (await isJavaProcessAlive(pid))) {
       throw new Error(tr(`${source.name} is running. Stop it before copying.`, `${source.name} запущена. Остановите её перед копированием.`));
@@ -215,7 +260,7 @@ export class InstanceService {
         }
       });
     } catch (error) {
-      await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+      await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 }).catch(() => undefined);
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(tr(`Could not copy the instance: ${reason}`, `Не удалось скопировать инстанцию: ${reason}`));
     }
@@ -245,6 +290,9 @@ export class InstanceService {
     const current = data.instances.find((item) => item.id === payload.id);
     if (!current) {
       throw new Error(tr("Instance not found", "Инстанция не найдена"));
+    }
+    if (this.launchAborts.has(payload.id)) {
+      throw new Error(tr(`${current.name} is launching. Wait or cancel launch first.`, `${current.name} сейчас запускается. Дождитесь или отмените запуск.`));
     }
     const nextGameVersion = payload.patch.gameVersion !== undefined
       ? payload.patch.gameVersion.trim() || "1.21.1"
@@ -289,18 +337,23 @@ export class InstanceService {
       return false;
     }
 
+    if (this.launchAborts.has(id)) {
+      throw new Error(tr(`${target.name} is launching. Cancel launch before deleting.`, `${target.name} сейчас запускается. Сначала отмените запуск.`));
+    }
     const pid = data.runningProcesses[id];
     if (pid !== undefined && (await isJavaProcessAlive(pid))) {
       throw new Error(tr(`${target.name} is running. Stop it before deleting.`, `${target.name} запущена. Остановите её перед удалением.`));
     }
 
     const directory = target.directory;
-    const root = await realpath(getInstancesRoot()).catch(() => getInstancesRoot());
-    const resolvedDir = await realpath(directory).catch(() => directory);
-    if (resolvedDir === root || !resolvedDir.startsWith(root + path.sep)) {
+    const root = await realpath(getInstancesRoot()).catch(() => path.resolve(getInstancesRoot()));
+    const resolvedDir = await realpath(directory).catch(() => path.resolve(directory));
+    const normRoot = process.platform === "win32" ? root.toLowerCase() : root;
+    const normDir = process.platform === "win32" ? resolvedDir.toLowerCase() : resolvedDir;
+    if (normDir === normRoot || !normDir.startsWith(normRoot + path.sep)) {
       throw new Error(tr("Refusing to delete a folder outside the instances directory", "Удаление отменено: папка находится вне каталога инстанций"));
     }
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 });
 
     return this.store.update((current) => {
       const before = current.instances.length;
@@ -315,7 +368,7 @@ export class InstanceService {
     });
   }
 
-  async launch(id: string, onProgress?: (progress: import("./minecraft").LaunchProgress) => void): Promise<LaunchResult> {
+  async launch(id: string, onProgress?: (progress: import("./minecraft").LaunchProgress) => void, quickPlay?: QuickPlayTarget): Promise<LaunchResult> {
     if (this.launchAborts.has(id)) {
       return {
         ok: false,
@@ -389,7 +442,13 @@ export class InstanceService {
       }
 
       try {
-        return await this.runLaunch(id, instance, data, activeAccount, signal, onProgress);
+        if (signal.aborted) {
+          return {
+            ok: false,
+            message: tr("launch cancelled", "запуск отменён")
+          };
+        }
+        return await this.runLaunch(id, instance, data, activeAccount, signal, onProgress, quickPlay);
       } catch (error) {
         if (signal.aborted) {
           return {
@@ -425,13 +484,15 @@ export class InstanceService {
     const pid = data.runningProcesses[id];
     if (pid !== undefined) {
       if (await isJavaProcessAlive(pid)) {
-        try {
-          process.kill(pid);
-        } catch {
-        }
+        await killProcessTree(pid);
         await this.store.update((current) => {
-          delete current.runningProcesses[id];
+          if (current.runningProcesses[id] === pid) {
+            delete current.runningProcesses[id];
+          }
         });
+        if (!this.managedPids.has(pid)) {
+          this.onGameExit?.(id);
+        }
         return {
           ok: true,
           message: tr("stopped", "остановлена")
@@ -451,7 +512,7 @@ export class InstanceService {
     };
   }
 
-  private async runLaunch(id: string, instance: LauncherInstance, data: LauncherData, activeAccount: AccountState, signal: AbortSignal, onProgress?: (progress: import("./minecraft").LaunchProgress) => void): Promise<LaunchResult> {
+  private async runLaunch(id: string, instance: LauncherInstance, data: LauncherData, activeAccount: AccountState, signal: AbortSignal, onProgress?: (progress: import("./minecraft").LaunchProgress) => void, quickPlay?: QuickPlayTarget): Promise<LaunchResult> {
     const requiredMajor = await this.minecraft.getRequiredJavaMajor(instance.gameVersion);
     const javaRuntime = await this.java.ensureRuntime(requiredMajor, [
       data.settings.javaPaths?.[String(requiredMajor)],
@@ -459,7 +520,7 @@ export class InstanceService {
     ], signal, (received, total) => onProgress?.({ phase: "java", done: 0, total: 0, received, totalBytes: total }));
     const javaPath = javaRuntime.path;
     const rawMemory = instance.maxMemoryMb || data.settings.maxMemoryMb;
-    const maxMemoryMb = Math.min(65536, Math.max(512, Math.round(rawMemory) || 4096));
+    const maxMemoryMb = Math.min(getMaxAllocatableMemoryMb(), Math.max(512, Math.round(rawMemory) || 4096));
     const extraJvmArgs = parseJvmFlags(instance.extraJvmArgs?.trim() ? instance.extraJvmArgs : data.settings.extraJvmArgs);
 
     const updatedInstance = await this.store.update((current) => {
@@ -478,7 +539,7 @@ export class InstanceService {
     const launch = await this.minecraft.prepareLaunch(updatedInstance, activeAccount, {
       memoryMb: maxMemoryMb,
       extraJvmArgs
-    }, javaPath, signal, onProgress, data.settings.concurrentDownloads);
+    }, javaPath, signal, onProgress, data.settings.concurrentDownloads, quickPlay);
     const launchPlanPath = path.join(instance.directory, ".launcher", "logs", "latest-launch-plan.log");
     await mkdir(path.dirname(launchPlanPath), { recursive: true });
     await writeFile(
@@ -509,6 +570,10 @@ export class InstanceService {
     ].join("\n");
     await writeFile(launch.logPath, logHeader, "utf8");
 
+    if (signal.aborted) {
+      throw new Error(tr("launch cancelled", "запуск отменён"));
+    }
+
     const logFd = openSync(launch.logPath, "a");
     let child: ReturnType<typeof spawn>;
     try {
@@ -525,28 +590,45 @@ export class InstanceService {
         message: error instanceof Error ? tr(`Could not start Java: ${error.message}`, `Не удалось запустить Java: ${error.message}`) : tr("Could not start Java", "Не удалось запустить Java")
       };
     }
-    child.unref();
     closeSync(logFd);
 
-    if (!child.pid) {
-      return {
-        ok: false,
-        message: tr("Minecraft process failed to start", "Не удалось запустить процесс Minecraft")
-      };
-    }
-
-    const startedPid = child.pid;
     const startedChild = child;
+    let trackedPid: number | undefined;
     startedChild.on("error", () => {
+      const pid = trackedPid;
+      if (pid === undefined) {
+        return;
+      }
       void this.store
         .update((current) => {
-          if (current.runningProcesses[id] === startedPid) {
+          if (current.runningProcesses[id] === pid) {
             delete current.runningProcesses[id];
           }
         })
         .catch(() => undefined);
     });
+
+    const spawnError = await new Promise<Error | null>((resolve) => {
+      startedChild.once("spawn", () => resolve(null));
+      startedChild.once("error", (error) => resolve(error));
+    });
+
+    if (spawnError || !startedChild.pid) {
+      const reason = spawnError?.message;
+      return {
+        ok: false,
+        message: reason
+          ? tr(`Could not start Java: ${reason}`, `Не удалось запустить Java: ${reason}`)
+          : tr("Minecraft process failed to start", "Не удалось запустить процесс Minecraft")
+      };
+    }
+
+    startedChild.unref();
+    const startedPid = startedChild.pid;
+    trackedPid = startedPid;
+    this.managedPids.add(startedPid);
     startedChild.on("exit", () => {
+      this.managedPids.delete(startedPid);
       void this.store
         .update((current) => {
           if (current.runningProcesses[id] === startedPid) {
@@ -557,9 +639,24 @@ export class InstanceService {
         .then(() => this.onGameExit?.(id));
     });
 
+    if (signal.aborted) {
+      await killProcessTree(startedPid);
+      throw new Error(tr("launch cancelled", "запуск отменён"));
+    }
+
     await this.store.update((current) => {
       current.runningProcesses[id] = startedPid;
     });
+
+    if (signal.aborted) {
+      await killProcessTree(startedPid);
+      await this.store.update((current) => {
+        if (current.runningProcesses[id] === startedPid) {
+          delete current.runningProcesses[id];
+        }
+      }).catch(() => undefined);
+      throw new Error(tr("launch cancelled", "запуск отменён"));
+    }
 
     return {
       ok: true,
@@ -572,19 +669,24 @@ export class InstanceService {
 
   async getRunning(): Promise<string[]> {
     const data = await this.store.getData();
+    const snapshot = Object.entries(data.runningProcesses);
     const alive: string[] = [];
+    const dead: Array<[string, number]> = [];
 
-    for (const [id, pid] of Object.entries(data.runningProcesses)) {
+    for (const [id, pid] of snapshot) {
       if (await isJavaProcessAlive(pid)) {
         alive.push(id);
+      } else {
+        dead.push([id, pid]);
       }
     }
 
-    const dead = Object.keys(data.runningProcesses).filter((id) => !alive.includes(id));
     if (dead.length) {
       await this.store.update((current) => {
-        for (const id of dead) {
-          delete current.runningProcesses[id];
+        for (const [id, pid] of dead) {
+          if (current.runningProcesses[id] === pid) {
+            delete current.runningProcesses[id];
+          }
         }
       });
     }
@@ -606,28 +708,30 @@ export class InstanceService {
     const pid = data.runningProcesses[id];
     if (pid === undefined || !(await isJavaProcessAlive(pid))) {
       await this.store.update((current) => {
-        delete current.runningProcesses[id];
+        if (pid === undefined || current.runningProcesses[id] === pid) {
+          delete current.runningProcesses[id];
+        }
       }).catch(() => undefined);
+      if (pid !== undefined && !this.managedPids.has(pid)) {
+        this.onGameExit?.(id);
+      }
       return {
         ok: false,
         message: tr("not running", "не запущена")
       };
     }
 
-    try {
-      await new Promise<void>((resolve) => {
-        execFile("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => resolve());
-      });
-      try {
-        process.kill(pid);
-      } catch {
-      }
-    } catch {
-    }
+    await killProcessTree(pid);
 
     await this.store.update((current) => {
-      delete current.runningProcesses[id];
+      if (current.runningProcesses[id] === pid) {
+        delete current.runningProcesses[id];
+      }
     });
+
+    if (!this.managedPids.has(pid)) {
+      this.onGameExit?.(id);
+    }
 
     return {
       ok: true,
@@ -639,20 +743,21 @@ export class InstanceService {
     await this.getRunning();
   }
 
-  async getLogs(id: string): Promise<{ log: string; plan: string; hasLog: boolean; crash: { file: string; description: string } | null }> {
+  async getLogs(id: string): Promise<{ log: string; plan: string; hasLog: boolean; crash: { file: string; description: string; text: string } | null }> {
     const data = await this.store.getData();
     const instance = data.instances.find((item) => item.id === id);
     if (!instance) {
       throw new Error(tr("Instance not found", "Инстанция не найдена"));
     }
     const tailKb = 200 * 1024;
-    const readTail = async (file: string): Promise<{ text: string; found: boolean }> => {
+    const readTail = async (file: string): Promise<{ text: string; found: boolean; mtimeMs: number }> => {
       let handle: import("node:fs/promises").FileHandle | null = null;
       try {
         handle = await open(file, "r");
-        const size = (await handle.stat()).size;
+        const st = await handle.stat();
+        const size = st.size;
         if (size <= 0) {
-          return { text: "", found: true };
+          return { text: "", found: true, mtimeMs: st.mtimeMs };
         }
         const start = Math.max(0, size - tailKb);
         const buf = Buffer.alloc(Math.min(size, tailKb));
@@ -662,9 +767,9 @@ export class InstanceService {
           const cut = text.indexOf("\n");
           text = cut >= 0 ? text.slice(cut + 1) : text;
         }
-        return { text, found: true };
+        return { text, found: true, mtimeMs: st.mtimeMs };
       } catch {
-        return { text: "", found: false };
+        return { text: "", found: false, mtimeMs: 0 };
       } finally {
         await handle?.close().catch(() => undefined);
       }
@@ -673,6 +778,6 @@ export class InstanceService {
     const planPath = path.join(instance.directory, ".launcher", "logs", "latest-launch-plan.log");
     const log = await readTail(logPath);
     const plan = await readTail(planPath);
-    return { log: log.text, plan: plan.text, hasLog: log.found, crash: await readNewestCrash(instance.directory) };
+    return { log: log.text, plan: plan.text, hasLog: log.found, crash: await readNewestCrash(instance.directory, log.mtimeMs) };
   }
 }

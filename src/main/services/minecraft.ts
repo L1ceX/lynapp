@@ -4,7 +4,7 @@ import { copyFile, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } f
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { AccountState, GameVersionInfo, GameVersionType, LauncherInstance, ModLoader } from "@shared/types";
+import type { AccountState, GameVersionInfo, GameVersionType, LauncherInstance, ModLoader, QuickPlayTarget } from "@shared/types";
 import { getLauncherRoot, getTarPath } from "../paths";
 import { getRequiredJavaMajor as fallbackJavaMajor } from "./java";
 import { readUrlBytes, type BytesCallback } from "./transfer";
@@ -121,8 +121,8 @@ function getAssetsRoot(): string {
   return path.join(getMinecraftRoot(), "assets");
 }
 
-function getNativesRoot(versionId: string): string {
-  return path.join(getMinecraftRoot(), "natives", versionId);
+function getNativesRoot(instanceDir: string, versionId: string): string {
+  return path.join(instanceDir, ".launcher", "natives", versionId);
 }
 
 function getVersionDir(versionId: string): string {
@@ -164,14 +164,21 @@ async function downloadFile(url: string, filePath: string, expectedSha1?: string
   }
 
   await mkdir(path.dirname(filePath), { recursive: true });
+  if (!url) {
+    throw new Error(tr(`Missing download URL for ${path.basename(filePath)}`, `Отсутствует ссылка для загрузки ${path.basename(filePath)}`));
+  }
 
-  const { buffer } = await readUrlBytes(url, { "user-agent": "lynapp/1.1.0-beta.4" }, signal, (received, total) => onBytes?.(received, total), timeoutMs);
-  const tmpPath = `${filePath}.${process.pid}.${(downloadTmpCounter += 1)}.tmp`;
-  await writeFile(tmpPath, buffer);
-  await rename(tmpPath, filePath);
-
-  if (!(await isValidDownload(filePath, expectedSha1))) {
+  const { buffer } = await readUrlBytes(url, { "user-agent": "lynapp/1.1.0-beta.5" }, signal, (received, total) => onBytes?.(received, total), timeoutMs);
+  if (expectedSha1 && createHash("sha1").update(buffer).digest("hex").toLowerCase() !== expectedSha1.toLowerCase()) {
     throw new Error(tr(`Downloaded file checksum mismatch: ${filePath}`, `Контрольная сумма скачанного файла не совпадает: ${filePath}`));
+  }
+  const tmpPath = `${filePath}.${process.pid}.${(downloadTmpCounter += 1)}.tmp`;
+  try {
+    await writeFile(tmpPath, buffer);
+    await rename(tmpPath, filePath);
+  } catch (error) {
+    await rm(tmpPath, { force: true }).catch(() => undefined);
+    throw error;
   }
 }
 
@@ -234,7 +241,7 @@ async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
   const response = await fetch(url, {
     signal,
     headers: {
-      "user-agent": "lynapp/1.1.0-beta.4"
+      "user-agent": "lynapp/1.1.0-beta.5"
     }
   });
 
@@ -303,7 +310,7 @@ async function getCachedLoaderVersions(key: string, loader: () => Promise<string
 
 async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.1.0-beta.4" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.5" }
   });
   if (response.status === 400 || response.status === 404) {
     return [];
@@ -317,7 +324,7 @@ async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> 
 
 async function listQuiltLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.1.0-beta.4" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.5" }
   });
   if (response.status === 400 || response.status === 404) {
     return [];
@@ -359,7 +366,7 @@ function isGameVersionAtLeast(version: string, major: number, minor: number, pat
 async function getFabricGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.fabricmc.net/v2/versions/game", {
-      headers: { "user-agent": "lynapp/1.1.0-beta.4" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.5" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -372,7 +379,7 @@ async function getFabricGameVersions(): Promise<string[]> {
 async function getQuiltGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.quiltmc.org/v3/versions/game", {
-      headers: { "user-agent": "lynapp/1.1.0-beta.4" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.5" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -466,7 +473,7 @@ function ruleApplies(rule: Rule): boolean {
       return false;
     }
 
-    if (rule.os.arch && rule.os.arch !== process.arch) {
+    if (rule.os.arch && rule.os.arch !== (process.arch === "ia32" ? "x86" : process.arch)) {
       return false;
     }
   }
@@ -502,10 +509,17 @@ function normalizePath(input: string): string {
   return input.replace(/\//g, path.sep);
 }
 
+function parseMavenName(name: string): { group: string; artifact: string; version: string; classifier?: string; ext: string } {
+  const at = name.indexOf("@");
+  const coords = at >= 0 ? name.slice(0, at) : name;
+  const ext = (at >= 0 ? name.slice(at + 1) : "").trim() || "jar";
+  const [group = "", artifact = "", version = "", classifier] = coords.split(":");
+  return { group, artifact, version, classifier: classifier || undefined, ext };
+}
+
 function mavenPath(name: string): string {
-  const [group, artifact, version, classifierWithExt] = name.split(":");
-  const classifier = classifierWithExt?.replace("@jar", "");
-  const fileName = `${artifact}-${version}${classifier ? `-${classifier}` : ""}.jar`;
+  const { group, artifact, version, classifier, ext } = parseMavenName(name);
+  const fileName = `${artifact}-${version}${classifier ? `-${classifier}` : ""}.${ext}`;
   return path.join(...group.split("."), artifact, version, fileName);
 }
 
@@ -516,7 +530,7 @@ function mavenUrl(baseUrl: string, name: string): string {
 const legacyLibrariesRoot = "https://libraries.minecraft.net";
 
 function mavenClassifierPath(name: string, classifier: string): string {
-  const [group, artifact, version] = name.split(":");
+  const { group, artifact, version } = parseMavenName(name);
   const fileName = `${artifact}-${version}-${classifier}.jar`;
   return path.join(...group.split("."), artifact, version, fileName);
 }
@@ -585,7 +599,7 @@ async function extractNativeJar(jarPath: string, destination: string): Promise<v
   await mkdir(destination, { recursive: true });
 
   try {
-    await execFileAsync(getTarPath(), ["-xkf", jarPath, "-C", destination], {
+    await execFileAsync(getTarPath(), ["-xf", jarPath, "--exclude", "META-INF", "-C", destination], {
       windowsHide: true,
       timeout: 60000
     });
@@ -677,7 +691,7 @@ async function getManifest(): Promise<VersionManifest> {
   try {
     const response = await fetch(versionManifestUrl, {
       headers: {
-        "user-agent": "lynapp/1.1.0-beta.4"
+        "user-agent": "lynapp/1.1.0-beta.5"
       }
     });
     if (!response.ok) {
@@ -742,7 +756,8 @@ async function prepareLibraries(version: VersionJson, nativesDir: string, signal
 
     if (artifact?.path) {
       const artifactPath = path.join(getLibrariesRoot(), normalizePath(artifact.path));
-      await downloadFile(artifact.url, artifactPath, artifact.sha1, signal);
+      const artifactUrl = artifact.url || (library.url && library.name ? mavenUrl(library.url, library.name) : (library.name ? legacyMavenUrl(library.name) : ""));
+      await downloadFile(artifactUrl, artifactPath, artifact.sha1, signal);
       classpath.push(artifactPath);
     } else if (library.name && library.url) {
       const artifactPath = path.join(getLibrariesRoot(), mavenPath(library.name));
@@ -750,9 +765,7 @@ async function prepareLibraries(version: VersionJson, nativesDir: string, signal
       classpath.push(artifactPath);
     } else if (library.name && !library.natives) {
       const artifactPath = path.join(getLibrariesRoot(), mavenPath(library.name));
-      if (!pathExists(artifactPath)) {
-        await downloadFile(legacyMavenUrl(library.name), artifactPath, undefined, signal);
-      }
+      await downloadFile(legacyMavenUrl(library.name), artifactPath, undefined, signal);
       classpath.push(artifactPath);
     }
 
@@ -768,6 +781,13 @@ async function prepareLibraries(version: VersionJson, nativesDir: string, signal
       }
       const nativeUrl = nativeDownload.url ?? legacyMavenUrl(library.name ?? "", classifier);
       await downloadFile(nativeUrl, nativePath, nativeDownload.sha1, signal);
+      await extractNativeJar(nativePath, nativesDir);
+    } else if (classifier && !nativeDownload && library.name) {
+      const nativePath = path.join(getLibrariesRoot(), mavenClassifierPath(library.name, classifier));
+      const nativeUrl = library.url
+        ? `${library.url.replace(/\/$/, "")}/${mavenClassifierPath(library.name, classifier).replace(/\\/g, "/")}`
+        : legacyMavenUrl(library.name, classifier);
+      await downloadFile(nativeUrl, nativePath, undefined, signal);
       await extractNativeJar(nativePath, nativesDir);
     }
 
@@ -792,10 +812,12 @@ function mergeArguments(
     return undefined;
   }
 
-  return {
-    game: [...(parent?.game ?? []), ...(child?.game ?? [])],
-    jvm: [...(parent?.jvm ?? []), ...(child?.jvm ?? [])]
-  };
+  const game = [...(parent?.game ?? []), ...(child?.game ?? [])];
+  const jvm = [...(parent?.jvm ?? []), ...(child?.jvm ?? [])];
+  if (!game.length && !jvm.length) {
+    return undefined;
+  }
+  return { game, jvm };
 }
 
 function mergeVersionProfile(parent: VersionJson, profile: PartialVersionJson, id: string): VersionJson {
@@ -821,7 +843,7 @@ async function getFabricLoaderVersion(requested?: string, signal?: AbortSignal):
 
   const response = await fetch("https://meta.fabricmc.net/v2/versions/loader", {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.4" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.5" }
   });
   if (!response.ok) {
     throw new Error(tr(`Fabric loader versions returned ${response.status}`, `Сервер Fabric вернул ошибку при загрузке версий: ${response.status}`));
@@ -852,7 +874,7 @@ async function getQuiltLoaderVersion(gameVersion: string, requested?: string, si
 
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.4" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.5" }
   });
   if (!response.ok) {
     throw new Error(tr(`Quilt loader versions returned ${response.status}`, `Сервер Quilt вернул ошибку при загрузке версий: ${response.status}`));
@@ -926,7 +948,8 @@ function installerErrorDetails(error: unknown): string {
   return output.slice(-20).join("\n") || error.message;
 }
 
-async function runClientInstaller(javaPath: string, installerPath: string, loader: "forge" | "neoforge"): Promise<void> {
+async function runClientInstaller(javaPath: string, installerPath: string, loader: "forge" | "neoforge", signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   await mkdir(getMinecraftRoot(), { recursive: true });
   await ensureLauncherProfiles();
 
@@ -936,11 +959,43 @@ async function runClientInstaller(javaPath: string, installerPath: string, loade
       cwd: getMinecraftRoot(),
       windowsHide: true,
       timeout: 15 * 60 * 1000,
-      maxBuffer: 20 * 1024 * 1024
+      maxBuffer: 20 * 1024 * 1024,
+      signal
     });
   } catch (error) {
+    if (signal?.aborted) {
+      throw error;
+    }
     throw new Error(tr(`${loader} client installer failed:\n${installerErrorDetails(error)}`, `Установщик ${loader} завершился с ошибкой:\n${installerErrorDetails(error)}`));
   }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function matchesVersionToken(text: string, token: string): boolean {
+  const clean = token.trim().toLowerCase();
+  if (!clean) return false;
+  const re = new RegExp(`(?:^|[^0-9.])${escapeRegExp(clean)}(?:$|[^0-9.])`, "i");
+  return re.test(text);
+}
+
+function hasInstalledProfileLibraries(profile: PartialVersionJson): boolean {
+  for (const library of profile.libraries ?? []) {
+    if (!isAllowed(library.rules)) continue;
+    const artifact = library.downloads?.artifact;
+    if (artifact?.path && !artifact.url) {
+      if (!pathExists(path.join(getLibrariesRoot(), normalizePath(artifact.path)))) {
+        return false;
+      }
+    } else if (!artifact && !library.url && !library.natives && library.name && /^(net\.minecraftforge|net\.neoforged):/.test(library.name)) {
+      if (!pathExists(path.join(getLibrariesRoot(), mavenPath(library.name)))) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 function scoreInstalledProfile(
@@ -955,6 +1010,9 @@ function scoreInstalledProfile(
   const shortLoaderVersion = lowerLoaderVersion.includes("-")
     ? lowerLoaderVersion.split("-").slice(1).join("-")
     : lowerLoaderVersion;
+  const strippedSuffix = shortLoaderVersion.endsWith(`-${gameVersion.toLowerCase()}`)
+    ? shortLoaderVersion.slice(0, -gameVersion.length - 1)
+    : "";
 
   if (loader === "forge") {
     if (!text.includes("forge") || text.includes("neoforge")) {
@@ -968,10 +1026,21 @@ function scoreInstalledProfile(
     return -1;
   }
 
+  const hasExactLoader = matchesVersionToken(id, lowerLoaderVersion)
+    || matchesVersionToken(id, shortLoaderVersion)
+    || (strippedSuffix ? matchesVersionToken(id, strippedSuffix) : false);
+  if (!hasExactLoader) {
+    return -1;
+  }
+
+  if (!hasInstalledProfileLibraries(profile)) {
+    return -1;
+  }
+
   let score = 0;
-  if (text.includes(gameVersion.toLowerCase())) score += 20;
-  if (text.includes(lowerLoaderVersion)) score += 30;
-  if (shortLoaderVersion && text.includes(shortLoaderVersion)) score += 15;
+  if (matchesVersionToken(text, gameVersion)) score += 20;
+  if (matchesVersionToken(id, lowerLoaderVersion)) score += 30;
+  if (shortLoaderVersion && matchesVersionToken(id, shortLoaderVersion)) score += 15;
   if (profile.mainClass) score += 5;
 
   return score;
@@ -1022,7 +1091,16 @@ async function loadInstalledLoaderProfile(
 async function getForgeLoaderVersion(gameVersion: string, requested?: string, signal?: AbortSignal): Promise<string> {
   if (requested?.trim()) {
     const value = requested.trim();
-    return value.startsWith(`${gameVersion}-`) ? value : `${gameVersion}-${value}`;
+    const prefixed = value.startsWith(`${gameVersion}-`) ? value : `${gameVersion}-${value}`;
+    try {
+      const metadata = await fetchText("https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml", signal);
+      const versions = parseMavenVersions(metadata).filter((version) => version.startsWith(`${gameVersion}-`));
+      const match = versions.find((v) => v === value || v === prefixed || v === `${prefixed}-${gameVersion}`)
+        ?? versions.find((v) => v.startsWith(`${prefixed}-`));
+      if (match) return match;
+    } catch {
+    }
+    return prefixed;
   }
 
   const metadata = await fetchText("https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml", signal);
@@ -1038,9 +1116,10 @@ async function getForgeLoaderVersion(gameVersion: string, requested?: string, si
 async function applyForgeProfile(version: VersionJson, instance: LauncherInstance, javaPath: string, signal?: AbortSignal, onProgress?: (progress: LaunchProgress) => void): Promise<VersionJson> {
   const loaderVersion = await getForgeLoaderVersion(instance.gameVersion, instance.loaderVersion, signal);
   const short = loaderVersion.includes("-") ? loaderVersion.split("-").slice(1).join("-") : loaderVersion;
+  const stripped = short.endsWith(`-${instance.gameVersion}`) ? short.slice(0, -instance.gameVersion.length - 1) : "";
   try {
     const existing = await loadInstalledLoaderProfile("forge", instance.gameVersion, loaderVersion, version);
-    if (existing.id.toLowerCase().includes(short.toLowerCase())) {
+    if (matchesVersionToken(existing.id, loaderVersion) || matchesVersionToken(existing.id, short) || (stripped && matchesVersionToken(existing.id, stripped))) {
       return existing;
     }
   } catch {
@@ -1057,7 +1136,8 @@ async function applyForgeProfile(version: VersionJson, instance: LauncherInstanc
     throw error;
   }
   onProgress?.({ phase: "loader", done: 0, total: 0 });
-  await runClientInstaller(javaPath, installerPath, "forge");
+  await prepareClientJar(version, instance.gameVersion, signal);
+  await runClientInstaller(javaPath, installerPath, "forge", signal);
   return loadInstalledLoaderProfile("forge", instance.gameVersion, loaderVersion, version);
 }
 
@@ -1133,7 +1213,7 @@ async function getNeoForgeLoaderVersion(gameVersion: string, requested?: string,
     throw new Error(tr(`NeoForge version mapping is unknown for Minecraft ${gameVersion}.`, `Неизвестно, какая версия NeoForge подходит для Minecraft ${gameVersion}.`));
   }
 
-  const metadata = await fetchText("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml");
+  const metadata = await fetchText("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml", signal);
   const versions = parseMavenVersions(metadata).filter((version) => version.startsWith(prefix));
   const latest = pickLatestLoaderVersion(versions);
   if (!latest) {
@@ -1147,7 +1227,7 @@ async function applyNeoForgeProfile(version: VersionJson, instance: LauncherInst
   const loaderVersion = await getNeoForgeLoaderVersion(instance.gameVersion, instance.loaderVersion, signal);
   try {
     const existing = await loadInstalledLoaderProfile("neoforge", instance.gameVersion, loaderVersion, version);
-    if (existing.id.toLowerCase().includes(loaderVersion.toLowerCase())) {
+    if (matchesVersionToken(existing.id, loaderVersion)) {
       return existing;
     }
   } catch {
@@ -1157,7 +1237,8 @@ async function applyNeoForgeProfile(version: VersionJson, instance: LauncherInst
 
   await downloadFile(installerUrl, installerPath, undefined, signal, undefined, 15 * 60 * 1000);
   onProgress?.({ phase: "loader", done: 0, total: 0 });
-  await runClientInstaller(javaPath, installerPath, "neoforge");
+  await prepareClientJar(version, instance.gameVersion, signal);
+  await runClientInstaller(javaPath, installerPath, "neoforge", signal);
   return loadInstalledLoaderProfile("neoforge", instance.gameVersion, loaderVersion, version);
 }
 
@@ -1222,6 +1303,47 @@ async function prepareAssets(version: VersionJson, instance: LauncherInstance, s
   return getAssetsRoot();
 }
 
+function isQuickPlaySupported(gameVersion: string, version: VersionJson): boolean {
+  const raw = JSON.stringify(version.arguments?.game ?? []);
+  if (raw.includes("quickPlay")) return true;
+  const m = /^1\.(\d+)/.exec(gameVersion);
+  if (m && Number(m[1]) >= 20) return true;
+  if (/^\d{2}\.\d+/.test(gameVersion)) return true;
+  return false;
+}
+
+function appendQuickPlayArgs(gameArgs: string[], gameVersion: string, version: VersionJson, quickPlay?: QuickPlayTarget): void {
+  if (!quickPlay || !quickPlay.value.trim()) return;
+  const val = quickPlay.value.trim();
+  if (quickPlay.kind === "singleplayer") {
+    if (isQuickPlaySupported(gameVersion, version)) {
+      gameArgs.push("--quickPlaySingleplayer", val);
+    }
+    return;
+  }
+  if (isQuickPlaySupported(gameVersion, version)) {
+    gameArgs.push("--quickPlayMultiplayer", val);
+  } else {
+    const bracketed = val.match(/^\[([^\]]+)\](?::(\d+))?$/);
+    const colonCount = (val.match(/:/g) ?? []).length;
+    let host = val;
+    let port = 25565;
+    if (bracketed) {
+      host = bracketed[1];
+      if (bracketed[2]) port = Number(bracketed[2]);
+    } else if (colonCount === 1) {
+      const lastColon = val.lastIndexOf(":");
+      const parsed = Number(val.slice(lastColon + 1));
+      if (lastColon > 0 && Number.isInteger(parsed) && parsed > 0 && parsed <= 65535) {
+        host = val.slice(0, lastColon);
+        port = parsed;
+      }
+    }
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) port = 25565;
+    gameArgs.push("--server", host, "--port", String(port));
+  }
+}
+
 function buildLaunchArgs(
   version: VersionJson,
   instance: LauncherInstance,
@@ -1231,7 +1353,8 @@ function buildLaunchArgs(
     classpath: string;
     nativesDir: string;
     gameAssets: string;
-  }
+  },
+  quickPlay?: QuickPlayTarget
 ): string[] {
   const playerName = getPlayerName(account);
   const uuid = getPlayerUuid(account, playerName);
@@ -1251,7 +1374,7 @@ function buildLaunchArgs(
     version_type: version.type,
     natives_directory: paths.nativesDir,
     launcher_name: "lynapp",
-        launcher_version: "1.1.0-beta.4",
+        launcher_version: "1.1.0-beta.5",
     classpath: paths.classpath,
     classpath_separator: ";",
     library_directory: getLibrariesRoot(),
@@ -1259,12 +1382,17 @@ function buildLaunchArgs(
     game_assets: paths.gameAssets,
     auth_session: offline ? accessToken : `token:${accessToken}:${uuid}`
   };
-  const jvmArgs = version.arguments?.jvm
-    ? collectArguments(version.arguments.jvm, variables)
-    : ["-Djava.library.path=${natives_directory}", "-cp", "${classpath}"].map((item) => replaceVariables(item, variables));
-  const gameArgs = version.arguments?.game
-    ? collectArguments(version.arguments.game, variables)
-    : (version.minecraftArguments ?? "").split(" ").filter(Boolean).map((item) => replaceVariables(item, variables));
+  const jvmArgs = version.arguments?.jvm?.length ? collectArguments(version.arguments.jvm, variables) : [];
+  if (!jvmArgs.includes("-cp") && !jvmArgs.includes("-classpath")) {
+    jvmArgs.unshift(...["-Djava.library.path=${natives_directory}", "-cp", "${classpath}"].map((item) => replaceVariables(item, variables)));
+  }
+  const modernGameArgs = version.arguments?.game?.length ? collectArguments(version.arguments.game, variables) : [];
+  const legacyGameArgs = (version.minecraftArguments ?? "").split(" ").filter(Boolean).map((item) => replaceVariables(item, variables));
+  const gameArgs = modernGameArgs.includes("--username") || !legacyGameArgs.length
+    ? modernGameArgs
+    : [...legacyGameArgs, ...modernGameArgs];
+
+  appendQuickPlayArgs(gameArgs, instance.gameVersion, version, quickPlay);
 
   return [`-Xms${javaMemory.memoryMb}M`, `-Xmx${javaMemory.memoryMb}M`, ...javaMemory.extraJvmArgs, ...jvmArgs, version.mainClass, ...gameArgs];
 }
@@ -1282,7 +1410,7 @@ async function ensureAuthlibInjector(signal?: AbortSignal): Promise<string> {
   }
   const response = await fetch("https://api.github.com/repos/yushijinhun/authlib-injector/releases/latest", {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.4", accept: "application/vnd.github+json" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.5", accept: "application/vnd.github+json" }
   });
   if (!response.ok) {
     throw new Error(tr(`authlib-injector release lookup failed (HTTP ${response.status})`, `Не удалось найти выпуск authlib-injector (HTTP ${response.status})`));
@@ -1299,7 +1427,7 @@ async function ensureAuthlibInjector(signal?: AbortSignal): Promise<string> {
 async function isElyAuthAvailable(signal?: AbortSignal): Promise<boolean> {
   const timeout = AbortSignal.timeout(7000);
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  const headers = { "user-agent": "lynapp/1.1.0-beta.4" };
+  const headers = { "user-agent": "lynapp/1.1.0-beta.5" };
   try {
     const root = await fetch("https://ely.by/", { signal: combined, headers });
     if (!root.ok) return false;
@@ -1388,13 +1516,14 @@ export class MinecraftService {
     javaPath: string,
     signal?: AbortSignal,
     onProgress?: (progress: LaunchProgress) => void,
-    concurrency = 12
+    concurrency = 12,
+    quickPlay?: QuickPlayTarget
   ): Promise<PreparedMinecraftLaunch> {
     await mkdir(instance.directory, { recursive: true });
 
     const vanillaVersion = await getVersionJson(instance.gameVersion, signal);
     const version = await applyLoaderProfile(vanillaVersion, instance, javaPath, signal, onProgress);
-    const nativesDir = getNativesRoot(version.id);
+    const nativesDir = getNativesRoot(instance.directory, version.id);
     const clientJar = version.prebuiltClientJar ?? await prepareClientJar(vanillaVersion, version.id, signal);
     const libraryClasspath = await prepareLibraries(version, nativesDir, signal, onProgress);
     const gameAssets = await prepareAssets(version, instance, signal, onProgress, concurrency);
@@ -1404,7 +1533,7 @@ export class MinecraftService {
       classpath,
       nativesDir,
       gameAssets
-    });
+    }, quickPlay);
     let warning: string | undefined;
     if (account.kind === "ely") {
       if (await isElyAuthAvailable(signal)) {

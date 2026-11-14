@@ -11,7 +11,7 @@ export function formatBytes(bytes: number): string {
     value /= 1024;
     unit += 1;
   }
-  return `${value >= 100 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+  return `${unit === 0 || value >= 100 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
 }
 
 export const dateFormatter = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "numeric", day: "numeric" });
@@ -42,7 +42,8 @@ export function ruPlural(n: number, one: string, few: string, many: string): str
 export function formatRelative(iso: string | undefined, lang: "en" | "ru"): string {
   if (!iso) return "";
   const diffMs = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(diffMs) || diffMs < 0) return "";
+  if (Number.isNaN(diffMs) || diffMs < -300000) return "";
+  if (diffMs < 0) return lang === "ru" ? "только что" : "just now";
   const ago = (n: number, en: string, one: string, few: string, many: string): string =>
     lang === "ru" ? `${n} ${ruPlural(n, one, few, many)} назад` : `${n} ${en}${n === 1 ? "" : "s"} ago`;
   const minutes = Math.floor(diffMs / 60000);
@@ -71,6 +72,12 @@ export function pageList(current: number, total: number): Array<number | "gap"> 
 
 export function withFallback<T>(options: T[], current: T): T[] {
   return options.includes(current) ? options : [current, ...options];
+}
+
+export function cleanIpcError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error) || !error.message) return fallback;
+  const cleaned = error.message.replace(/^(?:Error invoking remote method '[^']+':\s*)?(?:Error:\s*)?/i, "").trim();
+  return cleaned || fallback;
 }
 
 export function transferLabel(entry: { received: number; total: number | null } | undefined): string | null {

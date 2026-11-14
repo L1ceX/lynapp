@@ -9,6 +9,7 @@ const { autoUpdater } = electronUpdater;
 let mainWindow: BrowserWindow | null = null;
 let listening = false;
 let allowBeta: boolean | null = null;
+let activeDownload: Promise<unknown> | null = null;
 
 function check(): void {
   if (!app.isPackaged || !listening || allowBeta === null) {
@@ -67,7 +68,12 @@ export async function downloadUpdate(): Promise<void> {
   if (!app.isPackaged) {
     throw new Error(tr("Self-update works only in installed builds", "Автообновление работает только в установленной версии"));
   }
-  await autoUpdater.downloadUpdate();
+  if (!activeDownload) {
+    activeDownload = autoUpdater.downloadUpdate().finally(() => {
+      activeDownload = null;
+    });
+  }
+  await activeDownload;
 }
 
 export function installUpdate(): void {

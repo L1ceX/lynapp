@@ -10,7 +10,10 @@ import { InstanceTabsNav } from "./InstanceTabsNav";
 import { LaunchSlot } from "./LaunchSlot";
 import { LogsTab } from "./LogsTab";
 import { RuntimeTab } from "./RuntimeTab";
+import { ScreenshotsTab } from "./ScreenshotsTab";
+import { ServersTab } from "./ServersTab";
 import { VersionsTab } from "./VersionsTab";
+import { WorldsTab } from "./WorldsTab";
 
 export function InstancesPage() {
   const { navLayout, headerStatus, instanceTab, section, sectionExiting, selected, t, tabExiting } = useApp();
@@ -31,6 +34,9 @@ export function InstancesPage() {
                   <GeneralTab />
                   <VersionsTab />
                   <FilesTab />
+                  <WorldsTab />
+                  <ServersTab />
+                  <ScreenshotsTab />
                   <RuntimeTab />
                   <LogsTab />
                   <ContentTab />

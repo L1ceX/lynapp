@@ -1,9 +1,9 @@
-import { Cpu, Folder, PackageSearch, ScrollText, SlidersHorizontal, Waypoints } from "lucide-react";
+import { Cpu, Folder, Globe, Image, PackageSearch, ScrollText, Server, SlidersHorizontal, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AfterLaunchAction, BootstrapState, LauncherSettings, UpdateStatus } from "@shared/types";
 import type { AppSection, InstanceTab } from "../../constants";
 import { getLauncherApi } from "../../lib/api";
-import { formatRelative } from "../../lib/format";
+import { cleanIpcError, formatRelative } from "../../lib/format";
 import { motionMs } from "../../lib/motion";
 
 export function useCore() {
@@ -35,17 +35,17 @@ export function useCore() {
       setBootstrap((current) => current ? { ...current, settings } : current);
       setSettingsDraft(settings);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to save", "Не удалось сохранить"));
+      setStatus(cleanIpcError(error, t("Failed to save", "Не удалось сохранить")));
     }
   }
 
-  async function setSettingFlag(key: "discordPresence" | "discordHideInstance" | "betaUpdates", value: boolean): Promise<void> {
+  async function setSettingFlag(key: "discordPresence" | "discordHideInstance" | "betaUpdates" | "autoInstallDependencies", value: boolean): Promise<void> {
     try {
       const settings = await getLauncherApi().updateSettings({ [key]: value });
       setBootstrap((current) => current ? { ...current, settings } : current);
       setSettingsDraft(settings);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to save", "Не удалось сохранить"));
+      setStatus(cleanIpcError(error, t("Failed to save", "Не удалось сохранить")));
     }
   }
 
@@ -55,7 +55,7 @@ export function useCore() {
       setBootstrap((current) => current ? { ...current, settings } : current);
       setSettingsDraft(settings);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to save language", "Не удалось сохранить язык"));
+      setStatus(cleanIpcError(error, t("Failed to save language", "Не удалось сохранить язык")));
     }
   }
 
@@ -101,12 +101,14 @@ export function useCore() {
   }, []);
 
   async function downloadUpdate(): Promise<void> {
+    if (update?.kind === "downloading") return;
+    const prevVersion = update?.kind === "available" ? update.version : undefined;
     setUpdate((current) => ({ kind: "downloading", percent: 0, version: current?.version }));
     try {
       await getLauncherApi().downloadUpdate();
     } catch (error) {
-      setUpdate(null);
-      setStatus(error instanceof Error ? error.message : t("Update download failed", "Не удалось скачать обновление"));
+      setUpdate(prevVersion ? { kind: "available", version: prevVersion } : null);
+      setStatus(cleanIpcError(error, t("Update download failed", "Не удалось скачать обновление")));
     }
   }
 
@@ -114,7 +116,7 @@ export function useCore() {
     try {
       await getLauncherApi().installUpdate();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Update install failed", "Не удалось установить обновление"));
+      setStatus(cleanIpcError(error, t("Update install failed", "Не удалось установить обновление")));
     }
   }
 
@@ -126,6 +128,10 @@ export function useCore() {
     if (next === instanceTab) {
       setTabExiting(false);
       return;
+    }
+    if (selectedIdRef.current && !launchingIds.includes(selectedIdRef.current) && !busy && next !== "logs") {
+      const sid = selectedIdRef.current;
+      setInstanceStatus((current) => (current[sid] ? { ...current, [sid]: "" } : current));
     }
     setTabExiting(true);
     tabTimer.current = window.setTimeout(() => {
@@ -186,12 +192,12 @@ export function useCore() {
     const next = await getLauncherApi().getBootstrap();
     setBootstrap(next);
     setSettingsDraft(next.settings);
-    setSelectedId((current) => current ?? next.activeInstanceId ?? next.instances[0]?.id ?? null);
+    setSelectedId((current) => current && next.instances.some((item) => item.id === current) ? current : (next.activeInstanceId ?? next.instances[0]?.id ?? null));
     if (options?.setReadyStatus !== false) setStatus("");
   }, []);
 
   useEffect(() => {
-    refresh().catch((error) => setStatus(error instanceof Error ? error.message : t("Failed to load launcher", "Не удалось загрузить лаунчер")));
+    refresh().catch((error) => setStatus(cleanIpcError(error, t("Failed to load launcher", "Не удалось загрузить лаунчер"))));
   }, [refresh]);
 
   const selected = useMemo(
@@ -203,9 +209,10 @@ export function useCore() {
 
   const headerStatus = selected !== null ? instanceStatus[selected.id] ?? "" : "";
 
-  function say(message: string): void {
-    if (selected) {
-      setInstanceStatus((current) => ({ ...current, [selected.id]: message }));
+  function say(message: string, targetInstanceId?: string): void {
+    const id = targetInstanceId ?? selectedIdRef.current;
+    if (id) {
+      setInstanceStatus((current) => ({ ...current, [id]: message }));
     }
   }
 
@@ -219,13 +226,17 @@ export function useCore() {
 
   async function saveSettings(): Promise<void> {
     if (!settingsDraft) return;
-    const settings = await getLauncherApi().updateSettings({
-      maxMemoryMb: settingsDraft.maxMemoryMb,
-      extraJvmArgs: settingsDraft.extraJvmArgs
-    });
-    setBootstrap((current) => current ? { ...current, settings } : current);
-    setSettingsDraft(settings);
-    setStatus(t("Settings saved", "Настройки сохранены"));
+    try {
+      const settings = await getLauncherApi().updateSettings({
+        maxMemoryMb: settingsDraft.maxMemoryMb,
+        extraJvmArgs: settingsDraft.extraJvmArgs
+      });
+      setBootstrap((current) => current ? { ...current, settings } : current);
+      setSettingsDraft(settings);
+      setStatus(t("Settings saved", "Настройки сохранены"));
+    } catch (error) {
+      setStatus(cleanIpcError(error, t("Failed to save", "Не удалось сохранить")));
+    }
   }
 
   const instanceTabs = [
@@ -233,6 +244,9 @@ export function useCore() {
     { id: "versions" as const, label: t("Versions", "Версии"), icon: Waypoints },
     { id: "content" as const, label: t("Content", "Контент"), icon: PackageSearch },
     { id: "files" as const, label: t("Files", "Файлы"), icon: Folder },
+    { id: "worlds" as const, label: t("Worlds", "Миры"), icon: Globe },
+    { id: "servers" as const, label: t("Servers", "Серверы"), icon: Server },
+    { id: "screenshots" as const, label: t("Screenshots", "Скриншоты"), icon: Image },
     { id: "runtime" as const, label: "RAM", icon: Cpu },
     { id: "logs" as const, label: t("Logs", "Журнал"), icon: ScrollText }
   ];

@@ -23,11 +23,16 @@ export function useReorder<T extends HTMLElement>(options: { axis: "x" | "y"; en
   const { axis, enabled, onMove } = options;
   const containerRef = useRef<T | null>(null);
   const session = useRef<Session | null>(null);
+  const cleanupDragRef = useRef<(() => void) | null>(null);
   const suppressClick = useRef(false);
   const onMoveRef = useRef(onMove);
   onMoveRef.current = onMove;
   const [drag, setDrag] = useState<DragState | null>(null);
   const [settling, setSettling] = useState(false);
+
+  useEffect(() => () => {
+    cleanupDragRef.current?.();
+  }, []);
 
   useEffect(() => {
     if (!settling) return;
@@ -37,56 +42,16 @@ export function useReorder<T extends HTMLElement>(options: { axis: "x" | "y"; en
 
   useEffect(() => {
     if (!enabled) {
+      cleanupDragRef.current?.();
       session.current = null;
       setDrag(null);
     }
   }, [enabled]);
 
-  function onPointerMove(event: PointerEvent): void {
-    const current = session.current;
-    if (!current) return;
-    const position = axis === "x" ? event.clientX : event.clientY;
-    let delta = position - current.start;
-    if (!current.active) {
-      if (Math.abs(delta) < THRESHOLD) return;
-      current.active = true;
-    }
-    const own = current.rects[current.index];
-    const first = current.rects[0];
-    const last = current.rects[current.rects.length - 1];
-    delta = Math.max(first.start - own.start, Math.min(last.end - own.end, delta));
-    const center = own.start + delta + (own.end - own.start) / 2;
-    let target = current.index;
-    for (let i = 0; i < current.index; i++) {
-      if (center < current.rects[i].end) {
-        target = i;
-        break;
-      }
-    }
-    for (let i = current.index + 1; i < current.rects.length; i++) {
-      if (center > current.rects[i].start) target = i;
-    }
-    current.target = target;
-    setDrag({ index: current.index, delta, target, step: current.step });
-  }
-
-  function onPointerUp(): void {
-    window.removeEventListener("pointermove", onPointerMove);
-    window.removeEventListener("pointerup", onPointerUp);
-    window.removeEventListener("pointercancel", onPointerUp);
-    const current = session.current;
-    session.current = null;
-    if (!current || !current.active) return;
-    suppressClick.current = true;
-    window.setTimeout(() => { suppressClick.current = false; }, 0);
-    setSettling(true);
-    setDrag(null);
-    if (current.target !== current.index) onMoveRef.current(current.index, current.target);
-  }
-
   function startDrag(index: number, event: ReactPointerEvent<HTMLElement>): void {
     if (!enabled || event.button !== 0 || !containerRef.current) return;
     if ((event.target as Element).closest("[data-reorder-ignore]")) return;
+    cleanupDragRef.current?.();
     const items = [...containerRef.current.querySelectorAll<HTMLElement>(":scope > [data-reorder-index]")];
     const rects = items.map((element) => {
       const rect = element.getBoundingClientRect();
@@ -102,9 +67,54 @@ export function useReorder<T extends HTMLElement>(options: { axis: "x" | "y"; en
       target: index,
       step: rects[index].end - rects[index].start + gap
     };
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", onPointerUp);
+    const handleMove = (moveEvent: PointerEvent): void => {
+      const current = session.current;
+      if (!current) return;
+      const position = axis === "x" ? moveEvent.clientX : moveEvent.clientY;
+      let delta = position - current.start;
+      if (!current.active) {
+        if (Math.abs(delta) < THRESHOLD) return;
+        current.active = true;
+      }
+      const own = current.rects[current.index];
+      const first = current.rects[0];
+      const last = current.rects[current.rects.length - 1];
+      delta = Math.max(first.start - own.start, Math.min(last.end - own.end, delta));
+      const center = own.start + delta + (own.end - own.start) / 2;
+      let target = current.index;
+      for (let i = 0; i < current.index; i++) {
+        if (center < current.rects[i].end) {
+          target = i;
+          break;
+        }
+      }
+      for (let i = current.index + 1; i < current.rects.length; i++) {
+        if (center > current.rects[i].start) target = i;
+      }
+      current.target = target;
+      setDrag({ index: current.index, delta, target, step: current.step });
+    };
+    const detach = (): void => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+      window.removeEventListener("pointercancel", handleUp);
+      if (cleanupDragRef.current === detach) cleanupDragRef.current = null;
+    };
+    const handleUp = (): void => {
+      detach();
+      const current = session.current;
+      session.current = null;
+      if (!current || !current.active) return;
+      suppressClick.current = true;
+      window.setTimeout(() => { suppressClick.current = false; }, 0);
+      setSettling(true);
+      setDrag(null);
+      if (current.target !== current.index) onMoveRef.current(current.index, current.target);
+    };
+    cleanupDragRef.current = detach;
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+    window.addEventListener("pointercancel", handleUp);
   }
 
   function itemStyle(index: number): CSSProperties | undefined {

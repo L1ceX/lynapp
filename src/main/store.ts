@@ -1,11 +1,97 @@
-import { app } from "electron";
+import { app, safeStorage } from "electron";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { EFFECTS_DEFAULTS, VERSION_TYPES_DEFAULTS, type AccountState, type LauncherInstance, type LauncherSettings, type SkinMeta } from "@shared/types";
 import { THEME_DEFAULTS } from "@shared/theme";
-import { setMainLanguage } from "./i18n";
+import { setMainLanguage, tr } from "./i18n";
 import { getInstancesRoot, getLauncherRoot, getLegacyLauncherRoot, getStorePath } from "./paths";
+
+const SECRET_PREFIX = "dpapi:v1:";
+const SECRET_ACCOUNT_FIELDS = [
+  "minecraftAccessToken",
+  "microsoftRefreshToken",
+  "elyAccessToken",
+  "elyClientToken",
+  "elyRefreshToken",
+  "xboxUhs"
+] as const;
+
+function canEncryptSecrets(): boolean {
+  try {
+    return safeStorage.isEncryptionAvailable();
+  } catch {
+    return false;
+  }
+}
+
+function encryptAccountSecrets(account: AccountState): AccountState {
+  if (!canEncryptSecrets()) return account;
+  let copy: AccountState | null = null;
+  for (const field of SECRET_ACCOUNT_FIELDS) {
+    const value = account[field];
+    if (typeof value !== "string" || !value || value.startsWith(SECRET_PREFIX)) continue;
+    try {
+      const encoded = safeStorage.encryptString(value).toString("base64");
+      if (!copy) copy = { ...account };
+      copy[field] = `${SECRET_PREFIX}${encoded}`;
+    } catch {
+    }
+  }
+  return copy ?? account;
+}
+
+function decryptAccounts(accounts: AccountState[]): boolean {
+  const canEncrypt = canEncryptSecrets();
+  let needsRewrite = false;
+  for (const account of accounts) {
+    let unreadable = false;
+    for (const field of SECRET_ACCOUNT_FIELDS) {
+      const value = account[field];
+      if (typeof value !== "string" || !value) continue;
+      if (value.startsWith(SECRET_PREFIX)) {
+        if (!canEncrypt) continue;
+        try {
+          account[field] = safeStorage.decryptString(Buffer.from(value.slice(SECRET_PREFIX.length), "base64"));
+        } catch {
+          delete account[field];
+          unreadable = true;
+          needsRewrite = true;
+        }
+      } else if (canEncrypt) {
+        needsRewrite = true;
+      }
+    }
+    if (unreadable && account.status === "signed-in") {
+      account.status = "signed-out";
+      account.message = tr("Sign in again (device changed)", "Войдите снова (сменилось устройство или система)");
+    }
+  }
+  return needsRewrite;
+}
+
+const RETRYABLE_FS_CODES = new Set(["EBUSY", "EPERM", "EACCES", "EMFILE", "ENFILE", "EAGAIN"]);
+
+function isRetryableFsError(error: unknown): boolean {
+  return RETRYABLE_FS_CODES.has((error as NodeJS.ErrnoException)?.code ?? "");
+}
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function withFsRetry<T>(action: () => Promise<T>, attempts = 6): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableFsError(error) || attempt === attempts - 1) break;
+      await delay(80 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
 
 export interface LauncherData {
   settings: LauncherSettings;
@@ -30,6 +116,7 @@ function defaultSettings(): LauncherSettings {
     discordPresence: true,
     discordHideInstance: false,
     betaUpdates: app.getVersion().includes("-"),
+    autoInstallDependencies: false,
     versionTypes: { ...VERSION_TYPES_DEFAULTS },
     microsoftClientId: "",
     language: "en",
@@ -163,6 +250,14 @@ function mergeData(input: Partial<LauncherData>): LauncherData {
   };
 }
 
+export function getSystemMemoryMb(): number {
+  return Math.max(1024, Math.round(os.totalmem() / (1024 * 1024)));
+}
+
+export function getMaxAllocatableMemoryMb(): number {
+  return Math.max(1024, Math.floor(getSystemMemoryMb() / 256) * 256);
+}
+
 export function getActiveAccount(data: Pick<LauncherData, "accounts" | "activeAccountId">): AccountState | null {
   return data.accounts.find((item) => item.id === data.activeAccountId) ?? data.accounts[0] ?? null;
 }
@@ -170,6 +265,7 @@ export function getActiveAccount(data: Pick<LauncherData, "accounts" | "activeAc
 export class JsonStore {
   private data: LauncherData | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
+  private updateQueue: Promise<unknown> = Promise.resolve();
   private tmpCounter = 0;
 
   constructor(private readonly filePath = getStorePath()) {}
@@ -192,6 +288,7 @@ export class JsonStore {
   }
 
   private async loadFromDisk(): Promise<LauncherData> {
+    await app.whenReady();
     await migrateLegacyData();
     await mkdir(path.dirname(this.filePath), { recursive: true });
     await mkdir(getInstancesRoot(), { recursive: true });
@@ -204,20 +301,26 @@ export class JsonStore {
 
     let raw: string;
     try {
-      raw = await readFile(this.filePath, "utf8");
-    } catch {
-      this.data = createDefaultData();
-      return this.data;
+      raw = await withFsRetry(() => readFile(this.filePath, "utf8"));
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(tr(`Could not read launcher data: ${reason}`, `Не удалось прочитать данные лаунчера: ${reason}`));
     }
+    let parsed: LauncherData;
     try {
-      this.data = mergeData(JSON.parse(raw) as Partial<LauncherData>);
+      parsed = mergeData(JSON.parse(raw) as Partial<LauncherData>);
     } catch {
       try {
         await rename(this.filePath, `${this.filePath}.corrupt-${Date.now()}`);
       } catch {
       }
       this.data = createDefaultData();
-      await this.save(this.data);
+      await this.save(this.data).catch(() => undefined);
+      return this.data;
+    }
+    this.data = parsed;
+    if (decryptAccounts(parsed.accounts)) {
+      await this.save(parsed).catch(() => undefined);
     }
     return this.data;
   }
@@ -226,25 +329,67 @@ export class JsonStore {
     return this.load();
   }
 
-  async update<T>(mutator: (data: LauncherData) => T | Promise<T>): Promise<T> {
+  update<T>(mutator: (data: LauncherData) => T | Promise<T>): Promise<T> {
+    const task = this.updateQueue.then(() => this.runUpdate(mutator));
+    this.updateQueue = task.catch(() => undefined);
+    return task;
+  }
+
+  private async runUpdate<T>(mutator: (data: LauncherData) => T | Promise<T>): Promise<T> {
     const data = await this.load();
-    const result = await mutator(data);
-    data.updatedAt = new Date().toISOString();
-    const snapshot = JSON.stringify(data, null, 2);
+    const backup = structuredClone(data);
+    let result: T;
+    let snapshot: string;
+    try {
+      result = await mutator(data);
+      data.updatedAt = new Date().toISOString();
+      snapshot = this.serialize(data);
+    } catch (error) {
+      this.restore(data, backup);
+      throw error;
+    }
     const run = this.saveQueue.then(() => this.saveSnapshot(snapshot));
     this.saveQueue = run.catch(() => undefined);
-    await run;
+    try {
+      await run;
+    } catch (error) {
+      this.restore(data, backup);
+      throw error;
+    }
     return result;
+  }
+
+  private restore(data: LauncherData, backup: LauncherData): void {
+    for (const key of Object.keys(data) as Array<keyof LauncherData>) {
+      if (!(key in backup)) delete (data as unknown as Record<string, unknown>)[key];
+    }
+    Object.assign(data, backup);
+  }
+
+  private serialize(data: LauncherData): string {
+    return JSON.stringify(
+      {
+        ...data,
+        accounts: data.accounts.map(encryptAccountSecrets)
+      },
+      null,
+      2
+    );
   }
 
   private async saveSnapshot(snapshot: string): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     const tmpPath = `${this.filePath}.${process.pid}.${(this.tmpCounter += 1)}.tmp`;
-    await writeFile(tmpPath, snapshot, "utf8");
-    await rename(tmpPath, this.filePath);
+    try {
+      await withFsRetry(() => writeFile(tmpPath, snapshot, "utf8"));
+      await withFsRetry(() => rename(tmpPath, this.filePath), 10);
+    } catch (error) {
+      await rm(tmpPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async save(data: LauncherData): Promise<void> {
-    await this.saveSnapshot(JSON.stringify(data, null, 2));
+    await this.saveSnapshot(this.serialize(data));
   }
 }

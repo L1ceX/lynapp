@@ -2,7 +2,7 @@ import type { LaunchPlace, NavLayout, RailSide } from "@shared/types";
 import type { AppSection, InstanceTab } from "../constants";
 
 export const DEFAULT_RAIL_ORDER: AppSection[] = ["home", "instances", "launcher", "visuals", "skins", "accounts"];
-export const DEFAULT_TAB_ORDER: InstanceTab[] = ["general", "versions", "content", "files", "runtime", "logs"];
+export const DEFAULT_TAB_ORDER: InstanceTab[] = ["general", "versions", "content", "files", "worlds", "servers", "screenshots", "runtime", "logs"];
 export const LOCKED_TAB: InstanceTab = "general";
 export const RAIL_SIDES: RailSide[] = ["left", "right", "top", "bottom"];
 export const LAUNCH_PLACES: LaunchPlace[] = ["header", "tabs", "floating"];

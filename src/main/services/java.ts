@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -96,6 +97,8 @@ function getAdoptiumArch(): string {
   switch (os.arch()) {
     case "arm64":
       return "aarch64";
+    case "ia32":
+      return "x86";
     case "x64":
     default:
       return "x64";
@@ -106,10 +109,7 @@ async function pathExists(filePath: string): Promise<boolean> {
   return existsSync(filePath);
 }
 
-async function readJavaMajor(javawPath: string): Promise<number | null> {
-  const javaExe = toJavaExe(javawPath);
-  const executable = (await pathExists(javaExe)) ? javaExe : javawPath;
-
+async function readMajorFromBinary(executable: string): Promise<number | null> {
   try {
     const result = await execFileAsync(executable, ["-version"], {
       windowsHide: true,
@@ -123,12 +123,28 @@ async function readJavaMajor(javawPath: string): Promise<number | null> {
   }
 }
 
+async function readJavaMajor(javawPath: string): Promise<number | null> {
+  const javaExe = toJavaExe(javawPath);
+  const candidates = [javaExe, javawPath].filter((item, index, list) => list.indexOf(item) === index);
+  for (const executable of candidates) {
+    if (!(await pathExists(executable))) continue;
+    const major = await readMajorFromBinary(executable);
+    if (major !== null) return major;
+  }
+  return null;
+}
+
 async function findJavawUnder(root: string, maxDepth = 5): Promise<string | null> {
   if (maxDepth < 0 || !(await pathExists(root))) {
     return null;
   }
 
-  const entries = await readdir(root, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
 
   for (const entry of entries) {
     const fullPath = path.join(root, entry.name);
@@ -160,7 +176,12 @@ async function listRuntimeJavawPaths(): Promise<string[]> {
     return [];
   }
 
-  const entries = await readdir(root, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
   const paths: string[] = [];
 
   for (const entry of entries) {
@@ -168,7 +189,7 @@ async function listRuntimeJavawPaths(): Promise<string[]> {
       continue;
     }
 
-    if (entry.name.includes(".tmp-")) {
+    if (entry.name.includes(".tmp-") || entry.name.includes(".old-")) {
       continue;
     }
 
@@ -284,14 +305,19 @@ async function downloadRuntimeZip(major: number, signal?: AbortSignal, onBytes?:
   } catch {
   }
 
-  const tempPath = `${zipPath}.tmp`;
-  const { buffer } = await readUrlBytes(getAdoptiumDownloadUrl(major), { "user-agent": "lynapp/1.1.0-beta.4" }, signal, (received, total) =>
-    onBytes?.(received, total), 15 * 60 * 1000
-  );
-  await writeFile(tempPath, buffer);
-  await rm(zipPath, { force: true });
-  await rename(tempPath, zipPath);
-  return zipPath;
+  const tempPath = `${zipPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    const { buffer } = await readUrlBytes(getAdoptiumDownloadUrl(major), { "user-agent": "lynapp/1.1.0-beta.5" }, signal, (received, total) =>
+      onBytes?.(received, total), 15 * 60 * 1000
+    );
+    await writeFile(tempPath, buffer);
+    await rm(zipPath, { force: true }).catch(() => undefined);
+    await rename(tempPath, zipPath);
+    return zipPath;
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function expandZip(zipPath: string, destination: string): Promise<void> {
@@ -488,12 +514,12 @@ export class JavaService {
   private async installFresh(downloadMajor: number, signal?: AbortSignal, onBytes?: BytesCallback): Promise<{ javawPath: string; major: number }> {
     const runtimeDir = getRuntimeInstallDir(downloadMajor);
     const zipPath = await downloadRuntimeZip(downloadMajor, signal, onBytes);
-    const tempDir = `${runtimeDir}.tmp-${Date.now()}`;
+    const tempDir = `${runtimeDir}.tmp-${process.pid}-${randomUUID()}`;
 
     try {
       await expandZip(zipPath, tempDir);
     } catch (error) {
-      await rm(tempDir, { recursive: true, force: true });
+      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
       await rm(zipPath, { force: true }).catch(() => undefined);
       throw error;
     }
@@ -501,19 +527,41 @@ export class JavaService {
     const javawPath = await findJavawUnder(tempDir);
 
     if (!javawPath) {
-      await rm(tempDir, { recursive: true, force: true });
+      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      await rm(zipPath, { force: true }).catch(() => undefined);
       throw new Error(tr(`Downloaded Java ${downloadMajor}, but javaw.exe was not found in the archive.`, `Скачана Java ${downloadMajor}, но в архиве нет javaw.exe.`));
     }
 
     const major = await readJavaMajor(javawPath);
 
     if (!major) {
-      await rm(tempDir, { recursive: true, force: true });
+      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      await rm(zipPath, { force: true }).catch(() => undefined);
       throw new Error(tr(`Downloaded Java ${downloadMajor}, but its version could not be detected.`, `Скачана Java ${downloadMajor}, но её версию не удалось определить.`));
     }
 
-    await rm(runtimeDir, { recursive: true, force: true });
-    await rename(tempDir, runtimeDir);
+    const backupDir = `${runtimeDir}.old-${process.pid}-${randomUUID()}`;
+    let movedExisting = false;
+    try {
+      if (await pathExists(runtimeDir)) {
+        await rename(runtimeDir, backupDir);
+        movedExisting = true;
+      }
+      await rename(tempDir, runtimeDir);
+    } catch (error) {
+      if (movedExisting && !(await pathExists(runtimeDir))) {
+        await rename(backupDir, runtimeDir).catch(() => undefined);
+      }
+      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "EBUSY" || code === "EPERM" || code === "EACCES") {
+        throw new Error(tr("Cannot replace Java runtime while Minecraft or another Java process is using it. Close the game and try again.", "Не удалось обновить Java, пока запущен Minecraft или другой процесс Java. Закройте игру и повторите попытку."));
+      }
+      throw error;
+    }
+    if (movedExisting) {
+      await rm(backupDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 150 }).catch(() => undefined);
+    }
 
     const finalJavawPath = path.join(runtimeDir, path.relative(tempDir, javawPath));
     await writeInstalledMarker(runtimeDir, major, finalJavawPath);

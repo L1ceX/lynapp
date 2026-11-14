@@ -2,7 +2,7 @@ import type { EffectsSettings, ExternalImportProgress, ExternalImportResult, Ext
 
 export type AppSection = "home" | "instances" | "launcher" | "visuals" | "skins" | "accounts";
 
-export type InstanceTab = "general" | "versions" | "content" | "files" | "runtime" | "logs";
+export type InstanceTab = "general" | "versions" | "content" | "files" | "worlds" | "servers" | "screenshots" | "runtime" | "logs";
 
 export const loaders: ModLoader[] = ["vanilla", "fabric", "forge", "quilt", "neoforge"];
 

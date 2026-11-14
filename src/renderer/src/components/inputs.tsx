@@ -1,20 +1,28 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-export function MemorySlider({ value, onChange, onCommit, label = "Allocated RAM" }: { value: number; onChange: (value: number) => void; onCommit?: (value: number) => void; label?: string }) {
-  const safe = Math.min(32768, Math.max(512, Math.round(value / 256) * 256 || 2048));
+export function MemorySlider({ value, max = 32768, totalMb, totalOfLabel = "of", onChange, onCommit, label = "Allocated RAM" }: { value: number; max?: number; totalMb?: number; totalOfLabel?: string; onChange: (value: number) => void; onCommit?: (value: number) => void; label?: string }) {
+  const limit = Math.max(512, Math.floor((max || 32768) / 256) * 256);
+  const safe = Math.min(limit, Math.max(512, Math.round(value / 256) * 256 || 2048));
   const [local, setLocal] = useState(safe);
+  const lastCommittedRef = useRef(safe);
   useEffect(() => {
     setLocal(safe);
+    lastCommittedRef.current = safe;
   }, [safe]);
   const gb = (local / 1024).toFixed(local % 1024 === 0 ? 0 : 1);
+  const totalGb = totalMb ? Math.max(1, Math.round(totalMb / 1024)) : null;
   const commit = (next: number): void => {
-    onChange(next);
-    onCommit?.(next);
+    const clamped = Math.min(limit, Math.max(512, Math.round(next / 256) * 256));
+    setLocal(clamped);
+    if (clamped === lastCommittedRef.current) return;
+    lastCommittedRef.current = clamped;
+    onChange(clamped);
+    onCommit?.(clamped);
   };
   return (
     <div className="memory-slider">
-      <input type="range" min={512} max={32768} step={256} value={local} onChange={(event) => setLocal(Number(event.target.value))} onPointerUp={() => commit(local)} onKeyUp={() => commit(local)} onBlur={() => { if (local !== safe) commit(local); }} aria-label={label} />
-      <span className="muted">{local} MB · {gb} GB</span>
+      <input type="range" min={512} max={limit} step={256} value={local} onChange={(event) => setLocal(Number(event.target.value))} onPointerUp={(event) => commit(Number(event.currentTarget.value))} onKeyUp={(event) => commit(Number(event.currentTarget.value))} onBlur={(event) => commit(Number(event.currentTarget.value))} aria-label={label} />
+      <span className="muted">{local} MB · {gb} GB{totalGb ? ` (${totalOfLabel} ${totalGb} GB)` : ""}</span>
     </div>
   );
 }

@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Box, CheckCircle2, ChevronRight, Download, Gamepad2, Layers3, Play, Plus, RefreshCw, SlidersHorizontal, Sparkles, Square, UserRoundCog, X } from "lucide-react";
+import { SkinHead } from "../../components/skins";
 import { formatRelative } from "../../lib/format";
 import { useApp } from "../../state/context";
 import type { HomeWidgetId } from "./layout";
@@ -49,14 +51,16 @@ function RecentWidget() {
 }
 
 function AccountWidget() {
-  const { activeAccount, switchSection, t } = useApp();
+  const { accountSkinUrl, activeAccount, switchSection, t } = useApp();
+  const [failedSkinUrl, setFailedSkinUrl] = useState<string | null>(null);
   const kind = activeAccount?.kind === "microsoft" ? "Microsoft" : activeAccount?.kind === "ely" ? "Ely.by" : activeAccount ? t("Offline", "Офлайн") : "";
   const name = activeAccount?.profileName ?? t("No account", "Нет аккаунта");
+  const showSkin = Boolean(accountSkinUrl && failedSkinUrl !== accountSkinUrl);
   return (
     <div className="widget-body widget-account">
       <div className="widget-title"><UserRoundCog size={18} /><span>{t("Account", "Аккаунт")}</span></div>
       <div className="widget-account-main">
-        <span className="widget-avatar">{name.trim()[0]?.toUpperCase() ?? "?"}</span>
+        <span className={showSkin ? "widget-avatar widget-avatar-skin" : "widget-avatar"}>{showSkin && accountSkinUrl ? <SkinHead dataUrl={accountSkinUrl} className="widget-avatar-canvas" onError={() => setFailedSkinUrl(accountSkinUrl)} /> : (name.trim()[0]?.toUpperCase() ?? "?")}</span>
         <span className="widget-list-main"><strong>{name}</strong><small className="muted">{kind || t("Add an account to play", "Добавьте аккаунт, чтобы играть")}</small></span>
       </div>
       <button type="button" onClick={() => switchSection("accounts")}>{t("Accounts", "Аккаунты")} <ChevronRight size={15} /></button>

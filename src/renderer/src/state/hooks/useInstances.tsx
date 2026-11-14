@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { InstanceFolder, JavaInstallation, LauncherInstance } from "@shared/types";
+import type { InstanceLogsResult } from "@shared/ipc";
+import type { InstanceFolder, JavaInstallation, LauncherInstance, QuickPlayTarget } from "@shared/types";
 import { getLauncherApi } from "../../lib/api";
 import { detectCrash } from "../../lib/crash";
-import { transferLabel } from "../../lib/format";
+import { cleanIpcError, transferLabel } from "../../lib/format";
 import type { CoreState } from "./useCore";
 
 export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy" | "instanceTab" | "isLaunching" | "lang" | "launchingIds" | "refresh" | "say" | "section" | "selected" | "selectedId" | "setBootstrap" | "setBusy" | "setInstanceStatus" | "setLaunchingIds" | "setSelectedId" | "setSettingsDraft" | "setStatus" | "switchSection" | "t" | "tRef" | "update">) {
   const { assertNotLaunching, busy, instanceTab, isLaunching, lang, launchingIds, refresh, say, section, selected, selectedId, setBootstrap, setBusy, setInstanceStatus, setLaunchingIds, setSelectedId, setSettingsDraft, setStatus, switchSection, t, tRef, update } = deps;
   const [runningIds, setRunningIds] = useState<string[]>([]);
 
-  const [instanceLogs, setInstanceLogs] = useState<{ log: string; plan: string; hasLog: boolean; crash: { file: string; description: string } | null } | null>(null);
+  const [instanceLogs, setInstanceLogs] = useState<InstanceLogsResult | null>(null);
 
   const [logsFollow, setLogsFollow] = useState(true);
 
@@ -39,6 +40,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
   }, []);
 
   async function importMrpackByPath(filePath: string): Promise<void> {
+    if (busy) return;
     if (!/\.(mrpack|zip)$/i.test(filePath)) {
       setStatus(t("Only modpack files (.mrpack or a CurseForge .zip) can be dropped here", "Сюда можно перетаскивать только сборки (.mrpack или .zip CurseForge)"));
       return;
@@ -70,7 +72,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
         });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : t("Modpack import failed", "Не удалось импортировать модпак");
+      const message = cleanIpcError(error, t("Modpack import failed", "Не удалось импортировать модпак"));
       if (startedId) {
         const sid: string = startedId;
         setInstanceStatus((current) => ({ ...current, [sid]: message }));
@@ -139,7 +141,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     try {
       setJavaInstalls(await getLauncherApi().getJavaInstallations());
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : tRef.current("Failed to load Java installations", "Не удалось загрузить установленные версии Java"));
+      setStatus(cleanIpcError(error, tRef.current("Failed to load Java installations", "Не удалось загрузить установленные версии Java")));
     }
   }, []);
 
@@ -160,7 +162,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
         setStatus(t("Browse cancelled", "Операция отменена"));
       }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t(`Java ${major} action failed`, `Java ${major}: действие не выполнено`));
+      setStatus(cleanIpcError(error, t(`Java ${major} action failed`, `Java ${major}: действие не выполнено`)));
     } finally {
       setJavaBusy(null);
     }
@@ -170,20 +172,22 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
 
   async function updateSelected(patch: Partial<LauncherInstance>): Promise<void> {
     if (!selected || !assertNotLaunching()) return;
+    const targetId = selected.id;
     try {
-      const updated = await getLauncherApi().updateInstance({ id: selected.id, patch });
+      const updated = await getLauncherApi().updateInstance({ id: targetId, patch });
       setBootstrap((current) => current ? { ...current, instances: current.instances.map((item) => item.id === updated.id ? updated : item) } : current);
-      say(t(`Saved ${updated.name}`, `Сохранено: ${updated.name}`));
+      say(t(`Saved ${updated.name}`, `Сохранено: ${updated.name}`), targetId);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to save instance", "Не удалось сохранить инстанцию"));
+      setStatus(cleanIpcError(error, t("Failed to save instance", "Не удалось сохранить инстанцию")));
     }
   }
 
   async function exportSelected(): Promise<void> {
     if (!selected || busy || !assertNotLaunching()) return;
+    const target = selected;
     setBusy(true);
     try {
-      const entries = await getLauncherApi().listExportEntries(selected.id);
+      const entries = await getLauncherApi().listExportEntries(target.id);
       const defaults = new Set(["mods", "resourcepacks", "shaderpacks", "datapacks", "config", "defaultconfigs", "options.txt", "optionsof.txt", "optionsshaders.txt", "servers.dat"]);
       const checked: Record<string, boolean> = {};
       for (const entry of entries) {
@@ -191,7 +195,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
       }
       setExportModal({ entries, checked });
     } catch (error) {
-      say(error instanceof Error ? error.message : t(`Failed to export ${selected.name}`, `Не удалось экспортировать: ${selected.name}`));
+      say(cleanIpcError(error, t(`Failed to export ${target.name}`, `Не удалось экспортировать: ${target.name}`)), target.id);
     } finally {
       setBusy(false);
     }
@@ -199,19 +203,20 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
 
   async function confirmExport(): Promise<void> {
     if (!exportModal || !selected || busy) return;
+    const target = selected;
     const include = exportModal.entries.filter((entry) => exportModal.checked[entry.name]).map((entry) => entry.name);
     setExportModal(null);
     setBusy(true);
-    say(t(`Exporting ${selected.name}...`, `Экспорт: ${selected.name}...`));
+    say(t(`Exporting ${target.name}...`, `Экспорт: ${target.name}...`), target.id);
     try {
-      const filePath = await getLauncherApi().exportMrpack(selected.id, include);
+      const filePath = await getLauncherApi().exportMrpack(target.id, include);
       if (filePath) {
-        say(t(`Exported ${selected.name}`, `Экспортировано: ${selected.name}`));
+        say(t(`Exported ${target.name}`, `Экспортировано: ${target.name}`), target.id);
       } else {
-        say(t("Export cancelled", "Экспорт отменён"));
+        say(t("Export cancelled", "Экспорт отменён"), target.id);
       }
     } catch (error) {
-      say(error instanceof Error ? error.message : t(`Failed to export ${selected.name}`, `Не удалось экспортировать: ${selected.name}`));
+      say(cleanIpcError(error, t(`Failed to export ${target.name}`, `Не удалось экспортировать: ${target.name}`)), target.id);
     } finally {
       setBusy(false);
     }
@@ -226,7 +231,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
       await refresh();
       setStatus(t(`Deleted ${selected.name} with all its files`, `Удалено: ${selected.name} со всеми файлами`));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : t("Failed to delete instance", "Не удалось удалить инстанцию"));
+      setStatus(cleanIpcError(error, t("Failed to delete instance", "Не удалось удалить инстанцию")));
     } finally {
       setBusy(false);
     }
@@ -245,7 +250,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
       setStatus(t(`Created a copy: ${copy.name}`, `Создана копия: ${copy.name}`));
     } catch (error) {
       setInstanceStatus((current) => ({ ...current, [source.id]: "" }));
-      setStatus(error instanceof Error ? error.message : t("Failed to copy the instance", "Не удалось скопировать инстанцию"));
+      setStatus(cleanIpcError(error, t("Failed to copy the instance", "Не удалось скопировать инстанцию")));
     } finally {
       setBusy(false);
     }
@@ -257,51 +262,51 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
       const error = await getLauncherApi().openInstanceFolder(selected.id, folder);
       if (error) setStatus(t(`Could not open folder: ${error}`, `Не удалось открыть папку: ${error}`));
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : t("Could not open folder", "Не удалось открыть папку"));
+      setStatus(cleanIpcError(err, t("Could not open folder", "Не удалось открыть папку")));
     }
   }
 
-  function cleanLaunchError(error: unknown): string {
-    const message = error instanceof Error ? error.message : t("Failed to prepare Java runtime", "Не удалось подготовить Java");
-    return message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "");
-  }
-
-  async function launchSelected(): Promise<void> {
+  async function launchSelected(quickPlay?: QuickPlayTarget | unknown): Promise<void> {
     if (!selected || launchingIds.includes(selected.id)) return;
-    setLaunchingIds((current) => [...current, selected.id]);
+    const targetId = selected.id;
+    const targetGameVersion = selected.gameVersion;
+    const qp = quickPlay && typeof quickPlay === "object" && "kind" in quickPlay && "value" in quickPlay ? (quickPlay as QuickPlayTarget) : undefined;
+    setLaunchingIds((current) => [...current, targetId]);
     setInstanceLogs(null);
-    say(t(`Preparing ${selected.gameVersion}...`, `Подготовка: ${selected.gameVersion}...`));
+    say(t(`Preparing ${targetGameVersion}...`, `Подготовка: ${targetGameVersion}...`), targetId);
     try {
-      const result = await getLauncherApi().launchInstance(selected.id);
-      say(result.message);
+      const result = await getLauncherApi().launchInstance(targetId, qp);
+      say(result.message, targetId);
       await refresh({ setReadyStatus: false });
       await refreshRunning();
     } catch (error) {
-      say(cleanLaunchError(error));
+      say(cleanIpcError(error, t("Failed to prepare Java runtime", "Не удалось подготовить Java")), targetId);
     } finally {
-      setLaunchingIds((current) => current.filter((id) => id !== selected.id));
+      setLaunchingIds((current) => current.filter((id) => id !== targetId));
     }
   }
 
   async function cancelSelected(): Promise<void> {
     if (!selected || !isLaunching) return;
-    say(t("Cancelling launch...", "Отмена запуска..."));
+    const targetId = selected.id;
+    say(t("Cancelling launch...", "Отмена запуска..."), targetId);
     try {
-      await getLauncherApi().cancelLaunch(selected.id);
+      await getLauncherApi().cancelLaunch(targetId);
     } catch (error) {
-      say(error instanceof Error ? error.message : t("Failed to cancel launch", "Не удалось отменить запуск"));
+      say(cleanIpcError(error, t("Failed to cancel launch", "Не удалось отменить запуск")), targetId);
     }
   }
 
   async function stopSelected(): Promise<void> {
     if (!selected) return;
+    const targetId = selected.id;
     setBusy(true);
     try {
-      const result = await getLauncherApi().stopInstance(selected.id);
-      say(result.message);
+      const result = await getLauncherApi().stopInstance(targetId);
+      say(result.message, targetId);
       await refreshRunning();
     } catch (error) {
-      say(error instanceof Error ? error.message : t("Failed to stop instance", "Не удалось остановить инстанцию"));
+      say(cleanIpcError(error, t("Failed to stop instance", "Не удалось остановить инстанцию")), targetId);
     } finally {
       setBusy(false);
     }
@@ -311,9 +316,9 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     if (!selectedId) return;
     try {
       const logs = await getLauncherApi().getInstanceLogs(selectedId);
-      setInstanceLogs((prev) => (prev && prev.log === logs.log && prev.plan === logs.plan && prev.hasLog === logs.hasLog && prev.crash?.file === logs.crash?.file ? prev : logs));
+      setInstanceLogs((prev) => (prev && prev.log === logs.log && prev.plan === logs.plan && prev.hasLog === logs.hasLog && prev.crash?.file === logs.crash?.file && prev.crash?.text === logs.crash?.text ? prev : logs));
     } catch (error) {
-      if (!silent) say(error instanceof Error ? error.message : t("Failed to read logs", "Не удалось прочитать журнал"));
+      if (!silent) say(cleanIpcError(error, t("Failed to read logs", "Не удалось прочитать журнал")));
     }
   }
 
@@ -328,6 +333,8 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     const found = detectCrash(instanceLogs.log, t);
     if (found && !found.generic) return found;
     if (instanceLogs.crash) {
+      const fromReport = detectCrash(instanceLogs.crash.text, t);
+      if (fromReport && !fromReport.generic) return fromReport;
       return { title: found?.title ?? t("Crashed", "Краш"), hint: `${instanceLogs.crash.description} (${instanceLogs.crash.file})` };
     }
     return found;
@@ -336,8 +343,12 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
   async function copyCrashAssist(): Promise<void> {
     if (!instanceLogs || !crashAssist) return;
     try {
-      const crashFile = instanceLogs.crash ? `${instanceLogs.crash.file}: ${instanceLogs.crash.description}\n\n` : "";
-      await navigator.clipboard.writeText(`${crashAssist.title}\n${crashAssist.hint}\n\n${crashFile}${instanceLogs.log.slice(-8000)}`);
+      if (instanceLogs.crash?.text) {
+        await navigator.clipboard.writeText(instanceLogs.crash.text);
+        say(t("Crash log copied", "Краш-лог скопирован"));
+        return;
+      }
+      await navigator.clipboard.writeText(`${crashAssist.title}\n${crashAssist.hint}\n\n${instanceLogs.log.slice(-8000)}`);
       say(t("Crash info copied", "Данные о краше скопированы"));
     } catch {
       say(t("Failed to copy crash info", "Не удалось скопировать данные о краше"));
@@ -347,9 +358,9 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
   useEffect(() => {
     if (instanceTab !== "logs" || !selectedId) return;
     let stale = false;
-    const apply = (logs: { log: string; plan: string; hasLog: boolean; crash: { file: string; description: string } | null }): void => {
+    const apply = (logs: InstanceLogsResult): void => {
       if (stale) return;
-      setInstanceLogs((prev) => (prev && prev.log === logs.log && prev.plan === logs.plan && prev.hasLog === logs.hasLog && prev.crash?.file === logs.crash?.file ? prev : logs));
+      setInstanceLogs((prev) => (prev && prev.log === logs.log && prev.plan === logs.plan && prev.hasLog === logs.hasLog && prev.crash?.file === logs.crash?.file && prev.crash?.text === logs.crash?.text ? prev : logs));
     };
     void getLauncherApi().getInstanceLogs(selectedId).then(apply).catch(() => {
       if (!stale) setInstanceLogs({ log: "", plan: "", hasLog: false, crash: null });
@@ -387,7 +398,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
       setInstanceStatus((current) => ({ ...current, [instanceId]: done }));
       setStatus(done);
     } catch (error) {
-      const message = error instanceof Error ? error.message : t("Modpack import failed", "Не удалось импортировать модпак");
+      const message = cleanIpcError(error, t("Modpack import failed", "Не удалось импортировать модпак"));
       setInstanceStatus((current) => ({ ...current, [instanceId]: message }));
       setStatus(message);
     } finally {
@@ -470,7 +481,6 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     removeSelected,
     duplicateSelected,
     openSelectedFolder,
-    cleanLaunchError,
     launchSelected,
     cancelSelected,
     stopSelected,
