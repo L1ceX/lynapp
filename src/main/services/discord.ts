@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import net from "node:net";
 import path from "node:path";
@@ -29,12 +30,31 @@ interface GameSession {
   startedAt: number | null;
 }
 
-function pipePath(index: number): string {
+function pipeCandidates(): string[] {
   if (process.platform === "win32") {
-    return `\\\\?\\pipe\\discord-ipc-${index}`;
+    return Array.from({ length: PIPE_COUNT }, (_, index) => `\\\\?\\pipe\\discord-ipc-${index}`);
   }
-  const base = process.env.XDG_RUNTIME_DIR || process.env.TMPDIR || process.env.TMP || process.env.TEMP || "/tmp";
-  return path.join(base, `discord-ipc-${index}`);
+  const runtimeDir = process.env.XDG_RUNTIME_DIR || process.env.TMPDIR || process.env.TMP || process.env.TEMP || "/tmp";
+  const dirs = [
+    runtimeDir,
+    path.join(runtimeDir, "app", "com.discordapp.Discord"),
+    path.join(runtimeDir, "app", "dev.vencord.Vesktop"),
+    path.join(runtimeDir, "snap.discord"),
+    "/tmp"
+  ];
+  const seen = new Set<string>();
+  const existing: string[] = [];
+  for (let index = 0; index < PIPE_COUNT; index += 1) {
+    for (const dir of dirs) {
+      const candidate = path.join(dir, `discord-ipc-${index}`);
+      if (seen.has(candidate)) continue;
+      seen.add(candidate);
+      if (existsSync(candidate)) {
+        existing.push(candidate);
+      }
+    }
+  }
+  return existing;
 }
 
 function clip(value: string, max = 128): string {
@@ -43,6 +63,8 @@ function clip(value: string, max = 128): string {
 
 export class DiscordPresence {
   private socket: net.Socket | null = null;
+  private pendingSocket: net.Socket | null = null;
+  private connectGen = 0;
   private connecting = false;
   private ready = false;
   private buffer = Buffer.alloc(0);
@@ -94,7 +116,7 @@ export class DiscordPresence {
     return this.sessions.size > 0;
   }
 
-  private connect(index = 0): void {
+  private connect(candidates?: string[], index = 0): void {
     if (!this.enabled) {
       this.connecting = false;
       return;
@@ -102,17 +124,24 @@ export class DiscordPresence {
     if (this.socket || (this.connecting && index === 0)) {
       return;
     }
-    if (index >= PIPE_COUNT) {
+    const list = candidates ?? pipeCandidates();
+    if (index >= list.length) {
+      this.pendingSocket = null;
       this.scheduleRetry();
       return;
     }
+    const gen = this.connectGen;
     this.connecting = true;
-    const socket = net.createConnection(pipePath(index));
+    const socket = net.createConnection(list[index]);
+    this.pendingSocket = socket;
     let opened = false;
     socket.once("connect", () => {
       opened = true;
+      if (this.pendingSocket === socket) {
+        this.pendingSocket = null;
+      }
       this.connecting = false;
-      if (!this.enabled) {
+      if (!this.enabled || gen !== this.connectGen) {
         socket.destroy();
         return;
       }
@@ -127,8 +156,15 @@ export class DiscordPresence {
     });
     socket.on("error", () => undefined);
     socket.on("close", () => {
+      if (this.pendingSocket === socket) {
+        this.pendingSocket = null;
+      }
       if (!opened) {
-        this.connect(index + 1);
+        if (this.enabled && gen === this.connectGen) {
+          this.connect(list, index + 1);
+        } else {
+          this.connecting = false;
+        }
         return;
       }
       if (this.socket === socket) {
@@ -140,10 +176,15 @@ export class DiscordPresence {
   }
 
   private disconnect(): void {
+    this.connectGen += 1;
+    this.connecting = false;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
     }
+    const pending = this.pendingSocket;
+    this.pendingSocket = null;
+    pending?.destroy();
     const socket = this.socket;
     this.socket = null;
     this.ready = false;

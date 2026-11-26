@@ -1,10 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { execFile } from "node:child_process";
 import type { WebContents } from "electron";
 import path from "node:path";
-import { promisify } from "node:util";
 import { IPC } from "@shared/ipc";
 import type { LauncherInstance, ModLoader } from "@shared/types";
 import { writeContentManifest } from "./manifest";
@@ -13,10 +11,9 @@ import { JsonStore } from "../store";
 import { InstanceService } from "./instances";
 import { MinecraftService, pickLatestLoaderVersion } from "./minecraft";
 import { readUrlBytes, createThrottledEmitter, type BytesCallback } from "./transfer";
+import { createZipFromDir, extractZip } from "./zip";
 import { tr } from "../i18n";
 import { curseForgeDependencies, type CurseForgeManifest, type CurseForgeService, type ResolvedPackFile } from "./curseforge";
-
-const execFileAsync = promisify(execFile);
 
 interface MrpackIndexFile {
   path: string;
@@ -82,6 +79,19 @@ const dirKindFolder: Record<string, string> = {
   shader: "shaderpacks",
   datapack: "datapacks"
 };
+
+function entryLocation(rel: string): { projectType: "mod" | "resourcepack" | "shader" | "datapack"; folder: string } | null {
+  const clean = rel.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+  const parts = clean.split("/").filter(Boolean);
+  if (parts.length === 2) {
+    const projectType = dirProjectType[parts[0].toLowerCase()];
+    if (projectType) return { projectType, folder: parts[0] };
+  }
+  if (parts.length === 4 && parts[0].toLowerCase() === "saves" && parts[2].toLowerCase() === "datapacks") {
+    return { projectType: "datapack", folder: `${parts[0]}/${parts[1]}/${parts[2]}` };
+  }
+  return null;
+}
 
 interface ExportVersionFile {
   url: string;
@@ -189,20 +199,6 @@ function verifyBuffer(buffer: Buffer, hashes: MrpackIndexFile["hashes"], entryPa
     const actual = createHash("sha1").update(buffer).digest("hex").toLowerCase();
     if (actual !== sha1) throw new Error(tr(`Checksum mismatch: ${entryPath}`, `Контрольная сумма не совпадает: ${entryPath}`));
   }
-}
-
-const psQuote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
-
-async function extractZip(zipPath: string, destination: string): Promise<void> {
-  const script = [
-    "Add-Type -AssemblyName System.IO.Compression.FileSystem",
-    `[System.IO.Compression.ZipFile]::ExtractToDirectory(${psQuote(zipPath)}, ${psQuote(destination)}, [System.Text.Encoding]::UTF8)`
-  ].join("\r\n");
-  await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
-    windowsHide: true,
-    timeout: 180000,
-    maxBuffer: 32 * 1024 * 1024
-  });
 }
 
 async function downloadBuffer(url: string, onBytes?: BytesCallback, signal?: AbortSignal): Promise<Buffer> {
@@ -485,7 +481,11 @@ export class ModpackService {
         continue;
       }
       const version = mod.versionId ? versionMap.get(mod.versionId) : undefined;
-      const apiFile = version?.files.find((f) => f.primary) ?? version?.files[0];
+      const baseLower = mod.fileName.replace(/\.disabled$/i, "").toLowerCase();
+      const apiFile = version?.files.find((f) => {
+        const cleaned = f.filename.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-").toLowerCase();
+        return f.filename.toLowerCase() === baseLower || cleaned === baseLower;
+      }) ?? version?.files.find((f) => f.primary) ?? version?.files[0];
       if (inRoot) {
         if (version && apiFile?.hashes && apiFile.url && typeof apiFile.size === "number") {
           files.push({
@@ -593,33 +593,8 @@ export class ModpackService {
       await writeFile(path.join(tmp, "modrinth.index.json"), JSON.stringify(index, null, 2), "utf8");
       await mkdir(path.dirname(outPath), { recursive: true });
       const zipStage = `${outPath}.${process.pid}.zip`;
-      const psPath = psQuote;
-      const packScript = [
-        "$ErrorActionPreference = 'Stop'",
-        "Add-Type -AssemblyName System.IO.Compression.FileSystem",
-        `$zip = [System.IO.Compression.ZipFile]::Open(${psPath(zipStage)}, 'Create', [System.Text.Encoding]::UTF8)`,
-        "try {",
-        `$items = Get-ChildItem -LiteralPath ${psPath(tmp)} -Recurse -Force`,
-        `$base = ${psPath(tmp)}`,
-        "foreach ($item in $items) {",
-        `  $rel = $item.FullName.Substring($base.Length).TrimStart('\\').Replace('\\', '/')`,
-        "  if ($item.PSIsContainer) {",
-        "    $null = $zip.CreateEntry($rel + '/')",
-        "  } else {",
-        "    try { $in = [System.IO.File]::Open($item.FullName, 'Open', 'Read', 'ReadWrite') } catch { [Console]::Error.WriteLine('skipped: ' + $rel); continue }",
-        "    $entry = $zip.CreateEntry($rel)",
-        "    $out = $entry.Open()",
-        "    try { $in.CopyTo($out) } finally { $out.Dispose(); $in.Dispose() }",
-        "  }",
-        "}",
-        "} finally { $zip.Dispose() }"
-      ].join("\r\n");
       try {
-        await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", packScript], {
-          windowsHide: true,
-          timeout: 180000,
-          maxBuffer: 32 * 1024 * 1024
-        });
+        await createZipFromDir(tmp, zipStage, { skipLocked: true });
       } catch {
         await rm(zipStage, { force: true }).catch(() => undefined);
         throw new Error(tr("Could not pack the .mrpack file", "Не удалось упаковать файл .mrpack"));
@@ -764,26 +739,38 @@ export class ModpackService {
         const info = meta.get(entry.rel);
         if (!info) continue;
         const folder = dirKindFolder[info.projectType] ?? "mods";
-        const lower = entry.fileName.toLowerCase();
-        const existing = target.mods.find(
-          (mod) =>
-            (mod.provider === "curseforge" && mod.projectId === info.projectId && (mod.projectType ?? "mod") === info.projectType) ||
-            ((mod.projectType ?? "mod") === info.projectType && (mod.fileName ?? "").replace(/\.disabled$/i, "").toLowerCase() === lower)
-        );
+        const fileBase = entry.fileName.replace(/\.disabled$/i, "");
+        const lower = fileBase.toLowerCase();
+        const matchingIndices: number[] = [];
+        for (let i = 0; i < target.mods.length; i += 1) {
+          const mod = target.mods[i];
+          if ((mod.projectType ?? "mod") !== info.projectType) continue;
+          const sameProject = mod.provider === "curseforge" && mod.projectId === info.projectId;
+          const sameFile = Boolean(mod.fileName && mod.fileName.replace(/\.disabled$/i, "").toLowerCase() === lower);
+          if (sameProject || sameFile) matchingIndices.push(i);
+        }
+        const existing = matchingIndices.length ? target.mods[matchingIndices[0]] : undefined;
+        if (matchingIndices.length > 1) {
+          for (let k = matchingIndices.length - 1; k >= 1; k -= 1) {
+            target.mods.splice(matchingIndices[k], 1);
+          }
+        }
         if (existing) {
-          const wasDisabled = Boolean(existing.fileName && /\.disabled$/i.test(existing.fileName));
+          const wasDisabled = Boolean((existing.fileName && /\.disabled$/i.test(existing.fileName)) || /\.disabled$/i.test(entry.fileName));
           const oldName = existing.fileName?.replace(/\.disabled$/i, "");
-          if (oldName && oldName.toLowerCase() !== entry.fileName.toLowerCase()) {
+          if (oldName && oldName.toLowerCase() !== lower) {
             staleFiles.push(path.join(target.directory, folder, oldName), path.join(target.directory, folder, `${oldName}.disabled`));
           }
           if (wasDisabled) {
-            disabledRenames.push({
-              from: path.join(target.directory, folder, entry.fileName),
-              to: path.join(target.directory, folder, `${entry.fileName}.disabled`)
-            });
-            existing.fileName = `${entry.fileName}.disabled`;
+            if (!/\.disabled$/i.test(entry.fileName)) {
+              disabledRenames.push({
+                from: path.join(target.directory, folder, entry.fileName),
+                to: path.join(target.directory, folder, `${fileBase}.disabled`)
+              });
+            }
+            existing.fileName = `${fileBase}.disabled`;
           } else {
-            existing.fileName = entry.fileName;
+            existing.fileName = fileBase;
           }
           existing.provider = "curseforge";
           existing.projectId = info.projectId;
@@ -931,7 +918,7 @@ export class ModpackService {
   }
 
   private async linkModrinthEntries(instanceId: string, downloaded: DownloadedEntry[], limit = 6): Promise<void> {
-    const candidates = downloaded.filter((entry) => dirProjectType[entry.rel.split("/")[0]?.toLowerCase() ?? ""] && (entry.sha512 || entry.sha1));
+    const candidates = downloaded.filter((entry) => Boolean(entryLocation(entry.rel)) && Boolean(entry.sha512 || entry.sha1));
     if (!candidates.length) return;
 
     let versions: Map<string, MrpackVersion>;
@@ -964,9 +951,9 @@ export class ModpackService {
       const target = current.instances.find((item) => item.id === instanceId);
       if (!target) throw new Error(tr("Instance not found", "Инстанция не найдена"));
       for (const [rel, meta] of metas) {
-        const folder = rel.split("/")[0] ?? "";
-        const projectType = dirProjectType[folder.toLowerCase()];
-        if (!projectType) continue;
+        const loc = entryLocation(rel);
+        if (!loc) continue;
+        const { folder, projectType } = loc;
         const fileName = rel.split("/").pop() ?? rel;
         const fileBase = fileName.replace(/\.disabled$/i, "");
         const matchingIndices: number[] = [];

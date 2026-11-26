@@ -31,6 +31,7 @@ export interface LauncherInstance {
   extraJvmArgs?: string;
   createdAt: string;
   updatedAt: string;
+  lastPlayedAt?: string;
   mods: InstalledMod[];
 }
 
@@ -72,6 +73,7 @@ export interface HomeWidgetLayout {
   w: number;
   h: number;
   hidden?: boolean;
+  customH?: boolean;
 }
 
 export type PageBoardId = "launcher" | "visuals" | "accounts" | "skins" | "instGeneral" | "instRuntime" | "instContent";
@@ -121,6 +123,27 @@ export interface LauncherSettings {
   animationSpeed: number;
   effects: EffectsSettings;
   activeSkinId: string | null;
+  fontFamily?: string;
+}
+
+export interface CustomFontInfo {
+  id: string;
+  name: string;
+  fileName: string;
+  dataUrl: string;
+}
+
+export interface AddCustomFontResult {
+  added: CustomFontInfo | null;
+  fonts: CustomFontInfo[];
+}
+
+export interface GoogleFontInfo {
+  family: string;
+  category: string;
+  cyrillic: boolean;
+  popularity: number;
+  weights: number[];
 }
 
 export interface SkinMeta {
@@ -169,7 +192,7 @@ export interface AccountsState {
   activeAccountId: string | null;
 }
 
-export type UpdateStatusKind = "available" | "downloading" | "ready" | "error";
+export type UpdateStatusKind = "checking" | "up-to-date" | "available" | "downloading" | "ready" | "error";
 
 export interface UpdateStatus {
   kind: UpdateStatusKind;
@@ -285,6 +308,8 @@ export interface ModVersionInfo {
   compatible: boolean;
   provider?: ModProvider;
   projectId?: string;
+  distributionBlocked?: boolean;
+  websiteUrl?: string;
 }
 
 export interface ModDependencyItem {

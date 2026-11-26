@@ -1,16 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
 import { clipboard, nativeImage } from "electron";
 import { existsSync } from "node:fs";
-import { copyFile, cp, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
-import { inflateRawSync } from "node:zlib";
 import type { ContentImportResult, InstalledMod, LauncherInstance, LocalContentItem, LocalContentKind, ModProvider, ScreenshotInfo } from "@shared/types";
 import { curseForgeAvailable, projectTypeForClass, type CurseForgeService } from "./curseforge";
 import { writeContentManifest } from "./manifest";
-import { getTarPath } from "../paths";
 import { cfFingerprintCached, sha1Cached } from "./hashes";
+import { listZipEntries, readZipEntry, readZipFiles } from "./zip";
 import { JsonStore } from "../store";
 import { tr } from "../i18n";
 
@@ -38,9 +35,7 @@ const kindAllowsDirectories: Record<LocalContentKind, boolean> = {
 const disabledSuffix = ".disabled";
 const kindOrder: LocalContentKind[] = ["mod", "resourcepack", "shader", "datapack"];
 
-const execFileAsync = promisify(execFile);
-
-const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.5" };
+const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.6" };
 const unknownRecheckMs = 3 * 24 * 60 * 60 * 1000;
 
 interface HashCacheEntry {
@@ -60,45 +55,6 @@ interface UnlinkedFile {
 
 async function sha1File(filePath: string): Promise<string> {
   return sha1Cached(filePath);
-}
-
-async function listZipNames(filePath: string): Promise<string[]> {
-  const handle = await open(filePath, "r");
-  try {
-    const size = (await handle.stat()).size;
-    const tailSize = Math.min(size, 65557);
-    const tail = Buffer.alloc(tailSize);
-    await handle.read(tail, 0, tailSize, size - tailSize);
-    let eocd = -1;
-    for (let i = tailSize - 22; i >= 0; i -= 1) {
-      if (tail.readUInt32LE(i) === 0x06054b50) {
-        eocd = i;
-        break;
-      }
-    }
-    if (eocd < 0) return [];
-    const count = tail.readUInt16LE(eocd + 10);
-    const dirSize = tail.readUInt32LE(eocd + 12);
-    const dirOffset = tail.readUInt32LE(eocd + 16);
-    if (dirOffset === 0xffffffff || dirSize === 0xffffffff || dirOffset + dirSize > size) return [];
-    const dir = Buffer.alloc(dirSize);
-    await handle.read(dir, 0, dirSize, dirOffset);
-    const names: string[] = [];
-    let pos = 0;
-    for (let i = 0; i < count && pos + 46 <= dir.length; i += 1) {
-      if (dir.readUInt32LE(pos) !== 0x02014b50) break;
-      const flags = dir.readUInt16LE(pos + 8);
-      const nameLength = dir.readUInt16LE(pos + 28);
-      const extraLength = dir.readUInt16LE(pos + 30);
-      const commentLength = dir.readUInt16LE(pos + 32);
-      const raw = dir.subarray(pos + 46, pos + 46 + nameLength);
-      names.push((flags & 0x800 ? raw.toString("utf8") : raw.toString("latin1")).replace(/\\/g, "/"));
-      pos += 46 + nameLength + extraLength + commentLength;
-    }
-    return names;
-  } finally {
-    await handle.close();
-  }
 }
 
 function classifyEntries(names: string[]): LocalContentKind | null {
@@ -134,37 +90,6 @@ function toDataUrl(ext: string, data: Buffer): string {
   return `data:${iconMime[ext] ?? "image/png"};base64,${data.toString("base64")}`;
 }
 
-async function tarList(archive: string): Promise<string[]> {
-  try {
-    const { stdout } = await execFileAsync(getTarPath(), ["-tf", archive], {
-      windowsHide: true,
-      timeout: 15000,
-      maxBuffer: 8 * 1024 * 1024
-    });
-    return String(stdout)
-      .split(/\r?\n/)
-      .map((line) => line.trim().replace(/^\.\//, ""))
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-async function tarRead(archive: string, internalPath: string): Promise<Buffer | null> {
-  try {
-    const { stdout } = await execFileAsync(getTarPath(), ["-xOf", archive, internalPath], {
-      windowsHide: true,
-      timeout: 15000,
-      encoding: "buffer",
-      maxBuffer: 8 * 1024 * 1024
-    });
-    const data = Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout), "binary");
-    return data.length ? data : null;
-  } catch {
-    return null;
-  }
-}
-
 function findArchiveEntry(entries: string[], wanted: string): string | null {
   const lower = wanted.toLowerCase().replace(/\\/g, "/");
   return (
@@ -179,7 +104,7 @@ async function readArchiveIcon(archive: string, entries: string[], wanted: strin
   if (!found) return null;
   const ext = path.extname(found).toLowerCase();
   if (!iconMime[ext]) return null;
-  const data = await tarRead(archive, found);
+  const data = await readZipEntry(archive, found);
   if (!data) return null;
   return { ext, data };
 }
@@ -189,7 +114,7 @@ async function readModIcon(archive: string, entries: string[]): Promise<{ ext: s
 
   const fabricEntry = byLower.get("fabric.mod.json");
   if (fabricEntry) {
-    const raw = await tarRead(archive, fabricEntry);
+    const raw = await readZipEntry(archive, fabricEntry);
     if (raw) {
       try {
         const meta = JSON.parse(raw.toString("utf8")) as { icon?: unknown };
@@ -204,7 +129,7 @@ async function readModIcon(archive: string, entries: string[]): Promise<{ ext: s
 
   const quiltEntry = byLower.get("quilt.mod.json") ?? byLower.get("quilt.json");
   if (quiltEntry) {
-    const raw = await tarRead(archive, quiltEntry);
+    const raw = await readZipEntry(archive, quiltEntry);
     if (raw) {
       try {
         const meta = JSON.parse(raw.toString("utf8")) as {
@@ -232,7 +157,7 @@ async function readModIcon(archive: string, entries: string[]): Promise<{ ext: s
   for (const tomlName of ["meta-inf/neoforge.mods.toml", "meta-inf/mods.toml"]) {
     const modsToml = byLower.get(tomlName);
     if (modsToml) {
-      const raw = await tarRead(archive, modsToml);
+      const raw = await readZipEntry(archive, modsToml);
       const logo = raw ? /logoFile\s*=\s*"([^"]+)"/.exec(raw.toString("utf8"))?.[1] : null;
       if (logo) {
         const hit = await readArchiveIcon(archive, entries, logo);
@@ -269,69 +194,6 @@ const BUILTIN_MOD_IDS = new Set([
   "fml",
   "mixinextras"
 ]);
-
-async function readZipFiles(filePath: string, wantedLower: Set<string>): Promise<Map<string, Buffer>> {
-  const result = new Map<string, Buffer>();
-  const handle = await open(filePath, "r");
-  try {
-    const size = (await handle.stat()).size;
-    const tailSize = Math.min(size, 65557);
-    const tail = Buffer.alloc(tailSize);
-    await handle.read(tail, 0, tailSize, size - tailSize);
-    let eocd = -1;
-    for (let i = tailSize - 22; i >= 0; i -= 1) {
-      if (tail.readUInt32LE(i) === 0x06054b50) {
-        eocd = i;
-        break;
-      }
-    }
-    if (eocd < 0) return result;
-    const count = tail.readUInt16LE(eocd + 10);
-    const dirSize = tail.readUInt32LE(eocd + 12);
-    const dirOffset = tail.readUInt32LE(eocd + 16);
-    if (dirOffset === 0xffffffff || dirSize === 0xffffffff || dirOffset + dirSize > size) return result;
-    const dir = Buffer.alloc(dirSize);
-    await handle.read(dir, 0, dirSize, dirOffset);
-    let pos = 0;
-    for (let i = 0; i < count && pos + 46 <= dir.length; i += 1) {
-      if (dir.readUInt32LE(pos) !== 0x02014b50) break;
-      const flags = dir.readUInt16LE(pos + 8);
-      const method = dir.readUInt16LE(pos + 10);
-      const compSize = dir.readUInt32LE(pos + 20);
-      const uncompSize = dir.readUInt32LE(pos + 24);
-      const nameLength = dir.readUInt16LE(pos + 28);
-      const extraLength = dir.readUInt16LE(pos + 30);
-      const commentLength = dir.readUInt16LE(pos + 32);
-      const localOffset = dir.readUInt32LE(pos + 42);
-      const rawName = dir.subarray(pos + 46, pos + 46 + nameLength);
-      const name = (flags & 0x800 ? rawName.toString("utf8") : rawName.toString("latin1")).replace(/\\/g, "/").replace(/^\.\//, "");
-      const lower = name.toLowerCase();
-      pos += 46 + nameLength + extraLength + commentLength;
-      if (!wantedLower.has(lower) || compSize > 2 * 1024 * 1024 || uncompSize > 4 * 1024 * 1024) continue;
-      if (localOffset + 30 > size) continue;
-      const localHdr = Buffer.alloc(30);
-      await handle.read(localHdr, 0, 30, localOffset);
-      if (localHdr.readUInt32LE(0) !== 0x04034b50) continue;
-      const lNameLen = localHdr.readUInt16LE(26);
-      const lExtraLen = localHdr.readUInt16LE(28);
-      const dataStart = localOffset + 30 + lNameLen + lExtraLen;
-      if (dataStart + compSize > size) continue;
-      const compBuf = Buffer.alloc(compSize);
-      await handle.read(compBuf, 0, compSize, dataStart);
-      if (method === 0) {
-        result.set(lower, compBuf);
-      } else if (method === 8) {
-        try {
-          result.set(lower, inflateRawSync(compBuf));
-        } catch {
-        }
-      }
-    }
-    return result;
-  } finally {
-    await handle.close();
-  }
-}
 
 async function readJarModMeta(fullPath: string, size: number, mtimeMs: number): Promise<JarModMeta> {
   const key = `${fullPath}|${size}|${Math.round(mtimeMs)}`;
@@ -455,7 +317,11 @@ function normalizeName(fileName: string): string {
 }
 
 async function entrySize(target: string): Promise<number> {
-  const fileStat = await stat(target);
+  const fileStat = await lstat(target);
+
+  if (fileStat.isSymbolicLink()) {
+    return 0;
+  }
 
   if (!fileStat.isDirectory()) {
     return fileStat.size;
@@ -465,7 +331,7 @@ async function entrySize(target: string): Promise<number> {
   const entries = await readdir(target);
 
   for (const entry of entries) {
-    total += await entrySize(path.join(target, entry));
+    total += await entrySize(path.join(target, entry)).catch(() => 0);
   }
 
   return total;
@@ -506,7 +372,10 @@ export class ContentService {
         }
 
         const fullPath = path.join(dir, entry.name);
-        const fileStat = await stat(fullPath);
+        const fileStat = await stat(fullPath).catch(() => null);
+        if (!fileStat) {
+          continue;
+        }
         const size = await entrySize(fullPath).catch(() => fileStat.size);
         const record = instance.mods.find(
           (mod) => (mod.projectType ?? "mod") === kind && mod.fileName !== undefined && normalizeName(mod.fileName) === lowerBase
@@ -539,7 +408,10 @@ export class ContentService {
           continue;
         }
         const fullPath = path.join(dir, entry.name);
-        const fileStat = await stat(fullPath);
+        const fileStat = await stat(fullPath).catch(() => null);
+        if (!fileStat) {
+          continue;
+        }
         const record = instance.mods.find(
           (mod) => (mod.projectType ?? "mod") === "datapack" && mod.fileName !== undefined && normalizeName(mod.fileName) === lowerBase
         );
@@ -900,7 +772,7 @@ export class ContentService {
       } else if (baseLower.endsWith(".jar")) {
         pending.push({ source, name, isDir: false, kind: "mod" });
       } else if (baseLower.endsWith(".zip")) {
-        pending.push({ source, name, isDir: false, kind: classifyEntries(await listZipNames(source).catch(() => [])) });
+        pending.push({ source, name, isDir: false, kind: classifyEntries(await listZipEntries(source).catch(() => [])) });
       } else {
         result.skipped.push({ fileName: name, reason: "unsupported" });
       }
@@ -1269,7 +1141,7 @@ export class ContentService {
     } catch {
     }
 
-    const entries = await tarList(fullPath);
+    const entries = await listZipEntries(fullPath);
     const found = entries.length ? ((kind === "mod" ? await readModIcon(fullPath, entries) : await readArchiveIcon(fullPath, entries, "pack.png")) ?? null) : null;
 
     if (found) {
@@ -1302,7 +1174,7 @@ export class ContentService {
 
     try {
       const response = await fetch(`https://api.modrinth.com/v2/project/${ref}`, {
-        headers: { "User-Agent": "lynapp/1.1.0-beta.5" }
+        headers: { "User-Agent": "lynapp/1.1.0-beta.6" }
       });
 
       if (!response.ok) {

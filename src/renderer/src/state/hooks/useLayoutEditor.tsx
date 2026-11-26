@@ -29,7 +29,7 @@ export function useLayoutEditor(deps: Pick<CoreState, "bootstrap" | "instanceTab
   const homeDirty = homeDraft !== null && !sameLayout(homeDraft, savedHomeLayout);
   const navDirty = navDraft !== null && !sameNav(navDraft, savedNav);
   const pageLayouts = pageDrafts ?? savedPages;
-  const dirtyPages = pageDrafts ? PAGE_BOARD_IDS.filter((id) => !samePlacement(pageDrafts[id], savedPages[id], false)) : [];
+  const dirtyPages = pageDrafts ? PAGE_BOARD_IDS.filter((id) => !samePlacement(pageDrafts[id], savedPages[id], true)) : [];
   const layoutDirty = homeDirty || navDirty || dirtyPages.length > 0;
 
   useEffect(() => () => {
@@ -165,7 +165,7 @@ export function useLayoutEditor(deps: Pick<CoreState, "bootstrap" | "instanceTab
     });
   }
 
-  function changePageLayout(board: PageBoardId, next: ReadonlyArray<{ i: string; x: number; y: number; w: number; h: number }>): void {
+  function changePageLayout(board: PageBoardId, next: ReadonlyArray<{ i: string; x: number; y: number; w: number; h: number }>, resizedHeightId?: string): void {
     setPageDrafts((current) => {
       const all = current ?? savedPages;
       const base = all[board];
@@ -174,9 +174,10 @@ export function useLayoutEditor(deps: Pick<CoreState, "bootstrap" | "instanceTab
       const merged = base.map((item) => {
         const moved = positions.get(item.i);
         if (!moved || item.hidden) return item;
-        if (moved.x === item.x && moved.y === item.y && moved.w === item.w && moved.h === item.h) return item;
+        const nextCustomH = resizedHeightId === item.i ? true : item.customH;
+        if (moved.x === item.x && moved.y === item.y && moved.w === item.w && moved.h === item.h && nextCustomH === item.customH) return item;
         changed = true;
-        return { ...item, x: moved.x, y: moved.y, w: moved.w, h: moved.h };
+        return { ...item, x: moved.x, y: moved.y, w: moved.w, h: moved.h, ...(nextCustomH ? { customH: true } : {}) };
       });
       return changed ? { ...all, [board]: merged } : all;
     });

@@ -11,8 +11,15 @@ let listening = false;
 let allowBeta: boolean | null = null;
 let activeDownload: Promise<unknown> | null = null;
 
+function canSelfUpdate(): boolean {
+  if (!app.isPackaged) return false;
+  if (process.platform === "linux") return Boolean(process.env.APPIMAGE);
+  if (process.platform === "win32" && Boolean(process.env.PORTABLE_EXECUTABLE_DIR)) return false;
+  return true;
+}
+
 function check(): void {
-  if (!app.isPackaged || !listening || allowBeta === null) {
+  if (!canSelfUpdate() || !listening || allowBeta === null) {
     return;
   }
   autoUpdater.allowPrerelease = allowBeta;
@@ -36,7 +43,7 @@ function send(status: UpdateStatus): void {
 export function setupAutoUpdater(window: BrowserWindow): void {
   mainWindow = window;
 
-  if (!app.isPackaged || listening) {
+  if (!canSelfUpdate() || listening) {
     return;
   }
 
@@ -67,6 +74,12 @@ export function setupAutoUpdater(window: BrowserWindow): void {
 export async function downloadUpdate(): Promise<void> {
   if (!app.isPackaged) {
     throw new Error(tr("Self-update works only in installed builds", "Автообновление работает только в установленной версии"));
+  }
+  if (process.platform === "linux" && !process.env.APPIMAGE) {
+    throw new Error(tr("Self-update on Linux works only in AppImage builds", "Автообновление на Linux работает только в AppImage-сборке"));
+  }
+  if (process.platform === "win32" && Boolean(process.env.PORTABLE_EXECUTABLE_DIR)) {
+    throw new Error(tr("Self-update works only in installed builds, not the portable edition", "Автообновление работает только в установленной версии, не в портативной"));
   }
   if (!activeDownload) {
     activeDownload = autoUpdater.downloadUpdate().finally(() => {

@@ -1,13 +1,14 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { JavaInstallation, JavaRuntimeState } from "@shared/types";
-import { getLauncherRoot, getTarPath, getWindowsJavaCandidates } from "../paths";
+import { getLauncherRoot, getSystemJavaCandidates, getTarPath } from "../paths";
 import { readUrlBytes, type BytesCallback } from "./transfer";
+import { extractZip } from "./zip";
 import { tr } from "../i18n";
 
 const execFileAsync = promisify(execFile);
@@ -72,7 +73,21 @@ function getCacheDir(): string {
 }
 
 function toJavaExe(javawPath: string): string {
+  if (process.platform !== "win32") {
+    return javawPath;
+  }
   return path.join(path.dirname(javawPath), "java.exe");
+}
+
+function normalizePathCompare(filePath: string): string {
+  return process.platform === "win32" ? filePath.toLowerCase() : filePath;
+}
+
+function isTargetJavaBinary(parentDir: string, entryName: string): boolean {
+  if (process.platform === "win32") {
+    return entryName.toLowerCase() === "javaw.exe";
+  }
+  return entryName === "java" && path.basename(parentDir) === "bin";
 }
 
 function parseJavaMajor(output: string): number | null {
@@ -149,7 +164,7 @@ async function findJavawUnder(root: string, maxDepth = 5): Promise<string | null
   for (const entry of entries) {
     const fullPath = path.join(root, entry.name);
 
-    if (entry.isFile() && entry.name.toLowerCase() === "javaw.exe") {
+    if (entry.isFile() && isTargetJavaBinary(root, entry.name)) {
       return fullPath;
     }
   }
@@ -207,7 +222,7 @@ async function collectCandidatePaths(preferredPaths: Array<string | undefined>):
   const seen = new Set<string>();
   const result: string[] = [];
 
-  for (const candidate of [...preferredPaths, ...(await listRuntimeJavawPaths()), ...getWindowsJavaCandidates()]) {
+  for (const candidate of [...preferredPaths, ...(await listRuntimeJavawPaths()), ...getSystemJavaCandidates()]) {
     if (!candidate || seen.has(candidate)) {
       continue;
     }
@@ -238,22 +253,28 @@ async function resolveCandidate(javawPath: string, source: JavaRuntimeState["sou
 }
 
 function getSource(javawPath: string, preferredPaths: string[]): JavaRuntimeState["source"] {
-  const normalized = javawPath.toLowerCase();
+  const normalized = normalizePathCompare(javawPath);
 
-  if (preferredPaths.some((item) => item && item.toLowerCase() === normalized)) {
+  if (preferredPaths.some((item) => item && normalizePathCompare(item) === normalized)) {
     return "configured";
   }
 
-  if (normalized.startsWith(getRuntimeRoot().toLowerCase())) {
+  if (normalized.startsWith(normalizePathCompare(getRuntimeRoot()))) {
     return "downloaded";
   }
 
   return "system";
 }
 
+function getAdoptiumOs(): string {
+  if (process.platform === "win32") return "windows";
+  if (process.platform === "darwin") return "mac";
+  return "linux";
+}
+
 function getAdoptiumDownloadUrl(major: number): string {
   const arch = getAdoptiumArch();
-  return `https://api.adoptium.net/v3/binary/latest/${major}/ga/windows/${arch}/jre/hotspot/normal/eclipse?project=jdk`;
+  return `https://api.adoptium.net/v3/binary/latest/${major}/ga/${getAdoptiumOs()}/${arch}/jre/hotspot/normal/eclipse?project=jdk`;
 }
 
 function isCompatibleJavaMajor(actualMajor: number, requiredMajor: number): boolean {
@@ -294,43 +315,53 @@ async function downloadRuntimeZip(major: number, signal?: AbortSignal, onBytes?:
   signal?.throwIfAborted();
   await mkdir(getCacheDir(), { recursive: true });
 
-  const zipPath = path.join(getCacheDir(), `temurin-jre-${major}.zip`);
+  const ext = process.platform === "win32" ? "zip" : "tar.gz";
+  const archivePath = path.join(getCacheDir(), `temurin-jre-${major}.${ext}`);
 
   try {
-    const existing = await stat(zipPath);
+    const existing = await stat(archivePath);
     if (existing.size > 0) {
-      return zipPath;
+      return archivePath;
     }
-    await rm(zipPath, { force: true }).catch(() => undefined);
+    await rm(archivePath, { force: true }).catch(() => undefined);
   } catch {
   }
 
-  const tempPath = `${zipPath}.${process.pid}.${randomUUID()}.tmp`;
+  const tempPath = `${archivePath}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    const { buffer } = await readUrlBytes(getAdoptiumDownloadUrl(major), { "user-agent": "lynapp/1.1.0-beta.5" }, signal, (received, total) =>
+    const { buffer } = await readUrlBytes(getAdoptiumDownloadUrl(major), { "user-agent": "lynapp/1.1.0-beta.6" }, signal, (received, total) =>
       onBytes?.(received, total), 15 * 60 * 1000
     );
     await writeFile(tempPath, buffer);
-    await rm(zipPath, { force: true }).catch(() => undefined);
-    await rename(tempPath, zipPath);
-    return zipPath;
+    await rm(archivePath, { force: true }).catch(() => undefined);
+    await rename(tempPath, archivePath);
+    return archivePath;
   } catch (error) {
     await rm(tempPath, { force: true }).catch(() => undefined);
     throw error;
   }
 }
 
-async function expandZip(zipPath: string, destination: string): Promise<void> {
+async function expandZip(archivePath: string, destination: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   await mkdir(path.dirname(destination), { recursive: true });
   await rm(destination, { recursive: true, force: true });
   await mkdir(destination, { recursive: true });
 
   try {
-    await execFileAsync(getTarPath(), ["-xf", zipPath, "-C", destination], {
-      windowsHide: true,
-      timeout: 120000
-    });
+    if (archivePath.toLowerCase().endsWith(".zip")) {
+      await extractZip(archivePath, destination);
+    } else {
+      await execFileAsync(getTarPath(), ["-xzf", archivePath, "-C", destination], {
+        windowsHide: true,
+        timeout: 120000,
+        signal
+      });
+    }
   } catch (error) {
+    if (signal?.aborted) {
+      throw error;
+    }
     throw new Error(tr(`Java archive extraction failed: ${getExecErrorMessage(error)}`, `Не удалось распаковать архив Java: ${getExecErrorMessage(error)}`));
   }
 }
@@ -367,6 +398,16 @@ async function writeInstalledMarker(runtimeDir: string, major: number, javawPath
 }
 
 export class JavaService {
+  private readonly activeInstalls = new Map<
+    number,
+    {
+      promise: Promise<{ javawPath: string; major: number }>;
+      controller: AbortController;
+      subscribers: number;
+      listeners: Set<BytesCallback>;
+    }
+  >();
+
   async listCandidatePaths(preferredPaths: Array<string | undefined> = []): Promise<string[]> {
     return collectCandidatePaths(preferredPaths);
   }
@@ -496,7 +537,7 @@ export class JavaService {
   async inspectPickedPath(pickedPath: string): Promise<{ javawPath: string; major: number | null }> {
     let javawPath = pickedPath;
 
-    if (/java\.exe$/i.test(pickedPath) && !/javaw\.exe$/i.test(pickedPath)) {
+    if (process.platform === "win32" && /java\.exe$/i.test(pickedPath) && !/javaw\.exe$/i.test(pickedPath)) {
       const sibling = path.join(path.dirname(pickedPath), "javaw.exe");
 
       if (await pathExists(sibling)) {
@@ -512,24 +553,93 @@ export class JavaService {
   }
 
   private async installFresh(downloadMajor: number, signal?: AbortSignal, onBytes?: BytesCallback): Promise<{ javawPath: string; major: number }> {
+    signal?.throwIfAborted();
+    let flight = this.activeInstalls.get(downloadMajor);
+    if (!flight) {
+      const controller = new AbortController();
+      const listeners = new Set<BytesCallback>();
+      const broadcast: BytesCallback = (received, total) => {
+        for (const cb of listeners) cb(received, total);
+      };
+      const promise = this.doInstallFresh(downloadMajor, controller.signal, broadcast).finally(() => {
+        if (this.activeInstalls.get(downloadMajor) === flight) {
+          this.activeInstalls.delete(downloadMajor);
+        }
+      });
+      flight = { promise, controller, subscribers: 0, listeners };
+      this.activeInstalls.set(downloadMajor, flight);
+    }
+    const active = flight;
+    active.subscribers += 1;
+    if (onBytes) active.listeners.add(onBytes);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      if (onBytes) active.listeners.delete(onBytes);
+      active.subscribers = Math.max(0, active.subscribers - 1);
+      if (active.subscribers === 0) {
+        active.controller.abort();
+      }
+    };
+    if (!signal) {
+      try {
+        return await active.promise;
+      } finally {
+        release();
+      }
+    }
+    return await new Promise<{ javawPath: string; major: number }>((resolve, reject) => {
+      const onAbort = (): void => {
+        release();
+        reject(signal.reason ?? new Error(tr("launch cancelled", "запуск отменён")));
+      };
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      active.promise.then(
+        (res) => {
+          signal.removeEventListener("abort", onAbort);
+          release();
+          resolve(res);
+        },
+        (err) => {
+          signal.removeEventListener("abort", onAbort);
+          release();
+          reject(err);
+        }
+      );
+    });
+  }
+
+  private async doInstallFresh(downloadMajor: number, signal?: AbortSignal, onBytes?: BytesCallback): Promise<{ javawPath: string; major: number }> {
     const runtimeDir = getRuntimeInstallDir(downloadMajor);
     const zipPath = await downloadRuntimeZip(downloadMajor, signal, onBytes);
     const tempDir = `${runtimeDir}.tmp-${process.pid}-${randomUUID()}`;
 
     try {
-      await expandZip(zipPath, tempDir);
+      await expandZip(zipPath, tempDir, signal);
     } catch (error) {
       await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
-      await rm(zipPath, { force: true }).catch(() => undefined);
+      if (!signal?.aborted) {
+        await rm(zipPath, { force: true }).catch(() => undefined);
+      }
       throw error;
     }
 
     const javawPath = await findJavawUnder(tempDir);
 
     if (!javawPath) {
+      const expectedBinary = process.platform === "win32" ? "javaw.exe" : "bin/java";
       await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
       await rm(zipPath, { force: true }).catch(() => undefined);
-      throw new Error(tr(`Downloaded Java ${downloadMajor}, but javaw.exe was not found in the archive.`, `Скачана Java ${downloadMajor}, но в архиве нет javaw.exe.`));
+      throw new Error(tr(`Downloaded Java ${downloadMajor}, but ${expectedBinary} was not found in the archive.`, `Скачана Java ${downloadMajor}, но в архиве нет ${expectedBinary}.`));
+    }
+
+    if (process.platform !== "win32") {
+      await chmod(javawPath, 0o755).catch(() => undefined);
     }
 
     const major = await readJavaMajor(javawPath);

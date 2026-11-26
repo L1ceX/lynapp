@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { copyFile, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { AccountState, GameVersionInfo, GameVersionType, LauncherInstance, ModLoader, QuickPlayTarget } from "@shared/types";
-import { getLauncherRoot, getTarPath } from "../paths";
+import { getLauncherRoot } from "../paths";
 import { getRequiredJavaMajor as fallbackJavaMajor } from "./java";
 import { readUrlBytes, type BytesCallback } from "./transfer";
+import { createZipFromDir, extractZip } from "./zip";
 import { tr } from "../i18n";
 
 const execFileAsync = promisify(execFile);
@@ -73,6 +75,8 @@ interface VersionJson {
     };
     natives?: {
       windows?: string;
+      linux?: string;
+      osx?: string;
     };
     rules?: Rule[];
   }>;
@@ -101,6 +105,7 @@ export interface PreparedMinecraftLaunch {
   args: string[];
   classpath: string;
   nativesDir: string;
+  launchDirectory: string;
   logPath: string;
   warning?: string;
 }
@@ -121,8 +126,80 @@ function getAssetsRoot(): string {
   return path.join(getMinecraftRoot(), "assets");
 }
 
-function getNativesRoot(instanceDir: string, versionId: string): string {
-  return path.join(instanceDir, ".launcher", "natives", versionId);
+function hasNonAscii(value: string): boolean {
+  return /[^\x00-\x7F]/.test(value);
+}
+
+let cachedWindowsAcp: number | null | undefined;
+
+async function getWindowsAcp(): Promise<number | null> {
+  if (process.platform !== "win32") return 65001;
+  if (cachedWindowsAcp !== undefined) return cachedWindowsAcp;
+  try {
+    const { stdout } = await execFileAsync("reg", ["query", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage", "/v", "ACP"], {
+      windowsHide: true,
+      timeout: 3000
+    });
+    const match = /\bACP\s+REG_\w+\s+(\d+)/i.exec(stdout);
+    const parsed = match ? Number(match[1]) : NaN;
+    cachedWindowsAcp = Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    cachedWindowsAcp = null;
+  }
+  return cachedWindowsAcp;
+}
+
+function canPassViaWindowsAcp(value: string, acp: number | null): boolean {
+  if (!hasNonAscii(value) || acp === 65001) return true;
+  if (acp === 1251) return /^[\x20-\x7E\u0400-\u04FF]+$/.test(value);
+  return false;
+}
+
+function getNativesRoot(instanceId: string, versionId: string): string {
+  const safeInstance = instanceId.replace(/[^\w.-]/g, "_") || "instance";
+  const safeVersion = versionId.replace(/[^\w.-]/g, "_") || "version";
+  const primary = path.join(getMinecraftRoot(), "natives", safeInstance, safeVersion);
+  if (process.platform === "win32" && hasNonAscii(primary) && !hasNonAscii(os.tmpdir())) {
+    return path.join(os.tmpdir(), "lynapp", "natives", safeInstance, safeVersion);
+  }
+  return primary;
+}
+
+async function resolveLaunchInstanceDir(instanceId: string, instanceDir: string): Promise<string> {
+  if (process.platform !== "win32" || !hasNonAscii(instanceDir)) {
+    return instanceDir;
+  }
+  const safeInstance = instanceId.replace(/[^\w.-]/g, "_") || "instance";
+  const linksDir = path.join(getMinecraftRoot(), "instance-links");
+  if (hasNonAscii(linksDir)) {
+    return instanceDir;
+  }
+  const linkPath = path.join(linksDir, safeInstance);
+  try {
+    await mkdir(linksDir, { recursive: true });
+    const targetReal = await realpath(instanceDir).catch(() => path.resolve(instanceDir));
+    let needsCreate = true;
+    try {
+      const st = await lstat(linkPath);
+      if (st.isSymbolicLink()) {
+        const linkReal = await realpath(linkPath).catch(() => "");
+        if (linkReal && linkReal.toLowerCase() === targetReal.toLowerCase()) {
+          needsCreate = false;
+        } else {
+          await rmdir(linkPath);
+        }
+      } else {
+        return instanceDir;
+      }
+    } catch {
+    }
+    if (needsCreate) {
+      await symlink(targetReal, linkPath, "junction");
+    }
+    return linkPath;
+  } catch {
+    return instanceDir;
+  }
 }
 
 function getVersionDir(versionId: string): string {
@@ -168,7 +245,7 @@ async function downloadFile(url: string, filePath: string, expectedSha1?: string
     throw new Error(tr(`Missing download URL for ${path.basename(filePath)}`, `Отсутствует ссылка для загрузки ${path.basename(filePath)}`));
   }
 
-  const { buffer } = await readUrlBytes(url, { "user-agent": "lynapp/1.1.0-beta.5" }, signal, (received, total) => onBytes?.(received, total), timeoutMs);
+  const { buffer } = await readUrlBytes(url, { "user-agent": "lynapp/1.1.0-beta.6" }, signal, (received, total) => onBytes?.(received, total), timeoutMs);
   if (expectedSha1 && createHash("sha1").update(buffer).digest("hex").toLowerCase() !== expectedSha1.toLowerCase()) {
     throw new Error(tr(`Downloaded file checksum mismatch: ${filePath}`, `Контрольная сумма скачанного файла не совпадает: ${filePath}`));
   }
@@ -241,7 +318,7 @@ async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
   const response = await fetch(url, {
     signal,
     headers: {
-      "user-agent": "lynapp/1.1.0-beta.5"
+      "user-agent": "lynapp/1.1.0-beta.6"
     }
   });
 
@@ -310,7 +387,7 @@ async function getCachedLoaderVersions(key: string, loader: () => Promise<string
 
 async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.1.0-beta.5" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.6" }
   });
   if (response.status === 400 || response.status === 404) {
     return [];
@@ -324,7 +401,7 @@ async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> 
 
 async function listQuiltLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.1.0-beta.5" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.6" }
   });
   if (response.status === 400 || response.status === 404) {
     return [];
@@ -366,7 +443,7 @@ function isGameVersionAtLeast(version: string, major: number, minor: number, pat
 async function getFabricGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.fabricmc.net/v2/versions/game", {
-      headers: { "user-agent": "lynapp/1.1.0-beta.5" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.6" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -379,7 +456,7 @@ async function getFabricGameVersions(): Promise<string[]> {
 async function getQuiltGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.quiltmc.org/v3/versions/game", {
-      headers: { "user-agent": "lynapp/1.1.0-beta.5" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.6" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -467,13 +544,26 @@ const enabledFeatures: Record<string, boolean> = {
   is_quick_play_realms: false
 };
 
+function mojangOsName(): "windows" | "linux" | "osx" {
+  if (process.platform === "win32") return "windows";
+  if (process.platform === "darwin") return "osx";
+  return "linux";
+}
+
+function matchesArch(expected: string): boolean {
+  if (process.arch === "ia32") return expected === "x86" || expected === "ia32";
+  if (process.arch === "x64") return expected === "x64" || expected === "x86_64" || expected === "amd64";
+  if (process.arch === "arm64") return expected === "arm64" || expected === "aarch64";
+  return expected === process.arch;
+}
+
 function ruleApplies(rule: Rule): boolean {
   if (rule.os) {
-    if (rule.os.name && rule.os.name !== "windows") {
+    if (rule.os.name && rule.os.name !== mojangOsName()) {
       return false;
     }
 
-    if (rule.os.arch && rule.os.arch !== (process.arch === "ia32" ? "x86" : process.arch)) {
+    if (rule.os.arch && !matchesArch(rule.os.arch)) {
       return false;
     }
   }
@@ -599,9 +689,8 @@ async function extractNativeJar(jarPath: string, destination: string): Promise<v
   await mkdir(destination, { recursive: true });
 
   try {
-    await execFileAsync(getTarPath(), ["-xf", jarPath, "--exclude", "META-INF", "-C", destination], {
-      windowsHide: true,
-      timeout: 60000
+    await extractZip(jarPath, destination, {
+      skipEntry: (entryPath) => entryPath === "META-INF" || entryPath.startsWith("META-INF/")
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -691,7 +780,7 @@ async function getManifest(): Promise<VersionManifest> {
   try {
     const response = await fetch(versionManifestUrl, {
       headers: {
-        "user-agent": "lynapp/1.1.0-beta.5"
+        "user-agent": "lynapp/1.1.0-beta.6"
       }
     });
     if (!response.ok) {
@@ -769,7 +858,7 @@ async function prepareLibraries(version: VersionJson, nativesDir: string, signal
       classpath.push(artifactPath);
     }
 
-    const classifier = getNativesClassifier(library.natives?.windows);
+    const classifier = getNativesClassifier(library.natives?.[mojangOsName()]);
     const nativeDownload = classifier ? library.downloads?.classifiers?.[classifier] : undefined;
 
     if (classifier && nativeDownload && (nativeDownload.path || nativeDownload.url)) {
@@ -843,7 +932,7 @@ async function getFabricLoaderVersion(requested?: string, signal?: AbortSignal):
 
   const response = await fetch("https://meta.fabricmc.net/v2/versions/loader", {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.5" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.6" }
   });
   if (!response.ok) {
     throw new Error(tr(`Fabric loader versions returned ${response.status}`, `Сервер Fabric вернул ошибку при загрузке версий: ${response.status}`));
@@ -874,7 +963,7 @@ async function getQuiltLoaderVersion(gameVersion: string, requested?: string, si
 
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.5" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.6" }
   });
   if (!response.ok) {
     throw new Error(tr(`Quilt loader versions returned ${response.status}`, `Сервер Quilt вернул ошибку при загрузке версий: ${response.status}`));
@@ -900,7 +989,7 @@ async function applyQuiltProfile(version: VersionJson, instance: LauncherInstanc
 }
 
 function consoleJavaPath(javaPath: string): string {
-  if (path.basename(javaPath).toLowerCase() !== "javaw.exe") {
+  if (process.platform !== "win32" || path.basename(javaPath).toLowerCase() !== "javaw.exe") {
     return javaPath;
   }
 
@@ -1166,15 +1255,15 @@ async function applyLegacyForgeProfile(version: VersionJson, instance: LauncherI
   await mkdir(vanillaDir, { recursive: true });
   await mkdir(forgeDir, { recursive: true });
   try {
-    await execFileAsync(getTarPath(), ["-xf", vanillaJar, "-C", vanillaDir], { windowsHide: true, timeout: 120000 });
-    await execFileAsync(getTarPath(), ["-xf", zipPath, "-C", forgeDir], { windowsHide: true, timeout: 120000 });
+    await extractZip(vanillaJar, vanillaDir);
+    await extractZip(zipPath, forgeDir);
     await cp(forgeDir, vanillaDir, { recursive: true });
     await rm(path.join(vanillaDir, "META-INF"), { recursive: true, force: true });
     const members = await readdir(vanillaDir);
     const profileDir = getVersionDir(profileId);
     await mkdir(profileDir, { recursive: true });
     const zipStage = path.join(profileDir, `${profileId}.jar.tmp.zip`);
-    await execFileAsync(getTarPath(), ["-a", "-cf", zipStage, "-C", vanillaDir, ...members], { windowsHide: true, timeout: 180000 });
+    await createZipFromDir(vanillaDir, zipStage, { entries: members });
     await rm(path.join(profileDir, `${profileId}.jar`), { force: true }).catch(() => undefined);
     await rename(zipStage, builtJar);
   } finally {
@@ -1272,7 +1361,7 @@ async function placeLegacyAssets(assetIndex: AssetIndex, objectsDir: string, tar
   });
 }
 
-async function prepareAssets(version: VersionJson, instance: LauncherInstance, signal?: AbortSignal, onProgress?: (progress: LaunchProgress) => void, concurrency = 12): Promise<string> {
+async function prepareAssets(version: VersionJson, instanceDir: string, signal?: AbortSignal, onProgress?: (progress: LaunchProgress) => void, concurrency = 12): Promise<string> {
   const indexesDir = path.join(getAssetsRoot(), "indexes");
   const objectsDir = path.join(getAssetsRoot(), "objects");
   const indexPath = path.join(indexesDir, `${version.assetIndex.id}.json`);
@@ -1291,7 +1380,7 @@ async function prepareAssets(version: VersionJson, instance: LauncherInstance, s
   });
 
   if (assetIndex.map_to_resources) {
-    const resourcesDir = path.join(instance.directory, "resources");
+    const resourcesDir = path.join(instanceDir, "resources");
     await placeLegacyAssets(assetIndex, objectsDir, resourcesDir);
     return resourcesDir;
   }
@@ -1353,6 +1442,7 @@ function buildLaunchArgs(
     classpath: string;
     nativesDir: string;
     gameAssets: string;
+    launchDirectory: string;
   },
   quickPlay?: QuickPlayTarget
 ): string[] {
@@ -1360,10 +1450,11 @@ function buildLaunchArgs(
   const uuid = getPlayerUuid(account, playerName);
   const accessToken = getAccessToken(account);
   const offline = account.status === "offline";
+  const gameDirArg = process.platform === "win32" && hasNonAscii(paths.launchDirectory) ? "." : paths.launchDirectory;
   const variables: Record<string, string> = {
     auth_player_name: playerName,
     version_name: version.id,
-    game_directory: instance.directory,
+    game_directory: gameDirArg,
     assets_root: getAssetsRoot(),
     assets_index_name: version.assetIndex.id || version.assets || version.id,
     auth_uuid: uuid,
@@ -1374,9 +1465,9 @@ function buildLaunchArgs(
     version_type: version.type,
     natives_directory: paths.nativesDir,
     launcher_name: "lynapp",
-        launcher_version: "1.1.0-beta.5",
+        launcher_version: "1.1.0-beta.6",
     classpath: paths.classpath,
-    classpath_separator: ";",
+    classpath_separator: path.delimiter,
     library_directory: getLibrariesRoot(),
     user_properties: "{}",
     game_assets: paths.gameAssets,
@@ -1410,7 +1501,7 @@ async function ensureAuthlibInjector(signal?: AbortSignal): Promise<string> {
   }
   const response = await fetch("https://api.github.com/repos/yushijinhun/authlib-injector/releases/latest", {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.5", accept: "application/vnd.github+json" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.6", accept: "application/vnd.github+json" }
   });
   if (!response.ok) {
     throw new Error(tr(`authlib-injector release lookup failed (HTTP ${response.status})`, `Не удалось найти выпуск authlib-injector (HTTP ${response.status})`));
@@ -1427,7 +1518,7 @@ async function ensureAuthlibInjector(signal?: AbortSignal): Promise<string> {
 async function isElyAuthAvailable(signal?: AbortSignal): Promise<boolean> {
   const timeout = AbortSignal.timeout(7000);
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  const headers = { "user-agent": "lynapp/1.1.0-beta.5" };
+  const headers = { "user-agent": "lynapp/1.1.0-beta.6" };
   try {
     const root = await fetch("https://ely.by/", { signal: combined, headers });
     if (!root.ok) return false;
@@ -1520,29 +1611,50 @@ export class MinecraftService {
     quickPlay?: QuickPlayTarget
   ): Promise<PreparedMinecraftLaunch> {
     await mkdir(instance.directory, { recursive: true });
+    const launchDirectory = await resolveLaunchInstanceDir(instance.id, instance.directory);
 
     const vanillaVersion = await getVersionJson(instance.gameVersion, signal);
     const version = await applyLoaderProfile(vanillaVersion, instance, javaPath, signal, onProgress);
-    const nativesDir = getNativesRoot(instance.directory, version.id);
+    const nativesDir = getNativesRoot(instance.id, version.id);
+    await mkdir(nativesDir, { recursive: true });
     const clientJar = version.prebuiltClientJar ?? await prepareClientJar(vanillaVersion, version.id, signal);
     const libraryClasspath = await prepareLibraries(version, nativesDir, signal, onProgress);
-    const gameAssets = await prepareAssets(version, instance, signal, onProgress, concurrency);
+    const gameAssets = await prepareAssets(version, launchDirectory, signal, onProgress, concurrency);
 
-    const classpath = [...new Set([...libraryClasspath, clientJar])].join(";");
+    const classpath = [...new Set([...libraryClasspath, clientJar])].join(path.delimiter);
+    let effectiveQuickPlay = quickPlay;
+    const warnings: string[] = [];
+    if (
+      process.platform === "win32" &&
+      quickPlay?.kind === "singleplayer" &&
+      hasNonAscii(quickPlay.value)
+    ) {
+      const acp = await getWindowsAcp();
+      if (!canPassViaWindowsAcp(quickPlay.value, acp)) {
+        effectiveQuickPlay = undefined;
+        warnings.push(
+          tr(
+            "Quick Play skipped because the Windows system codepage cannot pass a non-ASCII world name to Java; open the world from the in-game menu",
+            "Быстрый вход пропущен: системная кодировка Windows не передаёт нелатинское имя мира в Java — выберите мир в меню игры"
+          )
+        );
+      }
+    }
     const args = buildLaunchArgs(version, instance, account, javaMemory, {
       classpath,
       nativesDir,
-      gameAssets
-    }, quickPlay);
-    let warning: string | undefined;
+      gameAssets,
+      launchDirectory
+    }, effectiveQuickPlay);
     if (account.kind === "ely") {
       if (await isElyAuthAvailable(signal)) {
         const injector = await ensureAuthlibInjector(signal);
         args.unshift(`-javaagent:${injector}=ely.by`);
       } else {
-        warning = tr("Ely.by is unavailable, the game runs with your nickname but without the Ely.by skin and login on Ely.by servers", "Ely.by недоступен, игра запущена с вашим ником, но без скина Ely.by и входа на серверы с авторизацией Ely.by");
+        warnings.push(tr("Ely.by is unavailable, the game runs with your nickname but without the Ely.by skin and login on Ely.by servers", "Ely.by недоступен, игра запущена с вашим ником, но без скина Ely.by и входа на серверы с авторизацией Ely.by"));
       }
     }
+    const warning = warnings.length ? warnings.join("; ") : undefined;
     const logPath = path.join(instance.directory, ".launcher", "logs", "latest.log");
     await mkdir(path.dirname(logPath), { recursive: true });
 
@@ -1551,6 +1663,7 @@ export class MinecraftService {
       args,
       classpath,
       nativesDir,
+      launchDirectory,
       logPath,
       warning
     };

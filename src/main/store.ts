@@ -1,6 +1,6 @@
 import { app, safeStorage } from "electron";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { EFFECTS_DEFAULTS, VERSION_TYPES_DEFAULTS, type AccountState, type LauncherInstance, type LauncherSettings, type SkinMeta } from "@shared/types";
@@ -18,6 +18,8 @@ const SECRET_ACCOUNT_FIELDS = [
   "xboxUhs"
 ] as const;
 
+type SecretAccountField = (typeof SECRET_ACCOUNT_FIELDS)[number];
+
 function canEncryptSecrets(): boolean {
   try {
     return safeStorage.isEncryptionAvailable();
@@ -26,32 +28,48 @@ function canEncryptSecrets(): boolean {
   }
 }
 
-function encryptAccountSecrets(account: AccountState): AccountState {
-  if (!canEncryptSecrets()) return account;
+function encryptAccountSecrets(account: AccountState, locked?: Partial<Record<SecretAccountField, string>>): AccountState {
+  const canEncrypt = canEncryptSecrets();
   let copy: AccountState | null = null;
   for (const field of SECRET_ACCOUNT_FIELDS) {
     const value = account[field];
-    if (typeof value !== "string" || !value || value.startsWith(SECRET_PREFIX)) continue;
-    try {
-      const encoded = safeStorage.encryptString(value).toString("base64");
+    if (typeof value === "string" && value) {
+      if (locked && field in locked) {
+        delete locked[field];
+      }
+      if (!canEncrypt || value.startsWith(SECRET_PREFIX)) continue;
+      try {
+        const encoded = safeStorage.encryptString(value).toString("base64");
+        if (!copy) copy = { ...account };
+        copy[field] = `${SECRET_PREFIX}${encoded}`;
+      } catch {
+      }
+    } else if (locked?.[field]) {
       if (!copy) copy = { ...account };
-      copy[field] = `${SECRET_PREFIX}${encoded}`;
-    } catch {
+      copy[field] = locked[field];
     }
   }
   return copy ?? account;
 }
 
-function decryptAccounts(accounts: AccountState[]): boolean {
+function decryptAccounts(accounts: AccountState[], lockedSecrets: Map<string, Partial<Record<SecretAccountField, string>>>): boolean {
   const canEncrypt = canEncryptSecrets();
   let needsRewrite = false;
   for (const account of accounts) {
     let unreadable = false;
+    let lockedCount = 0;
     for (const field of SECRET_ACCOUNT_FIELDS) {
       const value = account[field];
       if (typeof value !== "string" || !value) continue;
       if (value.startsWith(SECRET_PREFIX)) {
-        if (!canEncrypt) continue;
+        if (!canEncrypt) {
+          const bucket = lockedSecrets.get(account.id) ?? {};
+          bucket[field] = value;
+          lockedSecrets.set(account.id, bucket);
+          delete account[field];
+          lockedCount += 1;
+          continue;
+        }
         try {
           account[field] = safeStorage.decryptString(Buffer.from(value.slice(SECRET_PREFIX.length), "base64"));
         } catch {
@@ -62,6 +80,9 @@ function decryptAccounts(accounts: AccountState[]): boolean {
       } else if (canEncrypt) {
         needsRewrite = true;
       }
+    }
+    if (lockedCount > 0 && account.status === "signed-in") {
+      account.message = tr("Keyring unavailable — unlock system keyring or sign in again", "Хранилище ключей недоступно — разблокируйте системную связку ключей или войдите снова");
     }
     if (unreadable && account.status === "signed-in") {
       account.status = "signed-out";
@@ -127,7 +148,8 @@ function defaultSettings(): LauncherSettings {
     animationsEnabled: true,
     animationSpeed: 100,
     effects: { ...EFFECTS_DEFAULTS },
-    activeSkinId: null
+    activeSkinId: null,
+    fontFamily: ""
   };
 }
 
@@ -262,11 +284,60 @@ export function getActiveAccount(data: Pick<LauncherData, "accounts" | "activeAc
   return data.accounts.find((item) => item.id === data.activeAccountId) ?? data.accounts[0] ?? null;
 }
 
+async function reconcileInstanceDirectories(instances: LauncherInstance[]): Promise<boolean> {
+  if (!instances.some((item) => !existsSync(item.directory))) {
+    return false;
+  }
+  const root = getInstancesRoot();
+  let entries: string[];
+  try {
+    entries = await readdir(root);
+  } catch {
+    return false;
+  }
+  const manifestMap = new Map<string, string>();
+  for (const name of entries) {
+    const dir = path.join(root, name);
+    try {
+      const raw = await readFile(path.join(dir, ".launcher", "instance.json"), "utf8");
+      const parsed = JSON.parse(raw) as { id?: string };
+      if (typeof parsed.id === "string" && parsed.id) {
+        manifestMap.set(parsed.id, dir);
+      }
+    } catch {
+    }
+  }
+  if (!manifestMap.size) return false;
+  const norm = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
+  const owned = new Set(instances.filter((i) => existsSync(i.directory)).map((i) => norm(i.directory)));
+  let changed = false;
+  for (const inst of instances) {
+    if (existsSync(inst.directory)) continue;
+    const found = manifestMap.get(inst.id);
+    if (!found) continue;
+    const key = norm(found);
+    if (owned.has(key)) continue;
+    owned.add(key);
+    inst.directory = found;
+    const safeId = inst.id.replace(/[^\w.-]/g, "_") || "instance";
+    const linkPath = path.join(getLauncherRoot(), "minecraft", "instance-links", safeId);
+    try {
+      const st = await lstat(linkPath);
+      if (st.isSymbolicLink()) await rmdir(linkPath);
+    } catch {
+    }
+    await writeFile(path.join(found, ".launcher", "instance.json"), JSON.stringify(inst, null, 2), "utf8").catch(() => undefined);
+    changed = true;
+  }
+  return changed;
+}
+
 export class JsonStore {
   private data: LauncherData | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
   private updateQueue: Promise<unknown> = Promise.resolve();
   private tmpCounter = 0;
+  private readonly lockedSecrets = new Map<string, Partial<Record<SecretAccountField, string>>>();
 
   constructor(private readonly filePath = getStorePath()) {}
 
@@ -319,7 +390,11 @@ export class JsonStore {
       return this.data;
     }
     this.data = parsed;
-    if (decryptAccounts(parsed.accounts)) {
+    let shouldSave = decryptAccounts(parsed.accounts, this.lockedSecrets);
+    if (await reconcileInstanceDirectories(parsed.instances)) {
+      shouldSave = true;
+    }
+    if (shouldSave) {
       await this.save(parsed).catch(() => undefined);
     }
     return this.data;
@@ -367,10 +442,14 @@ export class JsonStore {
   }
 
   private serialize(data: LauncherData): string {
+    const activeIds = new Set(data.accounts.map((acc) => acc.id));
+    for (const id of [...this.lockedSecrets.keys()]) {
+      if (!activeIds.has(id)) this.lockedSecrets.delete(id);
+    }
     return JSON.stringify(
       {
         ...data,
-        accounts: data.accounts.map(encryptAccountSecrets)
+        accounts: data.accounts.map((acc) => encryptAccountSecrets(acc, this.lockedSecrets.get(acc.id)))
       },
       null,
       2

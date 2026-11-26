@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { Box, CheckCircle2, ChevronRight, Download, Gamepad2, Layers3, Play, Plus, RefreshCw, SlidersHorizontal, Sparkles, Square, UserRoundCog, X } from "lucide-react";
+import { Box, CheckCircle2, ChevronRight, CircleAlert, Download, FolderOpen, Gamepad2, Layers3, Play, Plus, RefreshCw, SlidersHorizontal, Sparkles, Square, UserRoundCog, X } from "lucide-react";
 import { SkinHead } from "../../components/skins";
 import { formatRelative } from "../../lib/format";
 import { useApp } from "../../state/context";
 import type { HomeWidgetId } from "./layout";
 
 function ContinueWidget() {
-  const { busy, cancelSelected, isLaunching, isSelectedRunning, launchSelected, selected, stopSelected, switchSection, t } = useApp();
+  const { busy, cancelSelected, isLaunching, isSelectedRunning, launchSelected, openSelectedFolder, selected, stopSelected, switchSection, t } = useApp();
   return (
     <div className="widget-body widget-continue">
       <div className="widget-title"><Box size={18} /><span>{t("Continue playing", "Продолжить игру")}</span></div>
@@ -16,7 +16,7 @@ function ContinueWidget() {
       </div>
       <div className="button-row">
         {isLaunching ? <button className="primary-button launch-button running" onClick={cancelSelected}><X size={16} /> {t("Cancel", "Отмена")}</button> : <button className={isSelectedRunning ? "primary-button launch-button running" : "primary-button launch-button"} disabled={!selected || busy} onClick={isSelectedRunning ? stopSelected : launchSelected}>{isSelectedRunning ? <><Square size={16} /> {t("Stop", "Остановить")}</> : <><Play size={17} /> {t("Launch", "Запустить")}</>}</button>}
-        {selected ? <button onClick={() => switchSection("instances")}><SlidersHorizontal size={16} /> {t("Manage instance", "Настроить инстанцию")}</button> : <button className="primary-button" onClick={() => switchSection("instances")}><Plus size={16} /> {t("New instance", "Новая инстанция")}</button>}
+        {selected ? <><button className="continue-manage-btn" onClick={() => switchSection("instances")}><SlidersHorizontal size={16} /> <span>{t("Manage instance", "Настроить инстанцию")}</span></button><button type="button" className="continue-folder-btn" onClick={() => void openSelectedFolder()} title={t("Open instance folder", "Открыть папку инстанции")} aria-label={t("Open instance folder", "Открыть папку инстанции")}><FolderOpen size={16} /></button></> : <button className="primary-button" onClick={() => switchSection("instances")}><Plus size={16} /> {t("New instance", "Новая инстанция")}</button>}
       </div>
     </div>
   );
@@ -28,24 +28,36 @@ function StatWidget({ kind }: { kind: "statInstances" | "statMods" | "statRunnin
   const label = kind === "statInstances" ? t("Instances", "Инстанции") : kind === "statMods" ? t("Mods installed", "Установлено модов") : kind === "statRunning" ? t("Running now", "Сейчас запущено") : t("Last activity", "Последняя активность");
   return (
     <div className="widget-body stat-card widget-stat">
-      <span className="stat-value">{value}</span>
+      <span className="stat-value" title={value}>{value}</span>
       <span className="stat-label">{label}</span>
     </div>
   );
 }
 
 function RecentWidget() {
-  const { bootstrap, lang, runningIds, setSelectedId, switchSection, t } = useApp();
-  const recent = [...bootstrap.instances].sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "")).slice(0, 6);
+  const { bootstrap, busy, lang, launchingIds, launchInstanceById, runningIds, setSelectedId, stopInstanceById, switchSection, t } = useApp();
+  const recent = [...bootstrap.instances]
+    .sort((a, b) => (b.lastPlayedAt ?? b.updatedAt ?? "").localeCompare(a.lastPlayedAt ?? a.updatedAt ?? ""))
+    .slice(0, 6);
   return (
     <div className="widget-body widget-recent">
       <div className="widget-title"><Layers3 size={18} /><span>{t("Recent instances", "Недавние инстанции")}</span></div>
-      {recent.length ? <div className="widget-list">{recent.map((instance) => <button key={instance.id} type="button" className="widget-list-row" onClick={() => { setSelectedId(instance.id); switchSection("instances"); }}>
-        <Box size={16} />
-        <span className="widget-list-main"><strong>{instance.name}</strong><small className="muted">{instance.gameVersion} / {instance.loader}{instance.updatedAt ? ` · ${formatRelative(instance.updatedAt, lang)}` : ""}</small></span>
-        {runningIds.includes(instance.id) ? <span className="tag-chip widget-running">{t("Running", "Запущена")}</span> : null}
-        <ChevronRight size={15} />
-      </button>)}</div> : <span className="muted">{t("No instances yet.", "Инстанций пока нет.")}</span>}
+      {recent.length ? <div className="widget-list">{recent.map((instance) => {
+        const stamp = instance.lastPlayedAt ?? instance.updatedAt;
+        const running = runningIds.includes(instance.id);
+        const launching = launchingIds.includes(instance.id);
+        return (
+          <div key={instance.id} className={running ? "widget-list-item running" : "widget-list-item"}>
+            <button type="button" className="widget-list-row" onClick={() => { setSelectedId(instance.id); switchSection("instances"); }}>
+              <Box size={16} />
+              <span className="widget-list-main"><strong>{instance.name}</strong><small className="muted">{instance.gameVersion} / {instance.loader}{stamp ? ` · ${formatRelative(stamp, lang)}` : ""}</small></span>
+              {running ? <span className="tag-chip widget-running">{t("Running", "Запущена")}</span> : null}
+              <ChevronRight size={15} className="widget-list-chevron" />
+            </button>
+            <button type="button" className={running ? "widget-quick-play stop" : "widget-quick-play"} disabled={busy || launching} title={running ? t(`Stop ${instance.name}`, `Остановить ${instance.name}`) : t(`Launch ${instance.name}`, `Запустить ${instance.name}`)} aria-label={running ? t("Stop", "Остановить") : t("Launch", "Запустить")} onClick={(event) => { event.stopPropagation(); setSelectedId(instance.id); void (running ? stopInstanceById(instance.id) : launchInstanceById(instance)); }}>{launching ? <RefreshCw size={13} className="spin" /> : running ? <Square size={12} /> : <Play size={13} />}</button>
+          </div>
+        );
+      })}</div> : <span className="muted">{t("No instances yet.", "Инстанций пока нет.")}</span>}
     </div>
   );
 }
@@ -78,7 +90,9 @@ function LauncherWidget() {
         {update?.kind === "available" ? <button type="button" className="primary-button" onClick={() => void downloadUpdate()}><Download size={15} /> {t(`Download ${update.version ?? ""}`, `Скачать ${update.version ?? ""}`)}</button>
           : update?.kind === "downloading" ? <span className="muted"><RefreshCw size={14} className="spin" /> {t("Downloading update", "Загрузка обновления")} {update.percent ?? 0}%</span>
             : update?.kind === "ready" ? <button type="button" className="primary-button" onClick={() => void installUpdate()}><Sparkles size={15} /> {t("Restart to update", "Перезапустить и обновить")}</button>
-              : <span className="muted"><CheckCircle2 size={14} /> {t("You have the latest version", "Установлена последняя версия")}</span>}
+              : update?.kind === "checking" ? <span className="muted"><RefreshCw size={14} className="spin" /> {t("Checking for updates...", "Проверка обновлений...")}</span>
+                : update?.kind === "error" ? <span className="muted" title={update.message}><CircleAlert size={14} /> {t("Update failed", "Ошибка обновления")}</span>
+                  : <span className="muted"><CheckCircle2 size={14} /> {t("You have the latest version", "Установлена последняя версия")}</span>}
       </div>
       <div className="filter-row widget-beta"><strong>{t("Beta versions", "Бета-версии")}</strong><button type="button" className="switch" role="switch" aria-checked={beta} aria-label={t("Beta versions", "Бета-версии")} onClick={() => void setSettingFlag("betaUpdates", !beta)}><span className="knob" /></button></div>
     </div>

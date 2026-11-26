@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { hideToTray, isHiddenForGame, restoreFromTray } from "./tray";
 import { getMainWindow } from "./window";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { IPC } from "@shared/ipc";
 import type { CreateInstancePayload, DownloadModpackPayload, InstallModPayload, LocalContentPayload, ModSearchPayload, PrepareModInstallPayload, SkinAddPayload, SkinUpdatePayload, UpdateInstancePayload } from "@shared/ipc";
@@ -23,6 +23,7 @@ import { JsonStore } from "./store";
 import { CurseForgeService, curseForgeAvailable } from "./services/curseforge";
 import { ServerService } from "./services/servers";
 import { WorldService } from "./services/worlds";
+import { addCustomFont, listCustomFonts, listGoogleFonts, listSystemFonts, openFontsFolder, removeCustomFont } from "./services/fonts";
 import { downloadUpdate, installUpdate, setBetaUpdates } from "./updater";
 import { createThrottledEmitter } from "./services/transfer";
 
@@ -66,7 +67,18 @@ export function registerIpcHandlers(): void {
     if (!discord.hasSessions()) return;
     void instances.getRunning().then((running) => discord.syncRunning(running)).catch(() => undefined);
   }, 30000).unref();
-  void rm(path.join(getLauncherRoot(), "cache", "modpacks"), { recursive: true, force: true }).catch(() => undefined);
+  const startupMs = Date.now();
+  void (async () => {
+    const cacheDir = path.join(getLauncherRoot(), "cache", "modpacks");
+    const entries = await readdir(cacheDir).catch(() => [] as string[]);
+    for (const entry of entries) {
+      const full = path.join(cacheDir, entry);
+      const info = await stat(full).catch(() => null);
+      if (info && info.mtimeMs < startupMs - 1000) {
+        await rm(full, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  })();
 
   function publicAccounts(state: AccountsState): AccountsState {
     return {
@@ -211,6 +223,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.activateSkin, (_event, id: string) => skins.activate(id));
   ipcMain.handle(IPC.listCapes, () => skins.listCapes());
   ipcMain.handle(IPC.equipCape, (_event, capeId: string | null) => skins.equipCape(capeId));
+  ipcMain.handle(IPC.listCustomFonts, () => listCustomFonts());
+  ipcMain.handle(IPC.addCustomFont, (event) => addCustomFont(BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined));
+  ipcMain.handle(IPC.removeCustomFont, (_event, fileName: string) => removeCustomFont(fileName));
+  ipcMain.handle(IPC.openFontsFolder, () => openFontsFolder());
+  ipcMain.handle(IPC.listSystemFonts, () => listSystemFonts());
+  ipcMain.handle(IPC.listGoogleFonts, () => listGoogleFonts());
   ipcMain.handle(IPC.updaterDownload, () => downloadUpdate());
   ipcMain.handle(IPC.updaterInstall, () => installUpdate());
   ipcMain.handle(IPC.windowMinimize, (event) => {
@@ -344,9 +362,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.browseJava, async (event, major: number) => {
     const parent = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined;
+    const isWin = process.platform === "win32";
     const dialogOptions = {
-      title: tr(`Select javaw.exe for Java ${major}`, `Выберите javaw.exe для Java ${major}`),
-      filters: [{ name: tr("Java executable", "Исполняемый файл Java"), extensions: ["exe"] }],
+      title: tr(`Select ${isWin ? "javaw.exe" : "java"} for Java ${major}`, `Выберите ${isWin ? "javaw.exe" : "java"} для Java ${major}`),
+      ...(isWin ? { filters: [{ name: tr("Java executable", "Исполняемый файл Java"), extensions: ["exe"] }] } : {}),
       properties: ["openFile"] as Array<"openFile">
     };
     const picked = parent ? await dialog.showOpenDialog(parent, dialogOptions) : await dialog.showOpenDialog(dialogOptions);

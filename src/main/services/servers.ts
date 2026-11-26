@@ -279,6 +279,7 @@ export class ServerService {
       };
 
       const socket = net.createConnection({ host: connectHost, port: connectPort });
+      socket.setTimeout(4500);
       let latencyMs: number | undefined;
       let acc = Buffer.alloc(0);
 
@@ -299,7 +300,11 @@ export class ServerService {
         ]);
         const handshakePacket = Buffer.concat([encodeVarInt(handshakePayload.length), handshakePayload]);
         const statusRequestPacket = Buffer.from([0x01, 0x00]);
-        socket.write(Buffer.concat([handshakePacket, statusRequestPacket]));
+        try {
+          socket.write(Buffer.concat([handshakePacket, statusRequestPacket]));
+        } catch {
+          finish({ ip, online: false });
+        }
       });
 
       socket.on("data", (chunk: Buffer) => {
@@ -360,6 +365,14 @@ export class ServerService {
       });
 
       socket.on("timeout", () => {
+        finish({ ip, online: false });
+      });
+
+      socket.on("end", () => {
+        finish({ ip, online: false });
+      });
+
+      socket.on("close", () => {
         finish({ ip, online: false });
       });
     });

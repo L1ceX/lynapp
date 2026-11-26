@@ -13,11 +13,16 @@ import type { MinecraftService } from "./minecraft";
 type SqliteDatabase = import("node:sqlite").DatabaseSync;
 
 const execFileAsync = promisify(execFile);
-const PRISM_LIKE: Array<{ id: "prism" | "polymc" | "multimc"; exe: string; config: string }> = [
-  { id: "prism", exe: "prismlauncher.exe", config: "prismlauncher.cfg" },
-  { id: "polymc", exe: "polymc.exe", config: "polymc.cfg" },
-  { id: "multimc", exe: "MultiMC.exe", config: "multimc.cfg" }
+const PRISM_LIKE: Array<{ id: "prism" | "polymc" | "multimc"; exe: string; bin: string; config: string }> = [
+  { id: "prism", exe: "prismlauncher.exe", bin: "prismlauncher", config: "prismlauncher.cfg" },
+  { id: "polymc", exe: "polymc.exe", bin: "polymc", config: "polymc.cfg" },
+  { id: "multimc", exe: "MultiMC.exe", bin: "MultiMC", config: "multimc.cfg" }
 ];
+
+function hasPrismMarker(dir: string, kind: (typeof PRISM_LIKE)[number]): boolean {
+  const binary = process.platform === "win32" ? kind.exe : kind.bin;
+  return existsSync(path.join(dir, kind.config)) || existsSync(path.join(dir, binary));
+}
 const SEARCH_LIMIT = 400;
 
 const KNOWN_LOADERS: ModLoader[] = ["vanilla", "fabric", "forge", "quilt", "neoforge"];
@@ -127,7 +132,8 @@ async function iconToDataUrl(file: string | undefined | null): Promise<string | 
 }
 
 function normalizeRoot(value: string): string {
-  return path.resolve(value).replace(/[\\/]+$/, "").toLowerCase();
+  const cleaned = path.resolve(value).replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? cleaned.toLowerCase() : cleaned;
 }
 
 const LOCATE_SCRIPT = [
@@ -167,7 +173,7 @@ async function windowsLocations(): Promise<{ exe: string[]; folders: string[] }>
 
 function prismLikeAt(dir: string): (typeof PRISM_LIKE)[number] | null {
   for (const kind of PRISM_LIKE) {
-    if (existsSync(path.join(dir, kind.config)) || existsSync(path.join(dir, kind.exe))) {
+    if (hasPrismMarker(dir, kind)) {
       const portable = kind.id === "multimc" || existsSync(path.join(dir, "portable.txt")) || existsSync(path.join(dir, "instances"));
       if (portable) return kind;
     }
@@ -191,21 +197,33 @@ async function scanShallow(base: string, depth: number, roots: Set<string>, skip
 
 async function findPortableRoots(): Promise<string[]> {
   const roots = new Set<string>();
-  const locations = windowsLocations();
-  const localPrograms = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "Programs");
-  const drives = process.platform === "win32" ? "CDEFGHIJKLMNOPQRSTUVWXYZ".split("").map((letter) => `${letter}:\\`).filter((drive) => existsSync(drive)) : [];
-  const defaults = [path.join(os.homedir(), "Downloads"), path.join(os.homedir(), "Desktop"), path.join(os.homedir(), "Documents"), localPrograms];
-  await Promise.all([
-    ...defaults.map((base) => scanShallow(base, 2, roots, false)),
-    ...drives.map((drive) => scanShallow(drive, 2, roots, true))
-  ]);
-  const { exe, folders } = await locations;
-  for (const file of exe) {
-    const dir = path.dirname(file);
-    if (existsSync(dir) && prismLikeAt(dir)) roots.add(dir);
+  const home = os.homedir();
+  if (process.platform === "win32") {
+    const locations = windowsLocations();
+    const localPrograms = path.join(process.env.LOCALAPPDATA || path.join(home, "AppData", "Local"), "Programs");
+    const drives = "CDEFGHIJKLMNOPQRSTUVWXYZ".split("").map((letter) => `${letter}:\\`).filter((drive) => existsSync(drive));
+    const defaults = [path.join(home, "Downloads"), path.join(home, "Desktop"), path.join(home, "Documents"), localPrograms];
+    await Promise.all([
+      ...defaults.map((base) => scanShallow(base, 2, roots, false)),
+      ...drives.map((drive) => scanShallow(drive, 2, roots, true))
+    ]);
+    const { exe, folders } = await locations;
+    for (const file of exe) {
+      const dir = path.dirname(file);
+      if (existsSync(dir) && prismLikeAt(dir)) roots.add(dir);
+    }
+    const known = new Set(defaults.map(normalizeRoot));
+    await Promise.all(folders.filter((folder) => !known.has(normalizeRoot(folder))).map((base) => scanShallow(base, 2, roots, false)));
+    return [...roots];
   }
-  const known = new Set(defaults.map(normalizeRoot));
-  await Promise.all(folders.filter((folder) => !known.has(normalizeRoot(folder))).map((base) => scanShallow(base, 2, roots, false)));
+
+  const defaults = [
+    path.join(home, "Downloads"),
+    path.join(home, "Desktop"),
+    path.join(home, "Documents"),
+    path.join(home, "Games")
+  ];
+  await Promise.all(defaults.map((base) => scanShallow(base, 2, roots, false)));
   return [...roots];
 }
 
@@ -390,17 +408,42 @@ export class ExternalImportService {
   }
 
   private async scanInternal(extraRoots: string[]): Promise<ScannedLauncher[]> {
-    const roaming = appData();
-    const tasks: Array<Promise<ScannedLauncher | null>> = [
-      this.scanModrinth([path.join(roaming, "ModrinthApp"), path.join(roaming, "com.modrinth.theseus")]),
-      this.scanPrism(path.join(roaming, "PrismLauncher"), "prism"),
-      this.scanPrism(path.join(roaming, "PolyMC"), "polymc"),
-      this.scanCurseForge(path.join(os.homedir(), "curseforge", "minecraft", "Instances")),
-      this.scanMinecraft(path.join(roaming, ".minecraft")),
-      this.scanLegacy(path.join(roaming, ".tlauncher", "legacy", "Minecraft")),
+    const home = os.homedir();
+    const tasks: Array<Promise<ScannedLauncher | null>> = [];
+    if (process.platform === "win32") {
+      const roaming = appData();
+      tasks.push(
+        this.scanModrinth([path.join(roaming, "ModrinthApp"), path.join(roaming, "com.modrinth.theseus")]),
+        this.scanPrism(path.join(roaming, "PrismLauncher"), "prism"),
+        this.scanPrism(path.join(roaming, "PolyMC"), "polymc"),
+        this.scanCurseForge(path.join(home, "curseforge", "minecraft", "Instances")),
+        this.scanMinecraft(path.join(roaming, ".minecraft")),
+        this.scanLegacy(path.join(roaming, ".tlauncher", "legacy", "Minecraft"))
+      );
+    } else {
+      const dataHome = process.env.XDG_DATA_HOME || path.join(home, ".local", "share");
+      const configHome = process.env.XDG_CONFIG_HOME || path.join(home, ".config");
+      const flatpak = path.join(home, ".var", "app");
+      tasks.push(
+        this.scanModrinth([
+          path.join(dataHome, "ModrinthApp"),
+          path.join(configHome, "ModrinthApp"),
+          path.join(dataHome, "com.modrinth.theseus"),
+          path.join(configHome, "com.modrinth.theseus"),
+          path.join(flatpak, "com.modrinth.ModrinthApp", "data", "ModrinthApp")
+        ]),
+        this.scanPrism(path.join(dataHome, "PrismLauncher"), "prism"),
+        this.scanPrism(path.join(flatpak, "org.prismlauncher.PrismLauncher", "data", "PrismLauncher"), "prism"),
+        this.scanPrism(path.join(dataHome, "PolyMC"), "polymc"),
+        this.scanPrism(path.join(flatpak, "org.polymc.PolyMC", "data", "PolyMC"), "polymc"),
+        this.scanMinecraft(path.join(home, ".minecraft")),
+        this.scanLegacy(path.join(home, ".tlauncher", "legacy", "Minecraft"))
+      );
+    }
+    tasks.push(
       ...(await findPortableRoots()).map((root) => this.scanPrism(root)),
       ...extraRoots.map((root) => this.scanRoot(root))
-    ];
+    );
     const results = await Promise.all(tasks.map((task) => task.catch(() => null)));
     const seen = new Set<string>();
     return results.filter((item): item is ScannedLauncher => {
@@ -419,7 +462,7 @@ export class ExternalImportService {
     if (existsSync(path.join(folder, "tlauncher_profiles.json")) && existsSync(path.join(path.dirname(folder), "tl.properties"))) return this.scanMinecraft(folder, "legacy");
     if (existsSync(path.join(folder, "launcher_profiles.json")) || existsSync(path.join(folder, "versions"))) return this.scanMinecraft(folder);
     if (existsSync(path.join(folder, "instance.cfg"))) return this.scanPrism(path.dirname(path.dirname(folder)), undefined, path.dirname(folder), folder);
-    if (PRISM_LIKE.some((kind) => existsSync(path.join(folder, kind.config)) || existsSync(path.join(folder, kind.exe)))) return this.scanPrism(folder);
+    if (PRISM_LIKE.some((kind) => hasPrismMarker(folder, kind))) return this.scanPrism(folder);
     if (existsSync(path.join(folder, "minecraftinstance.json"))) return this.scanCurseForge(path.dirname(folder), folder);
     const entries = await readdir(folder, { withFileTypes: true }).catch(() => []);
     const dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => path.join(folder, entry.name));
@@ -510,7 +553,7 @@ export class ExternalImportService {
   private async scanPrism(root: string, forced?: "prism" | "polymc" | "multimc", instancesOverride?: string, singleInstanceDir?: string): Promise<ScannedLauncher | null> {
     const baseCheck = singleInstanceDir ?? root;
     if (!existsSync(baseCheck)) return null;
-    const kind = PRISM_LIKE.find((item) => item.id === forced) ?? PRISM_LIKE.find((item) => existsSync(path.join(root, item.config)) || existsSync(path.join(root, item.exe))) ?? PRISM_LIKE[0];
+    const kind = PRISM_LIKE.find((item) => item.id === forced) ?? PRISM_LIKE.find((item) => hasPrismMarker(root, item)) ?? PRISM_LIKE[0];
     const id = kind.id;
     try {
       let instancesDir = instancesOverride ?? path.join(root, "instances");

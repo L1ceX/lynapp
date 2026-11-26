@@ -13,11 +13,11 @@ export function LayoutToolbar() {
       ? pageLayouts[board].filter((item) => item.hidden).map((item) => { const meta = blockMeta(board, item.i); return { id: item.i, label: meta ? t(meta.label, meta.labelRu) : item.i, show: () => showPageBlock(board, item.i) }; })
       : [];
   const hint = section === "home"
-    ? t("Drag blocks, pull a corner to resize. Panels move to any edge by their handle.", "Перетаскивайте блоки, тяните за угол, чтобы изменить размер. Панели переносятся за ручку к любому краю.")
+    ? t("Drag blocks, pull any edge or corner to resize. Hold Shift to disable snapping.", "Перетаскивайте блоки, тяните за любой край или угол. Зажмите Shift для свободного размера без привязки.")
     : section === "instances"
-      ? t("Tabs, the list and the Launch button move by their handles. Drag tabs to reorder, the eye hides a tab.", "Вкладки, список и кнопка «Запустить» переносятся за ручки. Вкладки можно переставлять, глаз скрывает вкладку.") + (board ? " " + t("Blocks inside the tab move and change width.", "Блоки внутри вкладки перетаскиваются и меняют ширину.") : "")
+      ? t("Tabs, the list and the Launch button move by their handles. Drag tabs to reorder, the eye hides a tab.", "Вкладки, список и кнопка «Запустить» переносятся за ручки. Вкладки можно переставлять, глаз скрывает вкладку.") + (board ? " " + t("Blocks snap to match neighbors; hold Shift for free resize.", "Блоки прилипают по размеру к соседним; зажмите Shift для свободного размера.") : "")
       : board
-        ? t("Drag blocks, pull a side edge to change the width. The height follows the content.", "Перетаскивайте блоки, тяните за боковой край, чтобы изменить ширину. Высота подстраивается под содержимое.")
+        ? t("Drag blocks, pull any edge or corner to resize. Hold Shift to disable snapping.", "Перетаскивайте блоки, тяните за любой край или угол. Зажмите Shift для свободного размера без привязки.")
         : t("Drag the navigation buttons or move the panel to any edge by its handle.", "Перетаскивайте кнопки навигации или перенесите панель за ручку к любому краю.");
   return (
     <Presence>{layoutEditing ? <div className="layout-toolbar" role="toolbar" aria-label={t("Layout editor", "Редактор расположения")}>

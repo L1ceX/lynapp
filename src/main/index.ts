@@ -42,9 +42,16 @@ function normalizeForCompare(value: string): string {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
+function currentExecDir(): string {
+  if (process.platform === "win32" && process.env.PORTABLE_EXECUTABLE_DIR) {
+    return process.env.PORTABLE_EXECUTABLE_DIR;
+  }
+  return path.dirname(app.getPath("exe"));
+}
+
 function isRunningInsideDataDir(): boolean {
   try {
-    const execDir = normalizeForCompare(path.dirname(app.getPath("exe")));
+    const execDir = normalizeForCompare(currentExecDir());
     const root = normalizeForCompare(getLauncherRoot());
     return execDir === root || execDir.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
   } catch {
@@ -124,7 +131,9 @@ function createWindow(): void {
   setupAutoUpdater(mainWindow);
 
   const notifyMaximized = (): void => {
-    if (mainWindow) mainWindow.webContents.send(IPC.windowMaximized, mainWindow.isMaximized());
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC.windowMaximized, mainWindow.isMaximized());
+    }
   };
   mainWindow.on("maximize", notifyMaximized);
   mainWindow.on("unmaximize", notifyMaximized);
@@ -132,10 +141,12 @@ function createWindow(): void {
 
 function startApp(): void {
   if (isRunningInsideDataDir()) {
+    const exampleDir = process.platform === "win32" ? "%LOCALAPPDATA%\\Programs\\lynapp" : "~/.local/bin";
+    const runningDir = currentExecDir();
     app.whenReady().then(() => {
       dialog.showErrorBox(
         "lynapp is installed into its data folder / lynapp установлен в папку с данными",
-        `This copy runs from:\n${path.dirname(app.getPath("exe"))}\n\nThat folder is reserved for instances and saves. Please reinstall lynapp into a different folder (for example %APPDATA%\\Programs\\lynapp).\n\nYour instances and worlds stay untouched.\n\n---\n\nЭта копия запущена из папки:\n${path.dirname(app.getPath("exe"))}\n\nЭта папка зарезервирована для инстанций и сохранений. Переустановите lynapp в другую папку (например, %APPDATA%\\Programs\\lynapp).\n\nВаши инстанции и миры останутся нетронутыми.`
+        `This copy runs from:\n${runningDir}\n\nThat folder is reserved for instances and saves. Please reinstall lynapp into a different folder (for example ${exampleDir}).\n\nYour instances and worlds stay untouched.\n\n---\n\nЭта копия запущена из папки:\n${runningDir}\n\nЭта папка зарезервирована для инстанций и сохранений. Переустановите lynapp в другую папку (например, ${exampleDir}).\n\nВаши инстанции и миры останутся нетронутыми.`
       );
       app.quit();
     });

@@ -9,31 +9,9 @@ import { tr } from "../i18n";
 import { getLauncherRoot } from "../paths";
 import { JsonStore } from "../store";
 import { parseNbt, type NbtCompound } from "./nbt";
+import { createZipFromDir, extractZip } from "./zip";
 
 const execFileAsync = promisify(execFile);
-
-async function runZipPs(command: string, envVars: Record<string, string>): Promise<void> {
-  await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", command], {
-    windowsHide: true,
-    timeout: 180000,
-    maxBuffer: 16 * 1024 * 1024,
-    env: { ...process.env, ...envVars }
-  });
-}
-
-async function createZipFromDir(sourceDir: string, zipPath: string): Promise<void> {
-  await runZipPs(
-    "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory($env:LYNAPP_SRC, $env:LYNAPP_DST, [System.IO.Compression.CompressionLevel]::Fastest, $false, [System.Text.Encoding]::UTF8)",
-    { LYNAPP_SRC: sourceDir, LYNAPP_DST: zipPath }
-  );
-}
-
-async function extractZipToDir(zipPath: string, destination: string): Promise<void> {
-  await runZipPs(
-    "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($env:LYNAPP_SRC, $env:LYNAPP_DST, [System.Text.Encoding]::UTF8)",
-    { LYNAPP_SRC: zipPath, LYNAPP_DST: destination }
-  );
-}
 
 async function isPidAlive(pid: number): Promise<boolean> {
   let accessDenied = false;
@@ -45,7 +23,16 @@ async function isPidAlive(pid: number): Promise<boolean> {
     }
     accessDenied = true;
   }
-  if (process.platform !== "win32") return true;
+  if (process.platform !== "win32") {
+    if (process.platform === "linux") {
+      try {
+        const comm = (await readFile(`/proc/${pid}/comm`, "utf8")).trim().toLowerCase();
+        if (comm) return /java/.test(comm);
+      } catch {
+      }
+    }
+    return true;
+  }
   try {
     const { stdout } = await execFileAsync("tasklist", ["/FI", `PID eq ${pid}`, "/NH", "/FO", "CSV"], { windowsHide: true, timeout: 5000 });
     const image = (stdout.split(",")[0] ?? "").replace(/"/g, "").trim().toLowerCase();
@@ -236,17 +223,16 @@ export class WorldService {
       zipName = `${safeFolder}-${stamp}-${Date.now() % 10000}.zip`;
       zipPath = path.join(backupsDir, zipName);
     }
-    const tmpStage = path.join(getLauncherRoot(), "cache", `world-backup-${randomUUID()}`);
-
+    const zipStage = `${zipPath}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      await mkdir(path.dirname(tmpStage), { recursive: true });
-      await cp(worldDir, tmpStage, {
-        recursive: true,
-        filter: (src) => path.basename(src).toLowerCase() !== "session.lock"
+      await createZipFromDir(worldDir, zipStage, {
+        skipLocked: true,
+        filter: (fullPath) => path.basename(fullPath).toLowerCase() !== "session.lock"
       });
-      await createZipFromDir(tmpStage, zipPath);
-    } finally {
-      await rm(tmpStage, { recursive: true, force: true }).catch(() => undefined);
+      await rename(zipStage, zipPath);
+    } catch (error) {
+      await rm(zipStage, { force: true }).catch(() => undefined);
+      throw error;
     }
 
     return this.list(instanceId);
@@ -269,7 +255,7 @@ export class WorldService {
 
     try {
       await mkdir(tmpExtract, { recursive: true });
-      await extractZipToDir(zipPath, tmpExtract);
+      await extractZip(zipPath, tmpExtract);
       const levelDatPath = path.join(tmpExtract, "level.dat");
       if (!existsSync(levelDatPath)) {
         throw new Error(tr("Backup archive does not contain level.dat", "В архиве резервной копии отсутствует level.dat"));

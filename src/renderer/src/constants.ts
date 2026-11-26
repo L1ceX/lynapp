@@ -38,6 +38,27 @@ export const EXTERNAL_LAUNCHERS: Record<ExternalLauncherId, { label: string; lab
 
 export const LOADER_NAMES: Record<string, string> = { vanilla: "Vanilla", fabric: "Fabric", forge: "Forge", neoforge: "NeoForge", quilt: "Quilt" };
 
+export interface BuiltinFontOption {
+  id: string;
+  label: string;
+  labelRu: string;
+  sample: string;
+  sampleRu: string;
+  stack: string;
+}
+
+export const DEFAULT_FONT_STACK = 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+
+export const BUILTIN_FONTS: BuiltinFontOption[] = [
+  { id: "", label: "Default", labelRu: "По умолчанию", sample: "Inter · System", sampleRu: "Inter · Системный", stack: DEFAULT_FONT_STACK },
+  { id: "Minecraft", label: "Minecraft", labelRu: "Майнкрафт", sample: "Pixel · RU / EN", sampleRu: "Пиксельный · RU / EN", stack: '"Minecraft", ui-monospace, monospace' },
+  { id: "Onest", label: "Onest", labelRu: "Onest", sample: "Clean geometric", sampleRu: "Чистый геометрический", stack: '"Onest", Inter, ui-sans-serif, system-ui, sans-serif' },
+  { id: "Segoe UI", label: "Segoe UI", labelRu: "Segoe UI", sample: "Windows native", sampleRu: "Системный Windows", stack: '"Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif' },
+  { id: "Trebuchet MS", label: "Trebuchet", labelRu: "Trebuchet", sample: "Humanist sans", sampleRu: "Гуманистический", stack: '"Trebuchet MS", "Segoe UI", sans-serif' },
+  { id: "Georgia", label: "Georgia", labelRu: "Georgia", sample: "Classic serif", sampleRu: "Классическая антиква", stack: 'Georgia, "Times New Roman", serif' },
+  { id: "Consolas", label: "Monospace", labelRu: "Моноширинный", sample: "Code & terminal", sampleRu: "Код и терминал", stack: '"Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace' }
+];
+
 export interface ImportModalState {
   launchers: ExternalLauncher[] | null;
   active: string | null;

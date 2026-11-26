@@ -223,7 +223,7 @@ async function uploadElySkin(accountId: string, png: Buffer, slim: boolean, name
 type RemoteSkinData = { dataUrl: string; slim: boolean };
 
 async function downloadRemoteSkin(url: string, slim: boolean): Promise<RemoteSkinData | null> {
-  const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.1.0-beta.5" } });
+  const texture = await fetch(url, { headers: { "user-agent": "lynapp/1.1.0-beta.6" } });
   if (!texture.ok) {
     return null;
   }
@@ -241,7 +241,7 @@ async function downloadRemoteSkin(url: string, slim: boolean): Promise<RemoteSki
 async function fetchElyRemoteSkin(profileName: string): Promise<RemoteSkinData | null> {
   try {
     const response = await fetch(`https://skinsystem.ely.by/textures/${encodeURIComponent(profileName)}?version=2&_=${Date.now()}`, {
-      headers: { "user-agent": "lynapp/1.1.0-beta.5" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.6" }
     });
     if (!response.ok) {
       return null;
@@ -261,7 +261,7 @@ async function fetchMojangRemoteSkin(account: AccountState): Promise<RemoteSkinD
   try {
     if (account.minecraftUuid) {
       const response = await fetch(`https://sessionserver.mojang.com/session/minecraft/profile/${encodeURIComponent(account.minecraftUuid)}`, {
-        headers: { "user-agent": "lynapp/1.1.0-beta.5" }
+        headers: { "user-agent": "lynapp/1.1.0-beta.6" }
       });
       if (response.ok) {
         const body = (await response.json()) as {
@@ -283,7 +283,7 @@ async function fetchMojangRemoteSkin(account: AccountState): Promise<RemoteSkinD
       const response = await fetch("https://api.minecraftservices.com/minecraft/profile", {
         headers: {
           Authorization: `Bearer ${account.minecraftAccessToken}`,
-          "user-agent": "lynapp/1.1.0-beta.5"
+          "user-agent": "lynapp/1.1.0-beta.6"
         }
       });
       if (response.ok) {

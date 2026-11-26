@@ -32,7 +32,7 @@ interface ModrinthVersion {
   dependencies?: ModrinthDependencyRef[];
 }
 
-const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.5" };
+const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.6" };
 
 async function fetchModrinth(input: string | URL, init: RequestInit = {}, timeoutMs = 12000): Promise<Response> {
   const headers = { ...modrinthHeaders, ...(init.headers as Record<string, string> | undefined) };
@@ -82,12 +82,30 @@ function loadersFor(projectType: ModrinthProjectType, instance: LauncherInstance
   return ["iris", "optifine", "canvas", "vanilla"];
 }
 
+function isAuxiliaryModJar(fileName: string): boolean {
+  return /(?:^|[-_.+])(sources|javadoc|dev|deobf|preshadow)\.jar$/i.test(fileName);
+}
+
+function pickVersionFile(version: ModrinthVersion, projectType: ModrinthProjectType): { url: string; filename: string; primary?: boolean; size?: number } | undefined {
+  const pool = projectType === "mod"
+    ? (version.files.filter((item) => !isAuxiliaryModJar(item.filename)).length
+        ? version.files.filter((item) => !isAuxiliaryModJar(item.filename))
+        : version.files)
+    : version.files;
+  const ext = projectType === "mod" ? ".jar" : projectType === "modpack" ? ".mrpack" : ".zip";
+  const matching = pool.filter((item) => item.filename.toLowerCase().endsWith(ext));
+  if (matching.length) {
+    return matching.find((item) => item.primary) ?? matching[0];
+  }
+  return pool.find((item) => item.primary) ?? pool[0];
+}
+
 function incompatibility(version: ModrinthVersion, instance: LauncherInstance): ContentIncompatibility | undefined {
   const supportedGameVersions = version.game_versions ?? [];
   const supportedLoaders = version.loaders ?? [];
   const loaders = loadersFor("mod", instance);
   const wrongGame = supportedGameVersions.length > 0 && !supportedGameVersions.includes(instance.gameVersion);
-  const wrongLoader = loaders.length > 0 && supportedLoaders.length > 0 && !supportedLoaders.some((loader) => loaders.includes(loader));
+  const wrongLoader = instance.loader === "vanilla" || (loaders.length > 0 && supportedLoaders.length > 0 && !supportedLoaders.some((loader) => loaders.includes(loader)));
   if (!wrongGame && !wrongLoader) return undefined;
   return {
     gameVersion: wrongGame ? instance.gameVersion : undefined,
@@ -98,9 +116,12 @@ function incompatibility(version: ModrinthVersion, instance: LauncherInstance): 
 }
 
 function toVersionInfo(version: ModrinthVersion, instance: LauncherInstance, projectType: ModrinthProjectType): ModVersionInfo {
-  const file = version.files.find((item) => item.primary) ?? version.files[0];
+  const file = pickVersionFile(version, projectType);
   const loaders = loadersFor(projectType, instance);
   const gameVersions = version.game_versions ?? [];
+  const loaderMatched = (projectType === "mod" || projectType === "modpack") && instance.loader === "vanilla"
+    ? false
+    : !loaders.length || (version.loaders ?? []).some((loader) => loaders.includes(loader));
   return {
     id: version.id,
     name: version.name ?? version.version_number ?? version.id,
@@ -111,7 +132,7 @@ function toVersionInfo(version: ModrinthVersion, instance: LauncherInstance, pro
     loaders: version.loaders ?? [],
     fileName: file?.filename ?? "",
     size: file?.size ?? 0,
-    compatible: gameVersions.includes(instance.gameVersion) && (!loaders.length || (version.loaders ?? []).some((loader) => loaders.includes(loader))),
+    compatible: gameVersions.includes(instance.gameVersion) && loaderMatched,
     provider: "modrinth",
     projectId: version.project_id
   };
@@ -184,7 +205,7 @@ export async function targetDirectories(instance: LauncherInstance, projectType:
 }
 
 async function downloadFile(url: string, target: string, onBytes?: BytesCallback): Promise<void> {
-  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp/1.1.0-beta.5" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
+  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp/1.1.0-beta.6" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
   await writeFile(target, buffer);
 }
 
@@ -273,7 +294,7 @@ export class ModService {
         results: body.hits.map((hit) => ({
           id: hit.project_id,
           provider: "modrinth",
-          projectType: hit.project_type ?? payload.projectType,
+          projectType: payload.projectType,
           title: hit.title,
           slug: hit.slug,
           author: hit.author,
@@ -340,7 +361,7 @@ export class ModService {
       }
       version = versions.find((item) => item.files.length) ?? versions[0];
     }
-    const file = version?.files.find((item) => item.primary) ?? version?.files[0];
+    const file = version ? pickVersionFile(version, payload.projectType) : undefined;
     if (!version || !file) throw new Error(tr(`No compatible Modrinth file for ${payload.name} (${instance.gameVersion})`, `На Modrinth нет подходящего файла для ${payload.name} (${instance.gameVersion})`));
 
     const slugLower = payload.slug?.toLowerCase();
@@ -805,6 +826,7 @@ export class ModService {
     const latestByHash: Record<string, ModrinthVersion> = {};
     const types = [...new Set(mrTracked.map((item) => item.projectType))];
     for (const projectType of types) {
+      if (projectType === "mod" && instance.loader === "vanilla") continue;
       const group = [...new Set(mrTracked.filter((item) => item.projectType === projectType).map((item) => item.sha1))];
       const loaders = loadersFor(projectType, instance);
       const res = await this.postVersionFiles("https://api.modrinth.com/v2/version_files/update", {
@@ -824,9 +846,20 @@ export class ModService {
       const key = `${item.projectType}:${item.fileName}`;
       if (item.provider === "modrinth") {
         const now = current[item.sha1];
-        const latest = latestByHash[item.sha1];
+        const canUpdate = !(item.projectType === "mod" && instance.loader === "vanilla");
+        const latest = canUpdate ? latestByHash[item.sha1] : undefined;
         const nowCompatible = now ? toVersionInfo(now, instance, item.projectType).compatible : true;
-        const newer = latest && now && latest.id !== now.id && (!nowCompatible || (latest.date_published ?? "") > (now.date_published ?? ""));
+        const sameQuiltSibling = Boolean(
+          now &&
+          latest &&
+          nowCompatible &&
+          instance.loader === "quilt" &&
+          item.projectType === "mod" &&
+          (now.loaders ?? []).includes("quilt") &&
+          !(latest.loaders ?? []).includes("quilt") &&
+          (now.version_number ?? "").trim().replace(/^v/i, "").toLowerCase() === (latest.version_number ?? "").trim().replace(/^v/i, "").toLowerCase()
+        );
+        const newer = canUpdate && !sameQuiltSibling && latest && now && latest.id !== now.id && (!nowCompatible || (latest.date_published ?? "") > (now.date_published ?? ""));
         const info: ContentUpdateInfo = {
           projectId: item.projectId,
           projectType: item.projectType,
@@ -837,21 +870,26 @@ export class ModService {
           incompatible: now && item.projectType === "mod" ? incompatibility(now, instance) : undefined
         };
         byKey.set(key, info);
-        if (!info.latest) {
+        if (!info.latest && canUpdate) {
           cfProbeItems.push({
+            provider: "modrinth",
             projectType: item.projectType,
             fileName: item.fileName,
             foundPath: item.foundPath,
+            sha1: item.sha1,
+            currentVersionNumber: now?.version_number,
             installedDate: now?.date_published ?? item.installedAt
           });
         }
       } else {
         cfProbeItems.push({
+          provider: "curseforge",
           projectId: item.projectId,
           versionId: item.versionId,
           projectType: item.projectType,
           fileName: item.fileName,
           foundPath: item.foundPath,
+          sha1: item.sha1,
           installedDate: item.installedAt
         });
       }

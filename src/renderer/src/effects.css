@@ -11,7 +11,7 @@
 
 
 :root.fx-bg {
-  .app-body { position: relative; isolation: isolate; background: var(--t-workspace); overflow: hidden; }
+  .app-body { position: relative; isolation: isolate; background-color: transparent; overflow: hidden; }
   .instance-workspace, .page-workspace { background: transparent; }
   .app-body::before,
   .app-body::after {
@@ -90,10 +90,17 @@
     transition: transform 460ms var(--spring);
   }
   .instance-button.active::before { transform: scaleY(1); }
-  .instance-button:hover:not(:disabled) { transform: translateX(4px); background: color-mix(in srgb, var(--t-sidebar), white 4%); box-shadow: none; }
-  .instance-button.active:hover:not(:disabled) { background: var(--t-accentbg); }
-  .instance-button > svg { transition: transform 500ms var(--spring); }
-  .instance-button:hover:not(:disabled) > svg { transform: scale(1.15) rotate(-8deg); }
+  .instance-row-wrap:hover .instance-button:not(:disabled) { transform: translateX(4px); background: color-mix(in srgb, var(--t-sidebar), white 4%); box-shadow: none; }
+  .instance-row-wrap:hover .instance-button.active:not(:disabled) { background: var(--t-accentbg); }
+  .instance-row-wrap:hover .instance-quick-btn:not(:disabled) { transform: translateX(4px); }
+  .instance-row-wrap:hover .instance-quick-btn:hover:not(:disabled) { transform: translateX(4px) scale(1.06); }
+  .instance-row-wrap:hover .instance-quick-btn:active:not(:disabled) { transform: translateX(4px) scale(.95); }
+  .instance-button .instance-icon-wrap > svg { transition: transform 500ms var(--spring); }
+  .instance-row-wrap:hover .instance-button:not(:disabled) .instance-icon-wrap > svg { transform: scale(1.15) rotate(-8deg); }
+  .widget-list-item:hover .widget-list-row:not(:disabled) { transform: translateY(-1px); border-color: var(--t-accent); background: color-mix(in srgb, var(--t-button), white 10%); box-shadow: 0 8px 22px -8px var(--accent-soft); }
+  .widget-list-item:hover .widget-quick-play:not(:disabled) { transform: translateY(-1px); }
+  .widget-list-item:hover .widget-quick-play:hover:not(:disabled) { transform: translateY(-1px) scale(1.06); }
+  .widget-list-item:hover .widget-quick-play:active:not(:disabled) { transform: translateY(-1px) scale(.95); }
 
   .tab-button.active, .content-type.active { animation: tab-pop 420ms var(--spring); }
   .tab-button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: none; }
@@ -105,8 +112,8 @@
   .switch .knob {
     transition: left 480ms var(--spring), width 220ms var(--smooth), background 260ms ease, box-shadow 260ms ease;
   }
-  .switch:active .knob { width: 25px; }
-  .switch[aria-checked="true"]:active .knob { left: 17px; }
+  .switch:active .knob { width: 26px; }
+  .switch[aria-checked="true"]:active .knob { left: 19px; }
   .switch[aria-checked="true"] .knob { box-shadow: 0 0 10px rgba(74, 222, 128, .6); }
   .filter-check input:checked { animation: check-pop 420ms var(--spring); }
   .filter-check { transition: background 200ms ease, transform 360ms var(--spring); }

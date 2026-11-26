@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { InstallModPayload, ModSearchPayload, PrepareModInstallPayload } from "@shared/ipc";
@@ -16,7 +17,7 @@ const MINECRAFT_GAME_ID = 432;
 const BUILTIN_API_KEY = String(import.meta.env.MAIN_VITE_CURSEFORGE_API_KEY ?? "").trim();
 
 export const curseForgeAvailable = BUILTIN_API_KEY.length > 0;
-const USER_AGENT = "lynapp/1.1.0-beta.5";
+const USER_AGENT = "lynapp/1.1.0-beta.6";
 
 const CLASS_IDS: Record<ModrinthProjectType, number> = {
   mod: 6,
@@ -105,6 +106,7 @@ export interface CfFile {
   dependencies?: Array<{ modId: number; relationType: number }>;
   modules?: Array<{ name: string; fingerprint?: number }>;
   fileFingerprint?: number;
+  isServerPack?: boolean;
 }
 
 export interface CfFingerprintMatch {
@@ -151,11 +153,14 @@ export interface ResolvedPackFile {
 }
 
 export interface CfTrackedItem {
+  provider?: "modrinth" | "curseforge";
   projectId?: string;
   versionId?: string;
   projectType: ModrinthProjectType;
   fileName: string;
   foundPath: string;
+  sha1?: string;
+  currentVersionNumber?: string;
   installedDate?: string;
 }
 
@@ -357,18 +362,75 @@ function cleanVersionNumber(file: CfFile): string {
   return file.displayName?.trim() || base || String(file.id);
 }
 
+function isUsableCfFile(file: CfFile, projectType: ModrinthProjectType): boolean {
+  if (file.isServerPack) return false;
+  const lower = file.fileName.toLowerCase();
+  if (projectType === "mod") {
+    if (!lower.endsWith(".jar")) return false;
+    if (/(?:^|[-_.+])(sources|javadoc|dev|deobf|preshadow)\.jar$/i.test(lower)) return false;
+    return true;
+  }
+  if (projectType === "modpack" || projectType === "resourcepack" || projectType === "shader" || projectType === "datapack") {
+    return lower.endsWith(".zip");
+  }
+  return true;
+}
+
+function extractCoreVersionToken(raw: string | undefined): string {
+  if (!raw) return "";
+  let text = raw
+    .toLowerCase()
+    .replace(/\.(?:jar|zip|mrpack)$/i, "")
+    .replace(/\b(?:fabric|forge|neoforge|neoforged|quilt|mc|minecraft)\b/g, " ");
+  const matches = [...text.matchAll(/(?:^|[^0-9a-z])v?(\d+\.\d+(?:\.\d+)?(?:[-+._a-z0-9]*)?)/g)].map((m) => m[1]);
+  const nonMc = matches.filter((v) => !/^1\.(?:7\.10|8\.9|9\.4|10\.2|11\.2|12(?:\.[12])?|13\.2|14(?:\.[2-4])?|15\.2|16(?:\.[1-5])?|17\.1|18(?:\.[12])?|19(?:\.[1-4])?|20(?:\.[1-6])?|21(?:\.\d{1,2})?)$/.test(v));
+  if (nonMc.length) {
+    return nonMc[nonMc.length - 1].replace(/[-+._](?:1\.\d+(?:\.\d+)?)$/g, "");
+  }
+  return text.replace(/[^a-z0-9.]+/g, " ").trim();
+}
+
+function isSameReleaseVersion(candidate: CfFile, currentFile: CfFile | undefined, modrinthVersion?: string): boolean {
+  const candClean = cleanVersionNumber(candidate).trim().replace(/^v(?=\d)/i, "").toLowerCase();
+  if (currentFile) {
+    const curClean = cleanVersionNumber(currentFile).trim().replace(/^v(?=\d)/i, "").toLowerCase();
+    if (candClean && candClean === curClean) return true;
+  }
+  if (modrinthVersion) {
+    const mrClean = modrinthVersion.trim().replace(/^v(?=\d)/i, "").toLowerCase();
+    if (mrClean && (candClean === mrClean || extractCoreVersionToken(candidate.fileName) === mrClean || extractCoreVersionToken(candClean) === extractCoreVersionToken(mrClean))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function cfFilePageUrl(modWebsiteUrl: string | undefined, fileId: number): string | undefined {
+  if (!modWebsiteUrl) return undefined;
+  return `${modWebsiteUrl.replace(/\/+$/, "")}/files/${fileId}`;
+}
+
 function toCfVersionInfo(
   file: CfFile,
   instance: LauncherInstance,
   projectType: ModrinthProjectType,
   fallbackLoaders: ModLoader[],
-  fallbackVersions: string[]
+  fallbackVersions: string[],
+  extra?: { distributionBlocked?: boolean; websiteUrl?: string }
 ): ModVersionInfo {
+  const usable = isUsableCfFile(file, projectType);
   const gameVersions = inferFileGameVersions(file, fallbackVersions);
-  const loaders = projectType === "mod" || projectType === "modpack" ? inferFileLoaders(file, fallbackLoaders) : [];
+  const effectiveFallbackLoaders = fallbackLoaders.length <= 1 ? fallbackLoaders : [];
+  const loaders = projectType === "mod" || projectType === "modpack" ? inferFileLoaders(file, effectiveFallbackLoaders) : [];
   const wantedLoaders = targetLoadersFor(projectType, instance.loader);
   const versionOk = !gameVersions.length || gameVersions.includes(instance.gameVersion);
-  const loaderOk = !wantedLoaders.length || !loaders.length || loaders.some((loader) => wantedLoaders.includes(loader));
+  const loaderOk = (projectType === "mod" || projectType === "modpack") && instance.loader === "vanilla"
+    ? false
+    : !wantedLoaders.length
+      ? true
+      : loaders.length > 0
+        ? loaders.some((loader) => wantedLoaders.includes(loader))
+        : fallbackLoaders.length <= 1;
   const versionType = file.releaseType === 3 ? "alpha" : file.releaseType === 2 ? "beta" : "release";
   return {
     id: String(file.id),
@@ -380,9 +442,10 @@ function toCfVersionInfo(
     loaders,
     fileName: file.fileName,
     size: file.fileLength ?? 0,
-    compatible: versionOk && loaderOk,
+    compatible: usable && versionOk && loaderOk,
     provider: "curseforge",
-    projectId: String(file.modId)
+    projectId: String(file.modId),
+    ...(extra?.distributionBlocked ? { distributionBlocked: true, websiteUrl: extra.websiteUrl } : {})
   };
 }
 
@@ -396,7 +459,7 @@ function cfIncompatibility(
   const supportedLoaders = inferFileLoaders(file, fallbackLoaders);
   const wantedLoaders = targetLoadersFor("mod", instance.loader);
   const wrongGame = supportedGameVersions.length > 0 && !supportedGameVersions.includes(instance.gameVersion);
-  const wrongLoader = wantedLoaders.length > 0 && supportedLoaders.length > 0 && !supportedLoaders.some((loader) => wantedLoaders.includes(loader));
+  const wrongLoader = instance.loader === "vanilla" || (wantedLoaders.length > 0 && supportedLoaders.length > 0 && !supportedLoaders.some((loader) => wantedLoaders.includes(loader)));
   if (!wrongGame && !wrongLoader) return undefined;
   return {
     gameVersion: wrongGame ? instance.gameVersion : undefined,
@@ -506,7 +569,7 @@ export class CurseForgeService {
     return {
       id: String(mod.id),
       provider: "curseforge",
-      projectType: projectTypeForClass(mod.classId, fallbackType),
+      projectType: fallbackType,
       title: mod.name,
       slug: mod.slug,
       author: mod.authors?.[0]?.name,
@@ -672,10 +735,12 @@ export class CurseForgeService {
     return files;
   }
 
-  private async filesFor(modId: string, gameVersion: string | undefined, loaders: string[], forceFresh = false): Promise<CfFile[]> {
-    const allFiles = await this.allFilesFor(modId, gameVersion, forceFresh);
+  private async filesFor(modId: string, gameVersion: string | undefined, loaders: string[], forceFresh = false, projectType: ModrinthProjectType = "mod"): Promise<CfFile[]> {
+    const rawFiles = await this.allFilesFor(modId, gameVersion, forceFresh);
+    const allFiles = rawFiles.filter((file) => isUsableCfFile(file, projectType));
     if (!allFiles.length) return [];
     const fallbackLoaders = inferModLoaders(allFiles);
+    const effectiveFallbackLoaders = fallbackLoaders.length <= 1 ? fallbackLoaders : [];
     const fallbackVersions = inferModGameVersions(allFiles);
     const wantedLoaders = loaders.filter((l): l is ModLoader => Boolean(l && l !== "vanilla" && l !== "*"));
 
@@ -684,7 +749,11 @@ export class CurseForgeService {
       : allFiles;
 
     const loaderMatched = wantedLoaders.length
-      ? versionMatched.filter((file) => fileMatchesLoaders(file, wantedLoaders, fallbackLoaders))
+      ? versionMatched.filter((file) => {
+          const inferred = inferFileLoaders(file, effectiveFallbackLoaders);
+          if (!inferred.length) return fallbackLoaders.length <= 1;
+          return inferred.some((loader) => wantedLoaders.includes(loader));
+        })
       : versionMatched;
 
     return wantedLoaders.length ? loaderMatched : versionMatched;
@@ -743,10 +812,28 @@ export class CurseForgeService {
     const instance = data.instances.find((item) => item.id === instanceId);
     if (!instance) throw new Error(tr("Instance not found", "Инстанция не найдена"));
 
-    const allFiles = await this.allFilesFor(projectId, instance.gameVersion, true);
+    const rawFiles = await this.allFilesFor(projectId, instance.gameVersion, true);
+    const allFiles = rawFiles.filter((file) => isUsableCfFile(file, projectType));
     const fallbackLoaders = inferModLoaders(allFiles);
     const fallbackVersions = inferModGameVersions(allFiles);
-    return allFiles.map((file) => toCfVersionInfo(file, instance, projectType, fallbackLoaders, fallbackVersions));
+    const missingUrlSha1s = allFiles
+      .filter((file) => !file.downloadUrl)
+      .map((file) => sha1Of(file))
+      .filter((s): s is string => Boolean(s));
+    const [mrUrls, modMeta] = missingUrlSha1s.length || allFiles.some((file) => !file.downloadUrl)
+      ? await Promise.all([
+          missingUrlSha1s.length ? this.modrinthUrlsBySha1(missingUrlSha1s) : Promise.resolve(new Map<string, string>()),
+          this.mod(projectId)
+        ])
+      : [new Map<string, string>(), null];
+    return allFiles.map((file) => {
+      const sha1 = sha1Of(file);
+      const blocked = !file.downloadUrl && !(sha1 && mrUrls.has(sha1));
+      return toCfVersionInfo(file, instance, projectType, fallbackLoaders, fallbackVersions, blocked ? {
+        distributionBlocked: true,
+        websiteUrl: cfFilePageUrl(modMeta?.links?.websiteUrl, file.id) ?? modMeta?.links?.websiteUrl
+      } : undefined);
+    });
   }
 
   async checkUpdatesForItems(instance: LauncherInstance, items: CfTrackedItem[], onApiError?: () => void): Promise<Map<string, ContentUpdateInfo>> {
@@ -762,15 +849,15 @@ export class CurseForgeService {
 
     const tasks = items.map((item) => {
       const key = `${item.projectType}:${item.fileName}`;
-      const fp = fpByKey.get(key);
-      const match = fp ? matchesByFp.get(fp) : undefined;
+      const fp = fpByKey.get(key) ?? 0;
+      const match = fp > 0 ? matchesByFp.get(fp) : undefined;
       const modId = item.projectId && /^\d+$/.test(item.projectId)
         ? item.projectId
         : match?.id
           ? String(match.id)
           : undefined;
-      return { item, key, match, modId };
-    }).filter((task): task is { item: CfTrackedItem; key: string; match: CfFingerprintMatch | undefined; modId: string } => Boolean(task.modId));
+      return { item, key, fp, match, modId };
+    }).filter((task): task is { item: CfTrackedItem; key: string; fp: number; match: CfFingerprintMatch | undefined; modId: string } => Boolean(task.modId));
 
     let index = 0;
     const worker = async (): Promise<void> => {
@@ -778,35 +865,78 @@ export class CurseForgeService {
         const current = tasks[index];
         index += 1;
         try {
-          const allFiles = await this.allFilesFor(current.modId, instance.gameVersion);
-          if (!allFiles.length) continue;
-          const fallbackLoaders = inferModLoaders(allFiles);
-          const fallbackVersions = inferModGameVersions(allFiles);
+          const rawFiles = await this.allFilesFor(current.modId, instance.gameVersion);
+          const usableFiles = rawFiles.filter((f) => isUsableCfFile(f, current.item.projectType));
+          if (!usableFiles.length) continue;
+          const fallbackLoaders = inferModLoaders(usableFiles);
+          const fallbackVersions = inferModGameVersions(usableFiles);
           const baseName = current.item.fileName.replace(/\.disabled$/i, "").toLowerCase();
-          const now = current.match?.file
-            ?? (current.item.versionId ? allFiles.find((f) => String(f.id) === current.item.versionId) : undefined)
-            ?? allFiles.find((f) => f.fileName.toLowerCase() === baseName || sanitizeFilePart(f.fileName).toLowerCase() === baseName);
+          const itemSha1 = current.item.sha1?.toLowerCase();
+          const matchedSelf = current.match?.file && String(current.match.id) === current.modId ? current.match.file : undefined;
+          const now = matchedSelf
+            ?? (current.fp > 0 ? rawFiles.find((f) => f.fileFingerprint === current.fp) : undefined)
+            ?? (itemSha1 ? rawFiles.find((f) => sha1Of(f) === itemSha1) : undefined)
+            ?? (current.item.versionId ? rawFiles.find((f) => String(f.id) === current.item.versionId) : undefined)
+            ?? rawFiles.find((f) => f.fileName.toLowerCase() === baseName || sanitizeFilePart(f.fileName).toLowerCase() === baseName);
 
-          const compatibleFiles = allFiles.filter(
-            (f) => toCfVersionInfo(f, instance, current.item.projectType, fallbackLoaders, fallbackVersions).compatible
-          );
+          const canUpdate = !(current.item.projectType === "mod" && instance.loader === "vanilla");
+          const compatibleFiles = canUpdate
+            ? usableFiles.filter((f) => toCfVersionInfo(f, instance, current.item.projectType, fallbackLoaders, fallbackVersions).compatible)
+            : [];
           const latestFile = pickFile(compatibleFiles);
           const nowInfo = now ? toCfVersionInfo(now, instance, current.item.projectType, fallbackLoaders, fallbackVersions) : undefined;
           const nowCompatible = nowInfo ? nowInfo.compatible : true;
           const baselineDate = now?.fileDate ?? current.item.installedDate ?? "";
-          const isNewer = Boolean(
+
+          const sameQuiltSibling = Boolean(
+            now &&
             latestFile &&
+            nowCompatible &&
+            instance.loader === "quilt" &&
+            current.item.projectType === "mod" &&
+            nowInfo?.loaders.includes("quilt") &&
+            !toCfVersionInfo(latestFile, instance, current.item.projectType, fallbackLoaders, fallbackVersions).loaders.includes("quilt") &&
+            isSameReleaseVersion(latestFile, now, current.item.currentVersionNumber)
+          );
+          const sameVersionAlreadyInstalled = Boolean(
+            latestFile &&
+            nowCompatible &&
+            (now || current.item.currentVersionNumber) &&
+            isSameReleaseVersion(latestFile, now, current.item.currentVersionNumber)
+          );
+
+          let isNewer = Boolean(
+            latestFile &&
+            !sameQuiltSibling &&
+            !sameVersionAlreadyInstalled &&
             (now ? latestFile.id !== now.id : sanitizeFilePart(latestFile.fileName).toLowerCase() !== baseName) &&
             (!nowCompatible || !baselineDate || (latestFile.fileDate ?? "") > baselineDate)
           );
+
+          let blockedExtra: { distributionBlocked: true; websiteUrl?: string } | undefined;
+          if (isNewer && latestFile && !latestFile.downloadUrl) {
+            const latestSha1 = sha1Of(latestFile);
+            const mrUrl = latestSha1 ? (await this.modrinthUrlsBySha1([latestSha1])).get(latestSha1) : undefined;
+            if (!mrUrl) {
+              if (current.item.provider === "modrinth") {
+                isNewer = false;
+              } else {
+                const modMeta = await this.mod(current.modId);
+                blockedExtra = {
+                  distributionBlocked: true,
+                  websiteUrl: cfFilePageUrl(modMeta?.links?.websiteUrl, latestFile.id) ?? modMeta?.links?.websiteUrl
+                };
+              }
+            }
+          }
 
           out.set(current.key, {
             projectId: current.modId,
             projectType: current.item.projectType,
             fileName: current.item.fileName,
             currentVersionId: now ? String(now.id) : current.item.versionId,
-            currentVersionNumber: now ? cleanVersionNumber(now) : undefined,
-            latest: isNewer && latestFile ? toCfVersionInfo(latestFile, instance, current.item.projectType, fallbackLoaders, fallbackVersions) : null,
+            currentVersionNumber: now ? cleanVersionNumber(now) : current.item.currentVersionNumber,
+            latest: isNewer && latestFile ? toCfVersionInfo(latestFile, instance, current.item.projectType, fallbackLoaders, fallbackVersions, blockedExtra) : null,
             incompatible: now && current.item.projectType === "mod" ? cfIncompatibility(now, instance, fallbackLoaders, fallbackVersions) : undefined
           });
         } catch {
@@ -838,11 +968,11 @@ export class CurseForgeService {
     if (payload.versionId) {
       file = (await this.request<{ data: CfFile }>(`/mods/${encodeURIComponent(payload.projectId)}/files/${encodeURIComponent(payload.versionId)}`)).data;
     } else {
-      let candidates = await this.filesFor(payload.projectId, gameVersion, wildcardLoader ? [] : loaders, true);
+      let candidates = await this.filesFor(payload.projectId, gameVersion, wildcardLoader ? [] : loaders, true, payload.projectType);
       if (!candidates.length && wildcardVersion) {
-        candidates = await this.filesFor(payload.projectId, undefined, wildcardLoader ? [] : loaders, false);
+        candidates = await this.filesFor(payload.projectId, undefined, wildcardLoader ? [] : loaders, false, payload.projectType);
         if (!candidates.length && !wildcardLoader) {
-          candidates = await this.filesFor(payload.projectId, undefined, [], false);
+          candidates = await this.filesFor(payload.projectId, undefined, [], false, payload.projectType);
         }
       }
       file = pickFile(candidates);
@@ -947,7 +1077,7 @@ export class CurseForgeService {
       }
     }
     if (!file) {
-      let files = (await this.filesFor(projectId, instance.gameVersion, [], true)).filter((item) => /\.zip$/i.test(item.fileName));
+      let files = (await this.filesFor(projectId, instance.gameVersion, [], true, "modpack")).filter((item) => /\.zip$/i.test(item.fileName));
       if (!files.length) {
         files = (await this.allFilesFor(projectId, undefined, true)).filter((item) => /\.zip$/i.test(item.fileName));
       }
@@ -971,7 +1101,8 @@ export class CurseForgeService {
     const instance = data.instances.find((item) => item.id === payload.instanceId);
     if (!instance) throw new Error(tr("Instance not found", "Инстанция не найдена"));
 
-    const allFiles = await this.allFilesFor(payload.projectId, instance.gameVersion, true);
+    const rawFiles = await this.allFilesFor(payload.projectId, instance.gameVersion, true);
+    const allFiles = rawFiles.filter((file) => isUsableCfFile(file, payload.projectType));
     const fallbackLoaders = inferModLoaders(allFiles);
     const fallbackVersions = inferModGameVersions(allFiles);
     const versions = allFiles.map((file) => toCfVersionInfo(file, instance, payload.projectType, fallbackLoaders, fallbackVersions));
@@ -992,10 +1123,27 @@ export class CurseForgeService {
     }
 
     if (!targetFile) {
+      let enriched = versions;
+      if (allFiles.some((file) => !file.downloadUrl)) {
+        const missingSha1s = allFiles.filter((file) => !file.downloadUrl).map((file) => sha1Of(file)).filter((s): s is string => Boolean(s));
+        const [mrUrls, modMeta] = await Promise.all([
+          missingSha1s.length ? this.modrinthUrlsBySha1(missingSha1s) : Promise.resolve(new Map<string, string>()),
+          this.mod(payload.projectId)
+        ]);
+        enriched = allFiles.map((file, idx) => {
+          const sha1 = sha1Of(file);
+          const blocked = !file.downloadUrl && !(sha1 && mrUrls.has(sha1));
+          return blocked ? {
+            ...versions[idx],
+            distributionBlocked: true,
+            websiteUrl: cfFilePageUrl(modMeta?.links?.websiteUrl, file.id) ?? modMeta?.links?.websiteUrl
+          } : versions[idx];
+        });
+      }
       return {
         targetVersion: null,
         hasCompatibleVersion,
-        versions,
+        versions: enriched,
         dependencies: []
       };
     }
@@ -1093,14 +1241,19 @@ export class CurseForgeService {
     }
     const mrFallbackUrls = blockedSha1s.length ? await this.modrinthUrlsBySha1(blockedSha1s) : new Map<string, string>();
 
+    const modsDir = path.join(instance.directory, "mods");
     const dependencies: ModDependencyItem[] = allModIds.map((modId) => {
       const mod = modsById.get(modId);
       const depType = depMap.get(modId)!;
       const chosen = chosenFileByMod.get(modId);
       const slug = mod?.slug;
-      const installed = instance.mods.some(
-        (m) => m.projectId === String(modId) || Boolean(slug && m.slug && m.slug.toLowerCase() === slug.toLowerCase())
-      );
+      const installed = instance.mods.some((m) => {
+        if ((m.projectType ?? "mod") !== "mod") return false;
+        if (m.projectId !== String(modId) && !(slug && m.slug && m.slug.toLowerCase() === slug.toLowerCase())) return false;
+        if (!m.fileName) return true;
+        const baseName = m.fileName.replace(/\.disabled$/i, "");
+        return existsSync(path.join(modsDir, m.fileName)) || existsSync(path.join(modsDir, baseName)) || existsSync(path.join(modsDir, `${baseName}.disabled`));
+      });
       const sha1 = chosen ? sha1Of(chosen) : undefined;
       const hasDownload = Boolean(chosen?.downloadUrl || (sha1 && mrFallbackUrls.has(sha1)));
       const distributionBlocked = Boolean(chosen && !hasDownload && mod?.allowModDistribution === false);

@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync } from "node:fs";
-import { cp, mkdir, open, readFile, realpath, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, open, readFile, realpath, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
+import os from "node:os";
 import { promisify } from "node:util";
 import path from "node:path";
 import type { CreateInstancePayload, UpdateInstancePayload } from "@shared/ipc";
 import type { AccountState, LaunchResult, LauncherInstance, QuickPlayTarget } from "@shared/types";
-import { getInstancesRoot } from "../paths";
+import { getInstancesRoot, getLauncherRoot } from "../paths";
 import { JsonStore, getActiveAccount, getMaxAllocatableMemoryMb, type LauncherData } from "../store";
 import type { AuthService } from "./auth";
 import { JavaService } from "./java";
@@ -21,29 +22,59 @@ function sanitizeFilePart(value: string): string {
     .slice(0, 64) || "Instance";
 }
 
-function toFolderPart(value: string): string {
-  return sanitizeFilePart(value).replace(/\s+/g, "-");
+const RESERVED_WIN_NAMES = new Set([
+  "CON", "PRN", "AUX", "NUL",
+  "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+  "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+]);
+
+function sanitizeFolderName(value: string): string {
+  let clean = value
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[ .]+|[ .]+$/g, "")
+    .slice(0, 64)
+    .replace(/[ .]+$/g, "");
+  if (!clean) return "Instance";
+  if (RESERVED_WIN_NAMES.has(clean.toUpperCase())) clean += "_";
+  return clean;
 }
 
-function buildInstanceFolderName(payload: CreateInstancePayload, uniqueSuffix: string): string {
-  const name = toFolderPart(payload.name || `${payload.loader} ${payload.gameVersion}`);
-  const loader = toFolderPart(payload.loader || "vanilla").toLowerCase();
-  const version = toFolderPart(payload.gameVersion || "1.21.1");
-  const loaderVersion = payload.loaderVersion?.trim() ? `-${toFolderPart(payload.loaderVersion)}` : "";
-  const suffix = `-${uniqueSuffix}`;
-  const base = `${name}-${loader}-${version}${loaderVersion}`;
-  return `${base.slice(0, Math.max(1, 80 - suffix.length))}${suffix}`;
+function sameFsPath(a: string, b: string): boolean {
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
-function pickInstanceDirectory(payload: CreateInstancePayload, id: string): string {
-  let directory = path.join(getInstancesRoot(), buildInstanceFolderName(payload, id.slice(0, 6)));
-  for (let n = 2; n < 100 && existsSync(directory); n += 1) {
-    directory = path.join(getInstancesRoot(), buildInstanceFolderName(payload, `${id.slice(0, 6)}-${n}`));
+function pickInstanceDirectory(name: string, ignoreExisting?: string, reservedDirs: string[] = []): string {
+  const root = getInstancesRoot();
+  const base = sanitizeFolderName(name);
+  const isFree = (candidate: string): boolean => {
+    if (ignoreExisting && sameFsPath(candidate, ignoreExisting)) return true;
+    if (existsSync(candidate)) return false;
+    return !reservedDirs.some((r) => sameFsPath(r, candidate));
+  };
+  let directory = path.join(root, base);
+  if (isFree(directory)) {
+    return directory;
   }
-  if (existsSync(directory)) {
-    throw new Error(tr("Could not pick a free folder for the instance", "Не удалось подобрать свободную папку для инстанции"));
+  for (let n = 1; n < 1000; n += 1) {
+    directory = path.join(root, `${base} (${n})`);
+    if (isFree(directory)) {
+      return directory;
+    }
   }
-  return directory;
+  return path.join(root, `${base} (${randomUUID().slice(0, 6)})`);
+}
+
+async function removeInstanceLink(id: string): Promise<void> {
+  const safeId = id.replace(/[^\w.-]/g, "_") || "instance";
+  const linkPath = path.join(getLauncherRoot(), "minecraft", "instance-links", safeId);
+  try {
+    const st = await lstat(linkPath);
+    if (st.isSymbolicLink()) {
+      await rmdir(linkPath);
+    }
+  } catch {
+  }
 }
 
 const COPY_SKIP = new Set(["logs", "crash-reports", path.join(".launcher", "logs"), path.join(".launcher", "natives"), path.join(".launcher", "instance.json")]);
@@ -135,10 +166,30 @@ async function killProcessTree(pid: number): Promise<void> {
     await new Promise<void>((resolve) => {
       execFile("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => resolve());
     });
+    try {
+      process.kill(pid);
+    } catch {
+    }
+    return;
   }
+
   try {
-    process.kill(pid);
+    process.kill(-pid, "SIGTERM");
   } catch {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      return;
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+    }
   }
 }
 
@@ -153,6 +204,13 @@ async function isJavaProcessAlive(pid: number): Promise<boolean> {
     accessDenied = true;
   }
   if (process.platform !== "win32") {
+    if (process.platform === "linux") {
+      try {
+        const comm = (await readFile(`/proc/${pid}/comm`, "utf8")).trim().toLowerCase();
+        if (comm) return /java/.test(comm);
+      } catch {
+      }
+    }
     return true;
   }
   try {
@@ -189,8 +247,9 @@ export class InstanceService {
     await this.minecraft.assertLoaderCompatible(loader, gameVersion);
     const now = new Date().toISOString();
     const id = randomUUID();
+    const existing = await this.store.getData();
     const name = sanitizeFilePart(payload.name || `${payload.loader} ${gameVersion}`);
-    const directory = pickInstanceDirectory({ ...payload, gameVersion }, id);
+    const directory = pickInstanceDirectory(name, undefined, existing.instances.map((item) => item.directory));
 
     const instance: LauncherInstance = {
       id,
@@ -247,7 +306,7 @@ export class InstanceService {
     }
 
     const newId = randomUUID();
-    const directory = pickInstanceDirectory({ name, gameVersion: source.gameVersion, loader: source.loader, loaderVersion: source.loaderVersion }, newId);
+    const directory = pickInstanceDirectory(name, undefined, data.instances.map((item) => item.directory));
     try {
       await cp(source.directory, directory, {
         recursive: true,
@@ -313,15 +372,59 @@ export class InstanceService {
       await this.minecraft.assertLoaderCompatible(nextLoader, nextGameVersion);
     }
 
+    let renamedDirectory: string | undefined;
+    if (payload.patch.name !== undefined) {
+      const nextName = sanitizeFilePart(payload.patch.name);
+      const pid = data.runningProcesses[payload.id];
+      const running = pid !== undefined && (await isJavaProcessAlive(pid));
+      if (nextName !== current.name && !running && existsSync(current.directory)) {
+        const root = await realpath(getInstancesRoot()).catch(() => path.resolve(getInstancesRoot()));
+        const resolvedCur = await realpath(current.directory).catch(() => path.resolve(current.directory));
+        const normRoot = process.platform === "win32" ? root.toLowerCase() : root;
+        const normCur = process.platform === "win32" ? resolvedCur.toLowerCase() : resolvedCur;
+        if (normCur !== normRoot && normCur.startsWith(normRoot + path.sep)) {
+          const reservedDirs = data.instances.filter((item) => item.id !== payload.id).map((item) => item.directory);
+          const targetDir = pickInstanceDirectory(nextName, current.directory, reservedDirs);
+          if (targetDir !== current.directory) {
+            try {
+              if (sameFsPath(targetDir, current.directory)) {
+                const tmpDir = path.join(path.dirname(current.directory), `.renaming-${randomUUID().slice(0, 8)}`);
+                await rename(current.directory, tmpDir);
+                try {
+                  await rename(tmpDir, targetDir);
+                } catch (err) {
+                  await rename(tmpDir, current.directory).catch(() => undefined);
+                  throw err;
+                }
+              } else {
+                await rename(current.directory, targetDir);
+              }
+              await removeInstanceLink(current.id);
+              renamedDirectory = targetDir;
+            } catch {
+            }
+          }
+        }
+      }
+    }
+
     const updated = await this.store.update((data) => {
       const instance = data.instances.find((item) => item.id === payload.id);
       if (!instance) {
         throw new Error(tr("Instance not found", "Инстанция не найдена"));
       }
 
-      Object.assign(instance, payload.patch);
+      const patch = payload.patch;
+      if (patch.name !== undefined) instance.name = patch.name;
+      if (renamedDirectory) instance.directory = renamedDirectory;
+      if (patch.gameVersion !== undefined) instance.gameVersion = patch.gameVersion;
+      if (patch.loader !== undefined) instance.loader = patch.loader;
+      if (patch.loaderVersion !== undefined) instance.loaderVersion = patch.loaderVersion;
+      if ("javaPath" in patch) instance.javaPath = patch.javaPath;
+      if ("maxMemoryMb" in patch) instance.maxMemoryMb = patch.maxMemoryMb;
+      if ("extraJvmArgs" in patch) instance.extraJvmArgs = patch.extraJvmArgs;
       instance.name = sanitizeFilePart(instance.name);
-      instance.loaderVersion = instance.loaderVersion?.trim() || undefined;
+      instance.loaderVersion = instance.loader === "vanilla" ? undefined : (instance.loaderVersion?.trim() || undefined);
       instance.updatedAt = new Date().toISOString();
       return instance;
     });
@@ -354,6 +457,21 @@ export class InstanceService {
       throw new Error(tr("Refusing to delete a folder outside the instances directory", "Удаление отменено: папка находится вне каталога инстанций"));
     }
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 });
+
+    const safeId = id.replace(/[^\w.-]/g, "_") || "instance";
+    const linkPath = path.join(getLauncherRoot(), "minecraft", "instance-links", safeId);
+    try {
+      const st = await lstat(linkPath);
+      if (st.isSymbolicLink()) {
+        await rmdir(linkPath);
+      }
+    } catch {
+    }
+    const nativesPath = path.join(getLauncherRoot(), "minecraft", "natives", safeId);
+    await rm(nativesPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 }).catch(() => undefined);
+    if (process.platform === "win32") {
+      await rm(path.join(os.tmpdir(), "lynapp", "natives", safeId), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => undefined);
+    }
 
     return this.store.update((current) => {
       const before = current.instances.length;
@@ -530,7 +648,10 @@ export class InstanceService {
         throw new Error(tr("Instance not found", "Инстанция не найдена"));
       }
 
-      target.updatedAt = new Date().toISOString();
+      const now = new Date().toISOString();
+      target.updatedAt = now;
+      target.lastPlayedAt = now;
+      current.activeInstanceId = target.id;
       return target;
     });
 
@@ -552,10 +673,11 @@ export class InstanceService {
         `Java path: ${javaPath}`,
         `Main class: ${launch.mainClass}`,
         `Natives: ${launch.nativesDir}`,
-        `Working directory: ${instance.directory}`,
+        `Working directory: ${launch.launchDirectory}`,
+        launch.launchDirectory !== instance.directory ? `Instance directory: ${instance.directory}` : "",
         `Command: "${javaPath}" ${redactLaunchArgs(launch.args).map((arg) => (arg.includes(" ") ? `"${arg}"` : arg)).join(" ")}`,
         launch.warning ? `Warning: ${launch.warning}` : ""
-      ].join("\n"),
+      ].filter(Boolean).join("\n"),
       "utf8"
     );
 
@@ -578,7 +700,7 @@ export class InstanceService {
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(javaPath, launch.args, {
-        cwd: instance.directory,
+        cwd: launch.launchDirectory,
         detached: true,
         stdio: ["ignore", logFd, logFd],
         windowsHide: false

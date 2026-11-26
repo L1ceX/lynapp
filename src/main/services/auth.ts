@@ -1142,7 +1142,13 @@ export class AuthService {
   }
 
   async removeAccount(id: string): Promise<AccountsState> {
-    return this.store.update((data) => {
+    let removedElyPartition: string | null = null;
+    const state = await this.store.update((data) => {
+      const removed = data.accounts.find((item) => item.id === id) ?? null;
+      if (removed?.kind === "ely") {
+        const accountId = (removed.minecraftUuid || removed.id).replace(/-/g, "");
+        removedElyPartition = `persist:ely-${accountId}`;
+      }
       const prevActive = data.accounts.find((item) => item.id === data.activeAccountId) ?? null;
       if (prevActive && prevActive.id !== id && (prevActive.kind === "microsoft" || prevActive.kind === "ely")) {
         prevActive.activeSkinId = data.settings.activeSkinId ?? prevActive.activeSkinId ?? null;
@@ -1155,5 +1161,9 @@ export class AuthService {
       data.settings.activeSkinId = active?.kind === "microsoft" || active?.kind === "ely" ? (active.activeSkinId ?? null) : null;
       return { accounts: data.accounts, activeAccountId: data.activeAccountId };
     });
+    if (removedElyPartition) {
+      await session.fromPartition(removedElyPartition).clearStorageData().catch(() => undefined);
+    }
+    return state;
   }
 }

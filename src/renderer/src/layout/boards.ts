@@ -19,6 +19,13 @@ export const BOARD_ROW = 4;
 export const BOARD_GAP = 16;
 export const BLOCK_MIN_PX = 240;
 
+export function snapGridWidth(rawWidth: number, cols: number, gap: number): number {
+  if (rawWidth <= 0) return 0;
+  const totalGaps = gap * (cols - 1);
+  const col = Math.max(1, Math.floor((rawWidth - totalGaps) / cols));
+  return col * cols + totalGaps;
+}
+
 export const PAGE_BOARD_IDS: PageBoardId[] = ["launcher", "visuals", "accounts", "skins", "instGeneral", "instRuntime", "instContent"];
 
 const SECTION_BOARDS: Partial<Record<string, PageBoardId>> = { launcher: "launcher", visuals: "visuals", accounts: "accounts", skins: "skins" };
@@ -58,14 +65,16 @@ export const PAGE_BOARDS: Record<PageBoardId, PageBoardDef> = {
       { id: "colors", label: "Theme colors", labelRu: "Цвета темы", minW: 4 },
       { id: "preview", label: "Preview", labelRu: "Предпросмотр", minW: 3 },
       { id: "motion", label: "Motion", labelRu: "Анимации", minW: 4 },
-      { id: "effects", label: "Additional effects", labelRu: "Дополнительные эффекты", minW: 4 }
+      { id: "effects", label: "Additional effects", labelRu: "Дополнительные эффекты", minW: 4 },
+      { id: "font", label: "Font", labelRu: "Шрифт", minW: 4 }
     ],
     defaults: [
       { i: "presets", x: 0, y: 0, w: 12, h: 28 },
       { i: "colors", x: 0, y: 28, w: 8, h: 160 },
       { i: "preview", x: 8, y: 28, w: 4, h: 70 },
       { i: "motion", x: 8, y: 98, w: 4, h: 100 },
-      { i: "effects", x: 0, y: 200, w: 12, h: 120 }
+      { i: "effects", x: 0, y: 200, w: 12, h: 120 },
+      { i: "font", x: 0, y: 320, w: 12, h: 136 }
     ]
   },
   accounts: {
@@ -142,7 +151,8 @@ export function normalizeBoard(blocks: BoardBlockDef[], defaults: HomeWidgetLayo
     const x = Math.min(cols - w, Math.max(0, Math.round(Number(item.x) || 0)));
     const y = Math.max(0, Math.round(Number(item.y) || 0));
     const hidden = item.hidden === true && !meta?.locked;
-    result.push({ i: item.i, x, y, w, h, ...(hidden ? { hidden: true } : {}) });
+    const customH = item.customH === true;
+    result.push({ i: item.i, x, y, w, h, ...(hidden ? { hidden: true } : {}), ...(customH ? { customH: true } : {}) });
     seen.add(item.i);
   }
   let bottom = result.reduce((max, item) => Math.max(max, item.y + item.h), 0);
@@ -161,6 +171,6 @@ export function normalizePageBoard(board: PageBoardId, saved: HomeWidgetLayout[]
 
 export function samePlacement(a: HomeWidgetLayout[], b: HomeWidgetLayout[], withHeight: boolean): boolean {
   if (a.length !== b.length) return false;
-  const key = (item: HomeWidgetLayout) => `${item.i}:${item.x}:${item.y}:${item.w}:${withHeight ? item.h : 0}:${item.hidden ? 1 : 0}`;
+  const key = (item: HomeWidgetLayout) => `${item.i}:${item.x}:${item.y}:${item.w}:${withHeight && item.customH ? item.h : 0}:${withHeight && item.customH ? 1 : 0}:${item.hidden ? 1 : 0}`;
   return a.map(key).sort().join("|") === b.map(key).sort().join("|");
 }

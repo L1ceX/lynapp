@@ -91,7 +91,7 @@ export function SkinHead({ dataUrl, className, onError }: { dataUrl: string; cla
     };
   }, [dataUrl]);
 
-  return <canvas ref={ref} width={64} height={64} className={className} />;
+  return <canvas ref={ref} width={48} height={48} className={className} />;
 }
 
 export function CapeThumb({ url }: { url: string }) {
