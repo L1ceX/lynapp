@@ -161,7 +161,7 @@ jobs:
           $notes = (git tag -l --format='%(contents)' $tag | Out-String).Trim()
           if (-not $notes) { throw "Tag $tag has an empty description" }
           Set-Content -Path release-notes.md -Value $notes -Encoding utf8
-          $files = Get-ChildItem -Path release-artifacts -File | Select-Object -ExpandProperty FullName
+          $files = Get-ChildItem -Path release-artifacts -Recurse -File | Select-Object -ExpandProperty FullName
           if (-not $files -or $files.Count -lt 2) { throw "Expected at least 2 release assets, found $($files.Count)" }
           $flags = @()
           if ($env:VERSION -match '-') { $flags += "--prerelease" }
