@@ -108,6 +108,7 @@ export interface LauncherSettings {
   discordPresence: boolean;
   discordHideInstance: boolean;
   betaUpdates: boolean;
+  updateEdition?: UpdateEdition;
   autoInstallDependencies: boolean;
   versionTypes: VersionTypeFilter;
   homeLayout?: HomeWidgetLayout[];
@@ -194,11 +195,21 @@ export interface AccountsState {
 
 export type UpdateStatusKind = "checking" | "up-to-date" | "available" | "downloading" | "ready" | "error";
 
+export type UpdateEdition = "tauri" | "electron";
+
+export interface UpdateReleaseInfo {
+  version: string;
+  prerelease: boolean;
+}
+
 export interface UpdateStatus {
   kind: UpdateStatusKind;
   version?: string;
+  edition?: UpdateEdition;
   percent?: number;
   message?: string;
+  latestTauri?: UpdateReleaseInfo | null;
+  latestElectron?: UpdateReleaseInfo | null;
 }
 
 export interface BootstrapState {

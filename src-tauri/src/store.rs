@@ -41,6 +41,7 @@ pub fn default_settings(app_version: &str) -> LauncherSettings {
         discord_presence: true,
         discord_hide_instance: false,
         beta_updates: app_version.contains('-'),
+        update_edition: None,
         auto_install_dependencies: false,
         version_types: VersionTypeFilter::default(),
         home_layout: None,

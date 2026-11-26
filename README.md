@@ -112,6 +112,7 @@ npx tauri build        # Build native release executable and installer
 
 ---
 
-## Security
+## Code Signing Policy & Security
 
-Never commit `%APPDATA%\lynapp\launcher-data.json` or `.env`.
+- **Code signing policy:** see [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md). Official releases are currently unsigned while our free open-source code signing application to **SignPath Foundation** is pending — on Windows 11 you may need to choose *More info → Run anyway* in SmartScreen.
+- **Security:** never commit `%APPDATA%\lynapp\launcher-data.json` or `.env`.

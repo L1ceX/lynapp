@@ -55,7 +55,7 @@ pub struct SkinService {
 impl SkinService {
     pub fn new(store: Arc<JsonStore>, auth: Arc<AuthService>) -> Self {
         let client = Client::builder()
-            .user_agent("lynapp/2.0.0-beta.1")
+            .user_agent("lynapp/2.0.0-beta.2")
             .timeout(Duration::from_secs(20))
             .build()
             .unwrap_or_else(|_| Client::new());

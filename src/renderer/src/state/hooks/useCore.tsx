@@ -1,6 +1,6 @@
 import { Cpu, Folder, Globe, Image, PackageSearch, ScrollText, Server, SlidersHorizontal, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AfterLaunchAction, BootstrapState, LauncherSettings, UpdateStatus } from "@shared/types";
+import type { AfterLaunchAction, BootstrapState, LauncherSettings, UpdateEdition, UpdateStatus } from "@shared/types";
 import type { AppSection, InstanceTab } from "../../constants";
 import { getLauncherApi } from "../../lib/api";
 import { cleanIpcError, formatRelative } from "../../lib/format";
@@ -92,23 +92,43 @@ export function useCore() {
 
   useEffect(() => {
     return getLauncherApi().onUpdateStatus((status) => {
-      if (status.kind === "up-to-date") {
-        setUpdate(null);
-        return;
-      }
       setUpdate(status);
     });
   }, []);
 
-  async function downloadUpdate(): Promise<void> {
+  async function downloadUpdate(edition?: UpdateEdition): Promise<void> {
     if (update?.kind === "downloading") return;
-    const prevVersion = update?.kind === "available" ? update.version : undefined;
-    setUpdate((current) => ({ kind: "downloading", percent: 0, version: current?.version }));
+    const prev = update;
+    const targetEdition = edition ?? prev?.edition;
+    const targetVersion = targetEdition === "electron"
+      ? prev?.latestElectron?.version ?? prev?.version
+      : targetEdition === "tauri"
+        ? prev?.latestTauri?.version ?? prev?.version
+        : prev?.version;
+    setUpdate((current) => ({
+      kind: "downloading",
+      edition: targetEdition,
+      percent: 0,
+      version: targetVersion,
+      latestTauri: current?.latestTauri ?? null,
+      latestElectron: current?.latestElectron ?? null
+    }));
     try {
-      await getLauncherApi().downloadUpdate();
+      await getLauncherApi().downloadUpdate(targetEdition);
     } catch (error) {
-      setUpdate(prevVersion ? { kind: "available", version: prevVersion } : null);
+      setUpdate(prev ?? null);
       setStatus(cleanIpcError(error, t("Update download failed", "Не удалось скачать обновление")));
+    }
+  }
+
+  async function setUpdateEdition(edition: UpdateEdition): Promise<void> {
+    setSettingsDraft((current) => (current ? { ...current, updateEdition: edition } : current));
+    try {
+      const settings = await getLauncherApi().updateSettings({ updateEdition: edition });
+      setBootstrap((current) => (current ? { ...current, settings } : current));
+      setSettingsDraft((current) => (current ? { ...current, updateEdition: settings.updateEdition } : settings));
+    } catch (error) {
+      setStatus(cleanIpcError(error, t("Failed to save", "Не удалось сохранить")));
     }
   }
 
@@ -298,6 +318,7 @@ export function useCore() {
     setMaximized,
     update,
     setUpdate,
+    setUpdateEdition,
     downloadUpdate,
     installUpdate,
     switchTab,

@@ -65,6 +65,14 @@ jobs:
           New-Item -ItemType Directory -Force release-win | Out-Null
           Copy-Item src-tauri/target/release/bundle/nsis/*.exe release-win/
           Copy-Item src-tauri/target/release/lynapp.exe "release-win/lynapp-portable-${env:VERSION}.exe"
+          $setup = Get-ChildItem release-win/*setup*.exe | Select-Object -First 1
+          if ($setup) {
+            $bytes = [System.IO.File]::ReadAllBytes($setup.FullName)
+            $sha512 = [Convert]::ToBase64String([System.Security.Cryptography.SHA512]::Create().ComputeHash($bytes))
+            $nowIso = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+            $yml = "version: $($env:VERSION)`nfiles:`n  - url: $($setup.Name)`n    sha512: $sha512`n    size: $($setup.Length)`npath: $($setup.Name)`nsha512: $sha512`nreleaseDate: '$nowIso'`n"
+            [System.IO.File]::WriteAllText((Join-Path (Resolve-Path release-win) "latest.yml"), $yml, [System.Text.UTF8Encoding]::new($false))
+          }
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4

@@ -22,8 +22,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const USER_AGENT: &str = "lynapp/2.0.0-beta.1";
-const LAUNCHER_VERSION: &str = "2.0.0-beta.1";
+const USER_AGENT: &str = "lynapp/2.0.0-beta.2";
+const LAUNCHER_VERSION: &str = "2.0.0-beta.2";
 const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const ASSET_OBJECT_ROOT: &str = "https://resources.download.minecraft.net";
 const LEGACY_LIBRARIES_ROOT: &str = "https://libraries.minecraft.net";

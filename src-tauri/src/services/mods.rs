@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-const USER_AGENT: &str = "lynapp/2.0.0-beta.1";
+const USER_AGENT: &str = "lynapp/2.0.0-beta.2";
 
 static AUX_MOD_JAR_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|[-_.+])(sources|javadoc|dev|deobf|preshadow)\.jar$").unwrap()

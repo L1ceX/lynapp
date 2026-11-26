@@ -158,6 +158,8 @@ pub struct LauncherSettings {
     pub discord_hide_instance: bool,
     #[serde(default)]
     pub beta_updates: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_edition: Option<String>,
     #[serde(default)]
     pub auto_install_dependencies: bool,
     #[serde(default)]

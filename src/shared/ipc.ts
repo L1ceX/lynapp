@@ -33,6 +33,7 @@ import type {
   ModSearchResponse,
   ModSortIndex,
   SkinInfo,
+  UpdateEdition,
   UpdateStatus
 } from "./types";
 
@@ -343,7 +344,7 @@ export interface LauncherApi {
   openFontsFolder(): Promise<string>;
   listSystemFonts(): Promise<string[]>;
   listGoogleFonts(): Promise<GoogleFontInfo[]>;
-  downloadUpdate(): Promise<void>;
+  downloadUpdate(edition?: UpdateEdition): Promise<void>;
   installUpdate(): Promise<void>;
   onUpdateStatus(listener: (status: UpdateStatus) => void): () => void;
   minimizeWindow(): Promise<void>;

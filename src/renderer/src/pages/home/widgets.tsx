@@ -81,14 +81,25 @@ function AccountWidget() {
 }
 
 function LauncherWidget() {
-  const { bootstrap, downloadUpdate, installUpdate, settingsDraft, setSettingFlag, t, update } = useApp();
+  const { bootstrap, downloadUpdate, installUpdate, settingsDraft, setSettingFlag, setUpdateEdition, t, update } = useApp();
   const beta = settingsDraft.betaUpdates ?? false;
+  const runningEdition = bootstrap.appVersion.startsWith("2.") ? "tauri" : "electron";
+  const selectedEdition = settingsDraft.updateEdition ?? runningEdition;
+  const isSwitch = update?.kind === "available" && update.edition && update.edition !== runningEdition;
   return (
     <div className="widget-body widget-launcher">
       <div className="widget-title"><Gamepad2 size={18} /><span>lynapp {bootstrap.appVersion}</span></div>
+      <div className="widget-edition-row">
+        <button type="button" className={selectedEdition === "tauri" ? "widget-edition-btn active" : "widget-edition-btn"} onClick={() => void setUpdateEdition("tauri")}>
+          <strong>Rust</strong><span>{update?.latestTauri?.version ?? "2.x"}</span>
+        </button>
+        <button type="button" className={selectedEdition === "electron" ? "widget-edition-btn active" : "widget-edition-btn"} onClick={() => void setUpdateEdition("electron")}>
+          <strong>Electron</strong><span>{update?.latestElectron?.version ?? "1.x"}</span>
+        </button>
+      </div>
       <div className="widget-launcher-status">
-        {update?.kind === "available" ? <button type="button" className="primary-button" onClick={() => void downloadUpdate()}><Download size={15} /> {t(`Download ${update.version ?? ""}`, `Скачать ${update.version ?? ""}`)}</button>
-          : update?.kind === "downloading" ? <span className="muted"><RefreshCw size={14} className="spin" /> {t("Downloading update", "Загрузка обновления")} {update.percent ?? 0}%</span>
+        {update?.kind === "available" ? <button type="button" className="primary-button" onClick={() => void downloadUpdate(update.edition)}><Download size={15} /> {isSwitch ? t(`Switch to ${update.version ?? ""}`, `Перейти на ${update.version ?? ""}`) : t(`Download ${update.version ?? ""}`, `Скачать ${update.version ?? ""}`)}</button>
+          : update?.kind === "downloading" ? <span className="muted"><RefreshCw size={14} className="spin" /> {t("Downloading", "Загрузка")} {update.percent ?? 0}%</span>
             : update?.kind === "ready" ? <button type="button" className="primary-button" onClick={() => void installUpdate()}><Sparkles size={15} /> {t("Restart to update", "Перезапустить и обновить")}</button>
               : update?.kind === "checking" ? <span className="muted"><RefreshCw size={14} className="spin" /> {t("Checking for updates...", "Проверка обновлений...")}</span>
                 : update?.kind === "error" ? <span className="muted" title={update.message}><CircleAlert size={14} /> {t("Update failed", "Ошибка обновления")}</span>

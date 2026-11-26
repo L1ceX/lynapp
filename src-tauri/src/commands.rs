@@ -75,8 +75,9 @@ pub async fn launcher_bootstrap(
     let updater = state.updater.clone();
     let app_upd = app.clone();
     let allow_beta = data.settings.beta_updates;
+    let edition = data.settings.update_edition.clone();
     tokio::spawn(async move {
-        updater.check(&app_upd, allow_beta).await;
+        updater.check(&app_upd, allow_beta, edition.as_deref()).await;
     });
     let extra = vec![data.settings.java_path.clone()];
     let java_candidates = tokio::task::spawn_blocking(move || java::list_candidate_paths(&extra))
@@ -104,7 +105,9 @@ pub async fn update_settings(
     state: State<'_, AppState>,
     patch: Value,
 ) -> Result<LauncherSettings, String> {
-    let prev_beta = state.store.get_data().await.settings.beta_updates;
+    let prev_settings = state.store.get_data().await.settings;
+    let prev_beta = prev_settings.beta_updates;
+    let prev_edition = prev_settings.update_edition.clone();
     let updated = state
         .store
         .update(|data| {
@@ -138,12 +141,13 @@ pub async fn update_settings(
         .discord
         .apply_settings(updated.discord_presence, updated.discord_hide_instance)
         .await;
-    if updated.beta_updates != prev_beta {
+    if updated.beta_updates != prev_beta || updated.update_edition != prev_edition {
         let updater = state.updater.clone();
         let app_upd = app.clone();
         let allow_beta = updated.beta_updates;
+        let edition = updated.update_edition.clone();
         tokio::spawn(async move {
-            updater.check(&app_upd, allow_beta).await;
+            updater.check(&app_upd, allow_beta, edition.as_deref()).await;
         });
     }
     Ok(updated)
@@ -974,8 +978,9 @@ pub async fn equip_cape(
 pub async fn updater_download(
     app: AppHandle,
     state: State<'_, AppState>,
+    edition: Option<String>,
 ) -> Result<(), String> {
-    state.updater.download(&app).await
+    state.updater.download(&app, edition).await
 }
 
 #[tauri::command]

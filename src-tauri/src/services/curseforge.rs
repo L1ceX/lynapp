@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 const API: &str = "https://api.curseforge.com/v1";
 const MINECRAFT_GAME_ID: u32 = 432;
-const USER_AGENT: &str = "lynapp/2.0.0-beta.1";
+const USER_AGENT: &str = "lynapp/2.0.0-beta.2";
 
 static AUX_JAR_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|[-_.+])(sources|javadoc|dev|deobf|preshadow)\.jar$").unwrap()
