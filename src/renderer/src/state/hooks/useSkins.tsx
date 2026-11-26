@@ -203,14 +203,25 @@ export function useSkins(deps: Pick<CoreState, "activeAccount" | "bootstrap" | "
   }
 
   async function removeSkin(id: string, name: string): Promise<void> {
+    const reqAccountId = activeAccount?.id;
+    const wasActive = id === activeSkinId;
     setSkinBusy(true);
     try {
       const result = await getLauncherApi().removeSkin(id);
+      if (activeAccountIdRef.current !== reqAccountId) return;
       setSkins(result.skins);
       syncActiveSkinId(result.activeSkinId, id);
+      if (wasActive) {
+        setAccountSkin(null);
+        void getLauncherApi().accountSkin().then((remote) => {
+          if (activeAccountIdRef.current === reqAccountId) setAccountSkin(remote);
+        }).catch(() => undefined);
+      }
       setStatus(t(`Deleted skin ${name}`, `Скин удалён: ${name}`));
     } catch (error) {
-      setStatus(cleanIpcError(error, t("Failed to delete skin", "Не удалось удалить скин")));
+      if (activeAccountIdRef.current === reqAccountId) {
+        setStatus(cleanIpcError(error, t("Failed to delete skin", "Не удалось удалить скин")));
+      }
     } finally {
       setSkinBusy(false);
     }
@@ -245,16 +256,20 @@ export function useSkins(deps: Pick<CoreState, "activeAccount" | "bootstrap" | "
   }
 
   async function setSkinModel(id: string, slim: boolean): Promise<void> {
+    const reqAccountId = activeAccount?.id;
     setSkinBusy(true);
     try {
       const nextSkins = await getLauncherApi().updateSkin({ id, patch: { slim } });
+      if (activeAccountIdRef.current !== reqAccountId) return;
       setSkins(nextSkins);
       if (id === activeSkinId) {
         const current = nextSkins.find((item) => item.id === id);
         await applyActivation(id, current?.name ?? "skin", current);
       }
     } catch (error) {
-      setStatus(cleanIpcError(error, t("Failed to update skin", "Не удалось обновить скин")));
+      if (activeAccountIdRef.current === reqAccountId) {
+        setStatus(cleanIpcError(error, t("Failed to update skin", "Не удалось обновить скин")));
+      }
     } finally {
       setSkinBusy(false);
     }
@@ -262,16 +277,20 @@ export function useSkins(deps: Pick<CoreState, "activeAccount" | "bootstrap" | "
 
   async function moveSkinLibrary(id: string, toAccount: boolean): Promise<void> {
     if (!canEditSkins) return;
+    const reqAccountId = activeAccount?.id;
     setSkinBusy(true);
     try {
-      const accountId = toAccount ? (activeAccount?.id ?? null) : null;
+      const accountId = toAccount ? (reqAccountId ?? null) : null;
       const nextSkins = await getLauncherApi().updateSkin({ id, patch: { accountId } });
+      if (activeAccountIdRef.current !== reqAccountId) return;
       setSkins(nextSkins);
       setStatus(toAccount
         ? t("Moved skin to this account's library", "Скин перенесён в библиотеку аккаунта")
         : t("Moved skin to shared library", "Скин перенесён в общую библиотеку"));
     } catch (error) {
-      setStatus(cleanIpcError(error, t("Failed to move skin", "Не удалось перенести скин")));
+      if (activeAccountIdRef.current === reqAccountId) {
+        setStatus(cleanIpcError(error, t("Failed to move skin", "Не удалось перенести скин")));
+      }
     } finally {
       setSkinBusy(false);
     }
@@ -280,12 +299,17 @@ export function useSkins(deps: Pick<CoreState, "activeAccount" | "bootstrap" | "
   async function renameSkin(id: string, nextName: string): Promise<void> {
     const trimmed = nextName.trim().slice(0, 32);
     if (!trimmed || !canEditSkins) return;
+    const reqAccountId = activeAccount?.id;
     setSkinBusy(true);
     try {
-      setSkins(await getLauncherApi().updateSkin({ id, patch: { name: trimmed } }));
+      const nextSkins = await getLauncherApi().updateSkin({ id, patch: { name: trimmed } });
+      if (activeAccountIdRef.current !== reqAccountId) return;
+      setSkins(nextSkins);
       setStatus(t(`Renamed skin to ${trimmed}`, `Скин переименован: ${trimmed}`));
     } catch (error) {
-      setStatus(cleanIpcError(error, t("Failed to rename skin", "Не удалось переименовать скин")));
+      if (activeAccountIdRef.current === reqAccountId) {
+        setStatus(cleanIpcError(error, t("Failed to rename skin", "Не удалось переименовать скин")));
+      }
     } finally {
       setSkinBusy(false);
     }

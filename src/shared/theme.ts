@@ -139,6 +139,66 @@ export const THEME_PRESETS: ThemePreset[] = [
     muted: "#5c6b7e",
     danger: "#c73e5b",
     glow: "#2f6fed"
+  }),
+  preset("obsidian", "Obsidian", "Обсидиан", {
+    background: "#090b0f",
+    sidebar: "#0d1016",
+    cards: "#12161f",
+    inputs: "#0b0e14",
+    borders: "#222a38",
+    buttons: "#161c27",
+    accent: "#22d3ee",
+    active: "#123846",
+    primary: "#0e7490",
+    text: "#edf5fa",
+    muted: "#8293a8",
+    danger: "#f43f5e",
+    glow: "#67e8f9"
+  }),
+  preset("sakura", "Sakura", "Сакура", {
+    background: "#130d14",
+    sidebar: "#19101b",
+    cards: "#221625",
+    inputs: "#150e17",
+    borders: "#452a49",
+    buttons: "#291a2d",
+    accent: "#f472b6",
+    active: "#5c2448",
+    primary: "#9d356f",
+    text: "#fdf2f8",
+    muted: "#b896ae",
+    danger: "#fb7185",
+    glow: "#fbcfe8"
+  }),
+  preset("crimson", "Crimson", "Кримсон", {
+    background: "#120b0d",
+    sidebar: "#180e11",
+    cards: "#211317",
+    inputs: "#150c0f",
+    borders: "#4a232b",
+    buttons: "#2a171c",
+    accent: "#ef4444",
+    active: "#5e1c24",
+    primary: "#991b2b",
+    text: "#fcf0f1",
+    muted: "#b58d94",
+    danger: "#f87171",
+    glow: "#fca5a5"
+  }),
+  preset("nordic", "Nordic", "Нордик", {
+    background: "#1b2028",
+    sidebar: "#202630",
+    cards: "#272e3a",
+    inputs: "#1d232c",
+    borders: "#3b4657",
+    buttons: "#2e3645",
+    accent: "#88c0d0",
+    active: "#324c5c",
+    primary: "#4c7a96",
+    text: "#eceff4",
+    muted: "#9aa7ba",
+    danger: "#bf616a",
+    glow: "#a3d5e6"
   })
 ];
 

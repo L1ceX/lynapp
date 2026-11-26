@@ -1,21 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import ReactGridLayout, { useContainerWidth, type Compactor, type Layout, type LayoutItem } from "react-grid-layout";
 import { GridBackground } from "react-grid-layout/extras";
 import { EyeOff } from "lucide-react";
+import { SmartGuidesOverlay } from "../components/SmartGuidesOverlay";
+import { snapGridWidth } from "../layout/boards";
+import { computeSmartGuides, type GridBox, type SmartGuidesResult } from "../layout/smartGuides";
 import { useApp } from "../state/context";
 import { HOME_COLS, HOME_MARGIN, HOME_ROW_HEIGHT, widgetMeta, type HomeWidgetId } from "./home/layout";
 import { HomeWidget } from "./home/widgets";
-
-function naturalHeight(node: HTMLElement): number {
-  const style = getComputedStyle(node);
-  const children = Array.from(node.children).filter((child): child is HTMLElement => child instanceof HTMLElement && child.offsetParent !== null);
-  const gap = parseFloat(style.rowGap) || 0;
-  const content = children.reduce((sum, child) => {
-    const scrolls = /(auto|scroll)/.test(getComputedStyle(child).overflowY);
-    return sum + (scrolls ? child.offsetHeight : Math.max(child.offsetHeight, child.scrollHeight));
-  }, 0) + gap * Math.max(0, children.length - 1);
-  return content + (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
-}
 
 const PUSH_DELAY_MS = 450;
 
@@ -52,10 +44,6 @@ function resolveCollisions<T extends LayoutItem>(items: T[], fixedId: string | n
   return items;
 }
 
-function rowsForHeight(height: number): number {
-  return Math.ceil((height + 2 + HOME_MARGIN[1]) / (HOME_ROW_HEIGHT + HOME_MARGIN[1]));
-}
-
 export function HomePage() {
   const { section } = useApp();
   return section === "home" ? <HomeContent /> : null;
@@ -64,37 +52,50 @@ export function HomePage() {
 function HomeContent() {
   const { changeHomeLayout, hideHomeWidget, layoutEditing, homeLayout, sectionExiting, t } = useApp();
   const { width, containerRef, mounted } = useContainerWidth();
+  const gridWidth = snapGridWidth(width, HOME_COLS, HOME_MARGIN[0]);
+  const [resizingSize, setResizingSize] = useState<{ id: string; w: number; h: number } | null>(null);
+  const [guideState, setGuideState] = useState<SmartGuidesResult | null>(null);
+  const shiftRef = useRef(false);
+  const resizeStartRef = useRef<GridBox | null>(null);
   const visible = useMemo(() => homeLayout.filter((item) => !item.hidden), [homeLayout]);
-  const [fits, setFits] = useState<Record<string, number>>({});
-  const observed = useRef(new Set<Element>());
-  const measure = useCallback(() => {
-    const next: Record<string, number> = {};
-    document.querySelectorAll<HTMLElement>(".home-widget[data-widget]").forEach((widget) => {
-      const body = widget.firstElementChild;
-      if (body instanceof HTMLElement && widget.dataset.widget) next[widget.dataset.widget] = rowsForHeight(naturalHeight(body));
-    });
-    setFits((current) => {
-      const keys = Object.keys(next);
-      if (keys.length === Object.keys(current).length && keys.every((key) => current[key] === next[key])) return current;
-      return next;
-    });
-  }, []);
-  const observer = useRef<ResizeObserver | null>(null);
-  if (observer.current === null && typeof ResizeObserver !== "undefined") observer.current = new ResizeObserver(() => measure());
-  useEffect(() => () => observer.current?.disconnect(), []);
-  useLayoutEffect(() => {
-    const current = new Set<Element>();
-    document.querySelectorAll(".home-widget[data-widget] > .widget-body").forEach((body) => current.add(body));
-    observed.current.forEach((body) => { if (!current.has(body)) observer.current?.unobserve(body); });
-    current.forEach((body) => { if (!observed.current.has(body)) observer.current?.observe(body); });
-    observed.current = current;
-    measure();
-  });
+  const colWidth = gridWidth > 0 ? (gridWidth - HOME_MARGIN[0] * (HOME_COLS - 1)) / HOME_COLS : 0;
+  const metrics = useMemo(() => ({
+    cols: HOME_COLS,
+    colWidth,
+    rowHeight: HOME_ROW_HEIGHT,
+    gapX: HOME_MARGIN[0],
+    gapY: HOME_MARGIN[1]
+  }), [colWidth]);
+
+  useEffect(() => {
+    if (!layoutEditing) {
+      shiftRef.current = false;
+      setGuideState(null);
+      return;
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      shiftRef.current = event.shiftKey;
+      if (event.shiftKey) setGuideState(null);
+    };
+    const onBlur = (): void => {
+      shiftRef.current = false;
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKey);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKey);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [layoutEditing]);
+
   const gridLayout = useMemo(() => resolveCollisions(visible.map((item) => {
     const meta = widgetMeta(item.i);
-    const fit = fits[item.i] ?? 0;
-    return { i: item.i, x: item.x, y: item.y, w: item.w, h: Math.max(item.h, fit), minW: meta?.minW, minH: Math.max(meta?.minH ?? 1, fit) };
-  }), null), [visible, fits]);
+    const minW = meta?.minW ?? 2;
+    const minH = meta?.minH ?? 2;
+    return { i: item.i, x: item.x, y: item.y, w: Math.max(item.w, minW), h: Math.max(item.h, minH), minW, minH };
+  }), null), [visible]);
   const active = useRef<ActiveMove | null>(null);
   const compactor = useMemo<Compactor>(() => ({
     type: null,
@@ -158,6 +159,8 @@ function HomeContent() {
       move.cleanup();
     }
     active.current = null;
+    resizeStartRef.current = null;
+    setGuideState(null);
     changeHomeLayout(layout);
   }
 
@@ -175,27 +178,71 @@ function HomeContent() {
         <div><span className="eyebrow">{t("Home", "Главная")}</span><h2>{t("Welcome back", "С возвращением")}</h2></div>
       </header>
       <div ref={containerRef} className={layoutEditing ? "home-board editing" : "home-board"}>
-        {mounted ? <>
-          {layoutEditing ? <GridBackground className="home-grid-bg" width={width} cols={HOME_COLS} rowHeight={HOME_ROW_HEIGHT} margin={HOME_MARGIN} containerPadding={[0, 0]} rows={rows} color="transparent" borderRadius={12} /> : null}
+        {mounted && gridWidth > 0 ? <div className="home-grid-stage" style={{ width: gridWidth } as CSSProperties}>
+          {layoutEditing ? <GridBackground className="home-grid-bg" width={gridWidth} cols={HOME_COLS} rowHeight={HOME_ROW_HEIGHT} margin={HOME_MARGIN} containerPadding={[0, 0]} rows={rows} color="transparent" borderRadius={12} /> : null}
           <ReactGridLayout
             className="home-grid"
-            width={width}
+            width={gridWidth}
             layout={gridLayout}
             compactor={compactor}
             gridConfig={{ cols: HOME_COLS, rowHeight: HOME_ROW_HEIGHT, margin: HOME_MARGIN, containerPadding: [0, 0] }}
             dragConfig={{ enabled: layoutEditing, threshold: 4, cancel: ".widget-hide" }}
-            resizeConfig={{ enabled: layoutEditing, handles: ["se"] }}
+            resizeConfig={{ enabled: layoutEditing, handles: ["n", "s", "e", "w", "ne", "nw", "se", "sw"] }}
             onDragStart={(layout, item, _next, _placeholder, event) => beginMove(layout, item, false, event)}
+            onDrag={(nextLayout, _old, newItem) => {
+              if (!newItem) return;
+              const others = nextLayout.filter((entry) => entry.i !== newItem.i);
+              setGuideState(computeSmartGuides(newItem, others, "drag", 0, shiftRef.current, metrics));
+            }}
             onDragStop={(layout) => endMove(layout)}
-            onResizeStart={(layout, item, _next, _placeholder, event) => beginMove(layout, item, true, event)}
-            onResizeStop={(layout) => endMove(layout)}
+            onResizeStart={(layout, item, _next, _placeholder, event) => {
+              beginMove(layout, item, true, event);
+              if (item) {
+                resizeStartRef.current = { i: item.i, x: item.x, y: item.y, w: item.w, h: item.h };
+                setResizingSize({ id: item.i, w: item.w, h: item.h });
+              }
+            }}
+            onResize={(nextLayout, oldItem, next, placeholder) => {
+              if (!next) return;
+              const others = nextLayout.filter((entry) => entry.i !== next.i);
+              const result = computeSmartGuides(next, others, "resize", 0, shiftRef.current, metrics, resizeStartRef.current ?? oldItem, 2, 2);
+              if (!shiftRef.current && result.snappedW) {
+                next.w = result.snapped.w;
+                next.x = result.snapped.x;
+                if (placeholder) {
+                  placeholder.w = result.snapped.w;
+                  placeholder.x = result.snapped.x;
+                }
+              }
+              setResizingSize({ id: next.i, w: result.snapped.w, h: result.snapped.h });
+              setGuideState(result);
+            }}
+            onResizeStop={(layout) => { setResizingSize(null); endMove(layout); }}
           >
-            {visible.map((item) => <div key={item.i} className="home-widget" data-widget={item.i}>
-              <HomeWidget id={item.i as HomeWidgetId} />
-              {layoutEditing ? <button type="button" className="widget-hide" onClick={() => hideHomeWidget(item.i)} title={t("Hide this block", "Скрыть блок")} aria-label={t("Hide this block", "Скрыть блок")}><EyeOff size={14} /></button> : null}
-            </div>)}
+            {visible.map((item) => {
+              const matched = Boolean(guideState?.matchedIds.includes(item.i));
+              const isResizingThis = layoutEditing && resizingSize?.id === item.i;
+              const snapH = isResizingThis && guideState?.snapHeightPx ? guideState.snapHeightPx : null;
+              const snapW = isResizingThis && guideState?.snapWidthPx ? guideState.snapWidthPx : null;
+              const widgetStyle: CSSProperties = {
+                ...(snapH ? { "--snap-h": `${snapH}px` } : {}),
+                ...(snapW ? { "--snap-w": `${snapW}px` } : {})
+              } as CSSProperties;
+              const widgetClasses = [
+                "home-widget",
+                matched ? "guide-matched" : "",
+                snapH ? "snap-lock-h" : "",
+                snapW ? "snap-lock-w" : ""
+              ].filter(Boolean).join(" ");
+              return <div key={item.i} className={widgetClasses} data-widget={item.i} style={widgetStyle}>
+                <HomeWidget id={item.i as HomeWidgetId} />
+                {isResizingThis && resizingSize ? <span className="widget-size-badge">{resizingSize.w} × {resizingSize.h}</span> : null}
+                {layoutEditing ? <button type="button" className="widget-hide" onClick={() => hideHomeWidget(item.i)} title={t("Hide this block", "Скрыть блок")} aria-label={t("Hide this block", "Скрыть блок")}><EyeOff size={14} /></button> : null}
+              </div>;
+            })}
           </ReactGridLayout>
-        </> : null}
+          {layoutEditing && guideState ? <SmartGuidesOverlay guides={guideState.guides} /> : null}
+        </div> : null}
       </div>
     </main>
   );

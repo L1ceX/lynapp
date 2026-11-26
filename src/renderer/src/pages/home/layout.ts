@@ -26,7 +26,7 @@ export const DEFAULT_HOME_LAYOUT: HomeWidgetLayout[] = [
   { i: "statRunning", x: 6, y: 3, w: 3, h: 2 },
   { i: "statActivity", x: 9, y: 3, w: 3, h: 2 },
   { i: "recent", x: 0, y: 5, w: 8, h: 5 },
-  { i: "launcher", x: 8, y: 5, w: 4, h: 4 }
+  { i: "launcher", x: 8, y: 5, w: 4, h: 5 }
 ];
 
 export function widgetMeta(id: string) {

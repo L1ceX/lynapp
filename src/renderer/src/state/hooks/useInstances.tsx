@@ -57,7 +57,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
       switchSection("instances");
       setMrpackProgress((current) => ({ ...current, [started.instance.id]: { done: 0, total: started.totalFiles } }));
       setInstanceStatus((current) => ({ ...current, [started.instance.id]: t(`Importing ${started.instance.name}... 0%`, `Импорт: ${started.instance.name}... 0%`) }));
-      setStatus(t(t(`Importing ${started.instance.name}... 0%`, `Импорт: ${started.instance.name}... 0%`), `Импорт: ${started.instance.name}... 0%`));
+      setStatus(t(`Importing ${started.instance.name}... 0%`, `Импорт: ${started.instance.name}... 0%`));
       try {
         await getLauncherApi().importMrpackFiles(started.instance.id);
         await refresh({ setReadyStatus: false });
@@ -266,16 +266,15 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     }
   }
 
-  async function launchSelected(quickPlay?: QuickPlayTarget | unknown): Promise<void> {
-    if (!selected || launchingIds.includes(selected.id)) return;
-    const targetId = selected.id;
-    const targetGameVersion = selected.gameVersion;
-    const qp = quickPlay && typeof quickPlay === "object" && "kind" in quickPlay && "value" in quickPlay ? (quickPlay as QuickPlayTarget) : undefined;
+  async function launchInstanceById(instance: LauncherInstance, quickPlay?: QuickPlayTarget): Promise<void> {
+    if (launchingIds.includes(instance.id)) return;
+    const targetId = instance.id;
+    const targetGameVersion = instance.gameVersion;
     setLaunchingIds((current) => [...current, targetId]);
-    setInstanceLogs(null);
+    if (selected?.id === targetId) setInstanceLogs(null);
     say(t(`Preparing ${targetGameVersion}...`, `Подготовка: ${targetGameVersion}...`), targetId);
     try {
-      const result = await getLauncherApi().launchInstance(targetId, qp);
+      const result = await getLauncherApi().launchInstance(targetId, quickPlay);
       say(result.message, targetId);
       await refresh({ setReadyStatus: false });
       await refreshRunning();
@@ -284,6 +283,12 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     } finally {
       setLaunchingIds((current) => current.filter((id) => id !== targetId));
     }
+  }
+
+  async function launchSelected(quickPlay?: QuickPlayTarget | unknown): Promise<void> {
+    if (!selected) return;
+    const qp = quickPlay && typeof quickPlay === "object" && "kind" in quickPlay && "value" in quickPlay ? (quickPlay as QuickPlayTarget) : undefined;
+    await launchInstanceById(selected, qp);
   }
 
   async function cancelSelected(): Promise<void> {
@@ -297,9 +302,7 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     }
   }
 
-  async function stopSelected(): Promise<void> {
-    if (!selected) return;
-    const targetId = selected.id;
+  async function stopInstanceById(targetId: string): Promise<void> {
     setBusy(true);
     try {
       const result = await getLauncherApi().stopInstance(targetId);
@@ -310,6 +313,11 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     } finally {
       setBusy(false);
     }
+  }
+
+  async function stopSelected(): Promise<void> {
+    if (!selected) return;
+    await stopInstanceById(selected.id);
   }
 
   async function refreshInstanceLogs(silent: boolean): Promise<void> {
@@ -481,6 +489,8 @@ export function useInstances(deps: Pick<CoreState, "assertNotLaunching" | "busy"
     removeSelected,
     duplicateSelected,
     openSelectedFolder,
+    launchInstanceById,
+    stopInstanceById,
     launchSelected,
     cancelSelected,
     stopSelected,

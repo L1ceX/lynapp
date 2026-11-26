@@ -1,22 +1,21 @@
 {
-  "name": "lynapp",
-  "version": "1.1.0-beta.5",
-  "productName": "lynapp",
+  "name": "lynapp-remaster",
+  "version": "2.0.0-beta.1",
   "private": true,
-  "description": "lynapp Minecraft launcher",
+  "description": "lynapp Minecraft launcher (Rust + Tauri 2)",
+  "author": "L1ceX <L1ceX@users.noreply.github.com>",
+  "homepage": "https://github.com/L1ceX/lynapp",
   "license": "MIT",
   "type": "module",
-  "main": "out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "tsc --noEmit && electron-vite build",
-    "start": "electron-vite preview",
-    "dist": "npm run build && electron-builder --win nsis portable",
-    "dist:portable": "npm run build && electron-builder --win portable",
-    "dist:setup": "npm run build && electron-builder --win nsis"
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
-    "electron-updater": "^6.8.9",
+    "@tauri-apps/api": "^2.9.0",
     "lucide-react": "1.24.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
@@ -24,77 +23,12 @@
     "skinview3d": "^3.4.2"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0",
     "@types/node": "26.1.1",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "^5.1.2",
-    "electron": "43.1.0",
-    "electron-builder": "^26.15.3",
-    "electron-vite": "^5.0.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.6"
-  },
-  "allowScripts": {
-    "electron@43.1.0": true,
-    "esbuild@0.25.12": true,
-    "esbuild@0.28.1": true
-  },
-  "build": {
-    "appId": "com.lynapp.launcher",
-    "productName": "lynapp",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "out/**",
-      "package.json"
-    ],
-    "asar": true,
-    "portable": {
-      "artifactName": "${productName}-portable-${version}.${ext}",
-      "requestExecutionLevel": "user"
-    },
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "L1ceX",
-        "repo": "lynapp"
-      }
-    ],
-    "nsis": {
-      "artifactName": "${productName}-setup-${version}.${ext}",
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "include": "build/installer.nsh",
-      "createDesktopShortcut": false,
-      "createStartMenuShortcut": true,
-      "shortcutName": "lynapp",
-      "uninstallDisplayName": "lynapp",
-      "deleteAppDataOnUninstall": false
-    },
-    "win": {
-      "icon": "build/icon.ico",
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
-    },
-    "extraResources": [
-      {
-        "from": "build/icon.ico",
-        "to": "icon.ico"
-      }
-    ]
   }
 }

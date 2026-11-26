@@ -147,7 +147,7 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
 
   const [updatingKeys, setUpdatingKeys] = useState<string[]>([]);
 
-  const [updateAllProgress, setUpdateAllProgress] = useState<{ done: number; total: number } | null>(null);
+  const [updateAllProgress, setUpdateAllProgress] = useState<{ instanceId: string; done: number; total: number } | null>(null);
 
   const updatingAllRef = useRef(false);
 
@@ -404,7 +404,7 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
     const queue = localContent.flatMap((item) => {
       const record = recordFor(item);
       const latest = updateInfo[contentKey(item.kind, item.fileName)]?.latest;
-      if (!record || !latest || seen.has(record.id)) return [];
+      if (!record || !latest || latest.distributionBlocked || seen.has(record.id)) return [];
       seen.add(record.id);
       return [{ item, record, version: latest }];
     });
@@ -413,13 +413,13 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
     let finished = 0;
     let done = 0;
     updatingAllRef.current = true;
-    setUpdateAllProgress({ done: 0, total });
+    setUpdateAllProgress({ instanceId, done: 0, total });
     say(t(`Updating 0 of ${total}...`, `Обновление: 0 из ${total}...`), instanceId);
     const worker = async (): Promise<void> => {
       for (let next = queue.shift(); next; next = queue.shift()) {
         if (await installVersion(next.item, next.record, next.version, false, instanceId)) done += 1;
         finished += 1;
-        setUpdateAllProgress({ done: finished, total });
+        setUpdateAllProgress({ instanceId, done: finished, total });
         say(t(`Updating ${finished} of ${total}...`, `Обновление: ${finished} из ${total}...`), instanceId);
       }
     };
@@ -773,8 +773,23 @@ export function useContent(deps: Pick<CoreState & InstancesState, "assertNotLaun
 
   useEffect(() => {
     if (instanceTab !== "files" || !selectedId) return;
+    const id = selectedId;
+    const seq = ++localSeqRef.current;
+    let stale = false;
     setLocalContent(null);
-    void refreshLocalContent();
+    void getLauncherApi().getLocalContent(id).then((list) => {
+      if (!stale && selectedIdRef.current === id && localSeqRef.current === seq) {
+        setLocalContent(list);
+      }
+    }).catch((error) => {
+      if (!stale && selectedIdRef.current === id && localSeqRef.current === seq) {
+        setLocalContent([]);
+        setStatus(cleanIpcError(error, t("Failed to read instance files", "Не удалось прочитать файлы инстанции")));
+      }
+    });
+    return () => {
+      stale = true;
+    };
   }, [instanceTab, selectedId]);
 
   useEffect(() => {

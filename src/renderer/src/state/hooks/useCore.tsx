@@ -92,7 +92,7 @@ export function useCore() {
 
   useEffect(() => {
     return getLauncherApi().onUpdateStatus((status) => {
-      if (status.kind === "error") {
+      if (status.kind === "up-to-date") {
         setUpdate(null);
         return;
       }
@@ -192,7 +192,25 @@ export function useCore() {
     const next = await getLauncherApi().getBootstrap();
     setBootstrap(next);
     setSettingsDraft(next.settings);
-    setSelectedId((current) => current && next.instances.some((item) => item.id === current) ? current : (next.activeInstanceId ?? next.instances[0]?.id ?? null));
+    setSelectedId((current) => {
+      if (current && next.instances.some((item) => item.id === current)) {
+        return current;
+      }
+      if (!next.instances.length) {
+        return null;
+      }
+      const played = next.instances.filter((item) => Boolean(item.lastPlayedAt));
+      if (played.length) {
+        const latestPlayed = [...played].sort((a, b) => (b.lastPlayedAt ?? "").localeCompare(a.lastPlayedAt ?? ""))[0];
+        const active = next.activeInstanceId ? next.instances.find((item) => item.id === next.activeInstanceId) : undefined;
+        if (active && (active.lastPlayedAt ?? active.createdAt ?? "") > (latestPlayed.lastPlayedAt ?? "")) {
+          return active.id;
+        }
+        return latestPlayed.id;
+      }
+      const latestUpdated = [...next.instances].sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))[0];
+      return latestUpdated?.id ?? next.activeInstanceId ?? next.instances[0]?.id ?? null;
+    });
     if (options?.setReadyStatus !== false) setStatus("");
   }, []);
 
@@ -219,7 +237,7 @@ export function useCore() {
   const totalMods = useMemo(() => (bootstrap?.instances ?? []).reduce((sum, item) => sum + (item.mods?.length ?? 0), 0), [bootstrap?.instances]);
 
   const lastActivity = useMemo(() => {
-    const stamps = (bootstrap?.instances ?? []).map((item) => item.updatedAt ?? "").filter(Boolean);
+    const stamps = (bootstrap?.instances ?? []).flatMap((item) => [item.lastPlayedAt ?? "", item.updatedAt ?? ""]).filter(Boolean);
     if (!stamps.length) return "";
     return formatRelative(stamps.sort().reverse()[0], lang);
   }, [bootstrap?.instances, lang]);

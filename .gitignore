@@ -1,7 +1,10 @@
 node_modules
-out
 dist
+out
 release
+src-tauri/target
 .env
 *.log
 *.tsbuildinfo
+dev.bat
+build.bat

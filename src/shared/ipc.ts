@@ -1,11 +1,14 @@
 import type {
   AccountsState,
+  AddCustomFontResult,
   ContentImportResult,
   ContentUpdateInfo,
+  CustomFontInfo,
   ExternalImportProgress,
   ExternalImportResult,
   ExternalLauncher,
   GameVersionInfo,
+  GoogleFontInfo,
   ModInstallPlan,
   ModProjectDetails,
   ModVersionInfo,
@@ -114,7 +117,13 @@ export const IPC = {
   equipCape: "skins:equip-cape",
   updaterDownload: "updater:download",
   updaterInstall: "updater:install",
-  updaterStatus: "updater:status"
+  updaterStatus: "updater:status",
+  listCustomFonts: "fonts:list",
+  addCustomFont: "fonts:add",
+  removeCustomFont: "fonts:remove",
+  openFontsFolder: "fonts:open-folder",
+  listSystemFonts: "fonts:system",
+  listGoogleFonts: "fonts:google"
 } as const;
 
 export interface CreateInstancePayload {
@@ -328,6 +337,12 @@ export interface LauncherApi {
   activateSkin(id: string): Promise<SkinActivateResult>;
   listCapes(): Promise<CapeInfo[]>;
   equipCape(capeId: string | null): Promise<CapeInfo[]>;
+  listCustomFonts(): Promise<CustomFontInfo[]>;
+  addCustomFont(): Promise<AddCustomFontResult | null>;
+  removeCustomFont(fileName: string): Promise<CustomFontInfo[]>;
+  openFontsFolder(): Promise<string>;
+  listSystemFonts(): Promise<string[]>;
+  listGoogleFonts(): Promise<GoogleFontInfo[]>;
   downloadUpdate(): Promise<void>;
   installUpdate(): Promise<void>;
   onUpdateStatus(listener: (status: UpdateStatus) => void): () => void;
