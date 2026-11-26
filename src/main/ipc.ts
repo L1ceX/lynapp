@@ -24,7 +24,7 @@ import { CurseForgeService, curseForgeAvailable } from "./services/curseforge";
 import { ServerService } from "./services/servers";
 import { WorldService } from "./services/worlds";
 import { addCustomFont, listCustomFonts, listGoogleFonts, listSystemFonts, openFontsFolder, removeCustomFont } from "./services/fonts";
-import { downloadUpdate, installUpdate, setBetaUpdates } from "./updater";
+import { checkForUpdates, configureUpdater, downloadUpdate, installUpdate } from "./updater";
 import { createThrottledEmitter } from "./services/transfer";
 
 const INSTANCE_FOLDERS: Record<InstanceFolder, string> = {
@@ -62,7 +62,7 @@ export function registerIpcHandlers(): void {
     }
     discord.applySettings(data.settings);
   }).catch(() => undefined);
-  void store.getData().then((data) => setBetaUpdates(data.settings.betaUpdates)).catch(() => undefined);
+  void store.getData().then((data) => configureUpdater(data.settings.betaUpdates, data.settings.updateEdition)).catch(() => undefined);
   setInterval(() => {
     if (!discord.hasSessions()) return;
     void instances.getRunning().then((running) => discord.syncRunning(running)).catch(() => undefined);
@@ -89,6 +89,8 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.bootstrap, async () => {
     const data = await store.getData();
+    configureUpdater(data.settings.betaUpdates, data.settings.updateEdition);
+    void checkForUpdates();
     return {
       settings: data.settings,
       instances: data.instances,
@@ -229,7 +231,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.openFontsFolder, () => openFontsFolder());
   ipcMain.handle(IPC.listSystemFonts, () => listSystemFonts());
   ipcMain.handle(IPC.listGoogleFonts, () => listGoogleFonts());
-  ipcMain.handle(IPC.updaterDownload, () => downloadUpdate());
+  ipcMain.handle(IPC.updaterDownload, (_event, edition?: "tauri" | "electron") => downloadUpdate(edition));
   ipcMain.handle(IPC.updaterInstall, () => installUpdate());
   ipcMain.handle(IPC.windowMinimize, (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();
@@ -294,7 +296,7 @@ export function registerIpcHandlers(): void {
       return data.settings;
     });
     discord.applySettings(settings);
-    setBetaUpdates(settings.betaUpdates);
+    configureUpdater(settings.betaUpdates, settings.updateEdition);
     return settings;
   });
 

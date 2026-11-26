@@ -32,7 +32,7 @@ interface ModrinthVersion {
   dependencies?: ModrinthDependencyRef[];
 }
 
-const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.6" };
+const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.7" };
 
 async function fetchModrinth(input: string | URL, init: RequestInit = {}, timeoutMs = 12000): Promise<Response> {
   const headers = { ...modrinthHeaders, ...(init.headers as Record<string, string> | undefined) };
@@ -205,7 +205,7 @@ export async function targetDirectories(instance: LauncherInstance, projectType:
 }
 
 async function downloadFile(url: string, target: string, onBytes?: BytesCallback): Promise<void> {
-  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp/1.1.0-beta.6" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
+  const { buffer } = await readUrlBytes(url, { "User-Agent": "lynapp/1.1.0-beta.7" }, undefined, (received, total) => onBytes?.(received, total), 15 * 60 * 1000);
   await writeFile(target, buffer);
 }
 

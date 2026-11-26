@@ -706,14 +706,20 @@ input[type="range"]:disabled { opacity: .4; cursor: not-allowed; }
 .font-search-box,
 .font-mini-chip,
 .font-option,
-.font-custom-row { background: var(--lg-field); border-color: var(--lg-hairline); }
+.font-custom-row,
+.update-edition-card,
+.widget-edition-btn { background: var(--lg-field); border-color: var(--lg-hairline); }
 .font-mini-chip:hover:not(:disabled),
 .font-option:hover:not(:disabled),
-.font-custom-row:hover { background: var(--lg-btn-hover); border-color: color-mix(in srgb, var(--t-accent), var(--lg-hairline) 45%); }
+.font-custom-row:hover,
+.update-edition-card:hover:not(:disabled),
+.widget-edition-btn:hover:not(:disabled) { background: var(--lg-btn-hover); border-color: color-mix(in srgb, var(--t-accent), var(--lg-hairline) 45%); }
 .font-chip.active,
 .font-mini-chip.active,
 .font-option.active,
-.font-custom-row.active { background: color-mix(in srgb, var(--t-accent), transparent 80%); border-color: color-mix(in srgb, var(--t-accent), white 14%); }
+.font-custom-row.active,
+.update-edition-card.active,
+.widget-edition-btn.active { background: color-mix(in srgb, var(--t-accent), transparent 80%); border-color: color-mix(in srgb, var(--t-accent), white 14%); }
 .font-search-clear,
 .font-custom-pick,
 .font-custom-pick:hover:not(:disabled) { background: transparent; border-color: transparent; box-shadow: none; }
