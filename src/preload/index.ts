@@ -53,6 +53,7 @@ const api: LauncherApi = {
   openFontsFolder: () => ipcRenderer.invoke(IPC.openFontsFolder),
   listSystemFonts: () => ipcRenderer.invoke(IPC.listSystemFonts),
   listGoogleFonts: () => ipcRenderer.invoke(IPC.listGoogleFonts),
+  checkUpdates: (force) => ipcRenderer.invoke(IPC.updaterCheck, force),
   downloadUpdate: (edition) => ipcRenderer.invoke(IPC.updaterDownload, edition),
   installUpdate: () => ipcRenderer.invoke(IPC.updaterInstall),
   onUpdateStatus: (listener) => {

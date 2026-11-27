@@ -10,6 +10,7 @@ import { tr } from "./i18n";
 import { getLauncherRoot } from "./paths";
 
 const GITHUB_RELEASES_URL = "https://api.github.com/repos/L1ceX/lynapp/releases?per_page=30";
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 interface GhAsset {
   name: string;
@@ -37,6 +38,9 @@ let allowBeta: boolean | null = null;
 let preferredEdition: UpdateEdition = "electron";
 let checking = false;
 let downloading = false;
+let cachedReleases: GhRelease[] = [];
+let fetchedAt = 0;
+let lastStatus: UpdateStatus | null = null;
 let pendingTauri: PendingRelease | null = null;
 let pendingElectron: PendingRelease | null = null;
 let downloadedPath: string | null = null;
@@ -121,26 +125,64 @@ function summary(item: PendingRelease | null): UpdateReleaseInfo | null {
   return item ? { version: item.version, prerelease: item.prerelease } : null;
 }
 
-function send(status: UpdateStatus): void {
+function selectBestReleases(releases: GhRelease[], beta: boolean): { bestTauri: PendingRelease | null; bestElectron: PendingRelease | null } {
+  let bestTauri: PendingRelease | null = null;
+  let bestElectron: PendingRelease | null = null;
+  for (const rel of releases) {
+    if (rel.draft) continue;
+    const ver = rel.tag_name.replace(/^v/i, "");
+    const parsed = parseSemver(ver);
+    if (!parsed) continue;
+    const isPre = rel.prerelease || parsed[3] !== null;
+    if (!beta && isPre) continue;
+    const candidate = toPending(rel);
+    if (parsed[0] >= 2) {
+      if (!bestTauri || compareSemver(candidate.version, bestTauri.version) > 0) {
+        bestTauri = candidate;
+      }
+    } else if (parsed[0] === 1) {
+      if (!bestElectron || compareSemver(candidate.version, bestElectron.version) > 0) {
+        bestElectron = candidate;
+      }
+    }
+  }
+  return { bestTauri, bestElectron };
+}
+
+function buildStatus(edition: UpdateEdition, bestTauri: PendingRelease | null, bestElectron: PendingRelease | null): UpdateStatus {
+  const lt = summary(bestTauri);
+  const le = summary(bestElectron);
+  if (edition === "tauri") {
+    if (bestTauri) {
+      return { kind: "available", edition: "tauri", version: bestTauri.version, latestTauri: lt, latestElectron: le };
+    }
+    return { kind: "up-to-date", edition: "tauri", latestTauri: lt, latestElectron: le };
+  }
+  if (bestElectron && compareSemver(bestElectron.version, app.getVersion()) > 0) {
+    return { kind: "available", edition: "electron", version: bestElectron.version, latestTauri: lt, latestElectron: le };
+  }
+  return { kind: "up-to-date", edition: "electron", latestTauri: lt, latestElectron: le };
+}
+
+function send(status: UpdateStatus): UpdateStatus {
+  lastStatus = status;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(IPC.updaterStatus, status);
   }
+  return status;
 }
 
 export function setupAutoUpdater(window: BrowserWindow): void {
   mainWindow = window;
-  if (allowBeta !== null) {
-    void checkForUpdates();
-  }
 }
 
-export function configureUpdater(beta: boolean, edition?: UpdateEdition): void {
+export function configureUpdater(beta: boolean, edition?: UpdateEdition, triggerCheck = true): void {
   const nextEdition: UpdateEdition = edition === "tauri" ? "tauri" : "electron";
   const changed = allowBeta !== beta || preferredEdition !== nextEdition;
   allowBeta = beta;
   preferredEdition = nextEdition;
-  if (changed && mainWindow) {
-    void checkForUpdates();
+  if (changed && triggerCheck && mainWindow) {
+    void checkForUpdates(false);
   }
 }
 
@@ -148,16 +190,27 @@ export function setBetaUpdates(enabled: boolean): void {
   configureUpdater(enabled, preferredEdition);
 }
 
-export async function checkForUpdates(): Promise<void> {
-  if (!mainWindow || allowBeta === null || checking || downloading) {
-    return;
+export async function checkForUpdates(force = false): Promise<UpdateStatus | null> {
+  if (!mainWindow || allowBeta === null) {
+    return lastStatus;
+  }
+  if (downloading) {
+    return lastStatus ? send(lastStatus) : null;
+  }
+  const cacheFresh = !force && cachedReleases.length > 0 && Date.now() - fetchedAt < CACHE_TTL_MS;
+  if (cacheFresh && !checking) {
+    const { bestTauri, bestElectron } = selectBestReleases(cachedReleases, allowBeta);
+    pendingTauri = bestTauri;
+    pendingElectron = bestElectron;
+    return send(buildStatus(preferredEdition, bestTauri, bestElectron));
+  }
+  if (checking) {
+    return lastStatus;
   }
   checking = true;
-  const beta = allowBeta;
-  const edition = preferredEdition;
   send({
     kind: "checking",
-    edition,
+    edition: preferredEdition,
     latestTauri: summary(pendingTauri),
     latestElectron: summary(pendingElectron)
   });
@@ -172,62 +225,28 @@ export async function checkForUpdates(): Promise<void> {
     });
     if (!resp.ok) {
       checking = false;
-      send({
+      return send({
         kind: "error",
-        edition,
+        edition: preferredEdition,
         message: tr(`Update server returned HTTP ${resp.status}`, `Сервер обновлений вернул HTTP ${resp.status}`),
         latestTauri: summary(pendingTauri),
         latestElectron: summary(pendingElectron)
       });
-      return;
     }
     const releases = (await resp.json()) as GhRelease[];
-    let bestTauri: PendingRelease | null = null;
-    let bestElectron: PendingRelease | null = null;
-    for (const rel of releases) {
-      if (rel.draft) continue;
-      const ver = rel.tag_name.replace(/^v/i, "");
-      const parsed = parseSemver(ver);
-      if (!parsed) continue;
-      const isPre = rel.prerelease || parsed[3] !== null;
-      if (!beta && isPre) continue;
-      const candidate = toPending(rel);
-      if (parsed[0] >= 2) {
-        if (!bestTauri || compareSemver(candidate.version, bestTauri.version) > 0) {
-          bestTauri = candidate;
-        }
-      } else if (parsed[0] === 1) {
-        if (!bestElectron || compareSemver(candidate.version, bestElectron.version) > 0) {
-          bestElectron = candidate;
-        }
-      }
-    }
-
+    cachedReleases = releases;
+    fetchedAt = Date.now();
+    const { bestTauri, bestElectron } = selectBestReleases(cachedReleases, allowBeta ?? false);
     pendingTauri = bestTauri;
     pendingElectron = bestElectron;
     downloadedPath = null;
     checking = false;
-
-    const lt = summary(bestTauri);
-    const le = summary(bestElectron);
-    if (edition === "tauri") {
-      if (bestTauri) {
-        send({ kind: "available", edition: "tauri", version: bestTauri.version, latestTauri: lt, latestElectron: le });
-      } else {
-        send({ kind: "up-to-date", edition: "tauri", latestTauri: lt, latestElectron: le });
-      }
-      return;
-    }
-    if (bestElectron && compareSemver(bestElectron.version, app.getVersion()) > 0) {
-      send({ kind: "available", edition: "electron", version: bestElectron.version, latestTauri: lt, latestElectron: le });
-    } else {
-      send({ kind: "up-to-date", edition: "electron", latestTauri: lt, latestElectron: le });
-    }
+    return send(buildStatus(preferredEdition, bestTauri, bestElectron));
   } catch (error) {
     checking = false;
-    send({
+    return send({
       kind: "error",
-      edition,
+      edition: preferredEdition,
       message: error instanceof Error ? error.message : String(error),
       latestTauri: summary(pendingTauri),
       latestElectron: summary(pendingElectron)

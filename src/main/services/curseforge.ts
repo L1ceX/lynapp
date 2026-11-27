@@ -17,7 +17,7 @@ const MINECRAFT_GAME_ID = 432;
 const BUILTIN_API_KEY = String(import.meta.env.MAIN_VITE_CURSEFORGE_API_KEY ?? "").trim();
 
 export const curseForgeAvailable = BUILTIN_API_KEY.length > 0;
-const USER_AGENT = "lynapp/1.1.0-beta.7";
+const USER_AGENT = "lynapp/1.1.0-beta.8";
 
 const CLASS_IDS: Record<ModrinthProjectType, number> = {
   mod: 6,

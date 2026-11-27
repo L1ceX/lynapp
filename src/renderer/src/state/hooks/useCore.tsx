@@ -91,10 +91,24 @@ export function useCore() {
   }, []);
 
   useEffect(() => {
-    return getLauncherApi().onUpdateStatus((status) => {
+    const unsub = getLauncherApi().onUpdateStatus((status) => {
       setUpdate(status);
     });
+    void getLauncherApi().checkUpdates(false).then((status) => {
+      if (status) setUpdate(status);
+    }).catch(() => undefined);
+    return unsub;
   }, []);
+
+  async function checkLauncherUpdates(): Promise<void> {
+    if (update?.kind === "checking" || update?.kind === "downloading") return;
+    try {
+      const next = await getLauncherApi().checkUpdates(true);
+      if (next) setUpdate(next);
+    } catch (error) {
+      setStatus(cleanIpcError(error, t("Update check failed", "Ошибка проверки обновлений")));
+    }
+  }
 
   async function downloadUpdate(edition?: UpdateEdition): Promise<void> {
     if (update?.kind === "downloading") return;
@@ -318,6 +332,7 @@ export function useCore() {
     setMaximized,
     update,
     setUpdate,
+    checkLauncherUpdates,
     setUpdateEdition,
     downloadUpdate,
     installUpdate,

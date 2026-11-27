@@ -245,7 +245,7 @@ async function downloadFile(url: string, filePath: string, expectedSha1?: string
     throw new Error(tr(`Missing download URL for ${path.basename(filePath)}`, `Отсутствует ссылка для загрузки ${path.basename(filePath)}`));
   }
 
-  const { buffer } = await readUrlBytes(url, { "user-agent": "lynapp/1.1.0-beta.7" }, signal, (received, total) => onBytes?.(received, total), timeoutMs);
+  const { buffer } = await readUrlBytes(url, { "user-agent": "lynapp/1.1.0-beta.8" }, signal, (received, total) => onBytes?.(received, total), timeoutMs);
   if (expectedSha1 && createHash("sha1").update(buffer).digest("hex").toLowerCase() !== expectedSha1.toLowerCase()) {
     throw new Error(tr(`Downloaded file checksum mismatch: ${filePath}`, `Контрольная сумма скачанного файла не совпадает: ${filePath}`));
   }
@@ -318,7 +318,7 @@ async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
   const response = await fetch(url, {
     signal,
     headers: {
-      "user-agent": "lynapp/1.1.0-beta.7"
+      "user-agent": "lynapp/1.1.0-beta.8"
     }
   });
 
@@ -387,7 +387,7 @@ async function getCachedLoaderVersions(key: string, loader: () => Promise<string
 
 async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.1.0-beta.7" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.8" }
   });
   if (response.status === 400 || response.status === 404) {
     return [];
@@ -401,7 +401,7 @@ async function listFabricLoaderVersions(gameVersion: string): Promise<string[]> 
 
 async function listQuiltLoaderVersions(gameVersion: string): Promise<string[]> {
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
-    headers: { "user-agent": "lynapp/1.1.0-beta.7" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.8" }
   });
   if (response.status === 400 || response.status === 404) {
     return [];
@@ -443,7 +443,7 @@ function isGameVersionAtLeast(version: string, major: number, minor: number, pat
 async function getFabricGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.fabricmc.net/v2/versions/game", {
-      headers: { "user-agent": "lynapp/1.1.0-beta.7" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.8" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -456,7 +456,7 @@ async function getFabricGameVersions(): Promise<string[]> {
 async function getQuiltGameVersions(): Promise<string[]> {
   try {
     const response = await fetch("https://meta.quiltmc.org/v3/versions/game", {
-      headers: { "user-agent": "lynapp/1.1.0-beta.7" }
+      headers: { "user-agent": "lynapp/1.1.0-beta.8" }
     });
     if (!response.ok) return [];
     const list = (await response.json()) as Array<{ version?: string }>;
@@ -780,7 +780,7 @@ async function getManifest(): Promise<VersionManifest> {
   try {
     const response = await fetch(versionManifestUrl, {
       headers: {
-        "user-agent": "lynapp/1.1.0-beta.7"
+        "user-agent": "lynapp/1.1.0-beta.8"
       }
     });
     if (!response.ok) {
@@ -932,7 +932,7 @@ async function getFabricLoaderVersion(requested?: string, signal?: AbortSignal):
 
   const response = await fetch("https://meta.fabricmc.net/v2/versions/loader", {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.7" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.8" }
   });
   if (!response.ok) {
     throw new Error(tr(`Fabric loader versions returned ${response.status}`, `Сервер Fabric вернул ошибку при загрузке версий: ${response.status}`));
@@ -963,7 +963,7 @@ async function getQuiltLoaderVersion(gameVersion: string, requested?: string, si
 
   const response = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${gameVersion}`, {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.7" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.8" }
   });
   if (!response.ok) {
     throw new Error(tr(`Quilt loader versions returned ${response.status}`, `Сервер Quilt вернул ошибку при загрузке версий: ${response.status}`));
@@ -1465,7 +1465,7 @@ function buildLaunchArgs(
     version_type: version.type,
     natives_directory: paths.nativesDir,
     launcher_name: "lynapp",
-        launcher_version: "1.1.0-beta.7",
+        launcher_version: "1.1.0-beta.8",
     classpath: paths.classpath,
     classpath_separator: path.delimiter,
     library_directory: getLibrariesRoot(),
@@ -1501,7 +1501,7 @@ async function ensureAuthlibInjector(signal?: AbortSignal): Promise<string> {
   }
   const response = await fetch("https://api.github.com/repos/yushijinhun/authlib-injector/releases/latest", {
     signal,
-    headers: { "user-agent": "lynapp/1.1.0-beta.7", accept: "application/vnd.github+json" }
+    headers: { "user-agent": "lynapp/1.1.0-beta.8", accept: "application/vnd.github+json" }
   });
   if (!response.ok) {
     throw new Error(tr(`authlib-injector release lookup failed (HTTP ${response.status})`, `Не удалось найти выпуск authlib-injector (HTTP ${response.status})`));
@@ -1518,7 +1518,7 @@ async function ensureAuthlibInjector(signal?: AbortSignal): Promise<string> {
 async function isElyAuthAvailable(signal?: AbortSignal): Promise<boolean> {
   const timeout = AbortSignal.timeout(7000);
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  const headers = { "user-agent": "lynapp/1.1.0-beta.7" };
+  const headers = { "user-agent": "lynapp/1.1.0-beta.8" };
   try {
     const root = await fetch("https://ely.by/", { signal: combined, headers });
     if (!root.ok) return false;

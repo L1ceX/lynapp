@@ -62,7 +62,7 @@ export function registerIpcHandlers(): void {
     }
     discord.applySettings(data.settings);
   }).catch(() => undefined);
-  void store.getData().then((data) => configureUpdater(data.settings.betaUpdates, data.settings.updateEdition)).catch(() => undefined);
+  void store.getData().then((data) => configureUpdater(data.settings.betaUpdates, data.settings.updateEdition, false)).catch(() => undefined);
   setInterval(() => {
     if (!discord.hasSessions()) return;
     void instances.getRunning().then((running) => discord.syncRunning(running)).catch(() => undefined);
@@ -89,8 +89,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.bootstrap, async () => {
     const data = await store.getData();
-    configureUpdater(data.settings.betaUpdates, data.settings.updateEdition);
-    void checkForUpdates();
+    configureUpdater(data.settings.betaUpdates, data.settings.updateEdition, false);
     return {
       settings: data.settings,
       instances: data.instances,
@@ -231,6 +230,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.openFontsFolder, () => openFontsFolder());
   ipcMain.handle(IPC.listSystemFonts, () => listSystemFonts());
   ipcMain.handle(IPC.listGoogleFonts, () => listGoogleFonts());
+  ipcMain.handle(IPC.updaterCheck, async (_event, force?: boolean) => {
+    const data = await store.getData();
+    configureUpdater(data.settings.betaUpdates, data.settings.updateEdition, false);
+    return checkForUpdates(Boolean(force));
+  });
   ipcMain.handle(IPC.updaterDownload, (_event, edition?: "tauri" | "electron") => downloadUpdate(edition));
   ipcMain.handle(IPC.updaterInstall, () => installUpdate());
   ipcMain.handle(IPC.windowMinimize, (event) => {

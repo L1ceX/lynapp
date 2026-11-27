@@ -35,7 +35,7 @@ const kindAllowsDirectories: Record<LocalContentKind, boolean> = {
 const disabledSuffix = ".disabled";
 const kindOrder: LocalContentKind[] = ["mod", "resourcepack", "shader", "datapack"];
 
-const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.7" };
+const modrinthHeaders = { "User-Agent": "lynapp/1.1.0-beta.8" };
 const unknownRecheckMs = 3 * 24 * 60 * 60 * 1000;
 
 interface HashCacheEntry {
@@ -1174,7 +1174,7 @@ export class ContentService {
 
     try {
       const response = await fetch(`https://api.modrinth.com/v2/project/${ref}`, {
-        headers: { "User-Agent": "lynapp/1.1.0-beta.7" }
+        headers: { "User-Agent": "lynapp/1.1.0-beta.8" }
       });
 
       if (!response.ok) {
