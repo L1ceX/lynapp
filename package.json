@@ -1,6 +1,6 @@
 {
   "name": "lynapp-remaster",
-  "version": "2.0.0-beta.2",
+  "version": "2.0.0-beta.3",
   "private": true,
   "description": "lynapp Minecraft launcher (Rust + Tauri 2)",
   "author": "L1ceX <L1ceX@users.noreply.github.com>",

@@ -192,6 +192,7 @@ pub fn run() {
             commands::activate_skin,
             commands::list_capes,
             commands::equip_cape,
+            commands::updater_check,
             commands::updater_download,
             commands::updater_install,
             commands::list_custom_fonts,

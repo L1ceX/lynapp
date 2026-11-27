@@ -162,6 +162,7 @@ const tauriApi: LauncherApi = {
   openFontsFolder: () => invoke<string>("open_fonts_folder"),
   listSystemFonts: () => invoke<string[]>("list_system_fonts"),
   listGoogleFonts: () => invoke<GoogleFontInfo[]>("list_google_fonts"),
+  checkUpdates: (force?: boolean) => invoke<UpdateStatus | null>("updater_check", { force: force ?? false }),
   downloadUpdate: (edition?: UpdateEdition) => invoke<void>("updater_download", { edition: edition ?? null }),
   installUpdate: () => invoke<void>("updater_install"),
   onUpdateStatus: (listener: (status: UpdateStatus) => void) => subscribe("updater:status", listener),

@@ -116,6 +116,7 @@ export const IPC = {
   activateSkin: "skins:activate",
   listCapes: "skins:capes",
   equipCape: "skins:equip-cape",
+  updaterCheck: "updater:check",
   updaterDownload: "updater:download",
   updaterInstall: "updater:install",
   updaterStatus: "updater:status",
@@ -344,6 +345,7 @@ export interface LauncherApi {
   openFontsFolder(): Promise<string>;
   listSystemFonts(): Promise<string[]>;
   listGoogleFonts(): Promise<GoogleFontInfo[]>;
+  checkUpdates(force?: boolean): Promise<UpdateStatus | null>;
   downloadUpdate(edition?: UpdateEdition): Promise<void>;
   installUpdate(): Promise<void>;
   onUpdateStatus(listener: (status: UpdateStatus) => void): () => void;

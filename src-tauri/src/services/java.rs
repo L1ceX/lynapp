@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub const MANAGED_MAJORS: [u32; 4] = [25, 21, 17, 8];
-const USER_AGENT: &str = "lynapp/2.0.0-beta.2";
+const USER_AGENT: &str = "lynapp/2.0.0-beta.3";
 
 static VERSION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"version\s+"(\d+)(?:\.(\d+))?"#).unwrap());

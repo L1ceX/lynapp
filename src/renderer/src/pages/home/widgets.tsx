@@ -81,7 +81,7 @@ function AccountWidget() {
 }
 
 function LauncherWidget() {
-  const { bootstrap, downloadUpdate, installUpdate, settingsDraft, setSettingFlag, setUpdateEdition, t, update } = useApp();
+  const { bootstrap, checkLauncherUpdates, downloadUpdate, installUpdate, settingsDraft, setSettingFlag, setUpdateEdition, t, update } = useApp();
   const beta = settingsDraft.betaUpdates ?? false;
   const runningEdition = bootstrap.appVersion.startsWith("2.") ? "tauri" : "electron";
   const selectedEdition = settingsDraft.updateEdition ?? runningEdition;
@@ -104,6 +104,7 @@ function LauncherWidget() {
               : update?.kind === "checking" ? <span className="muted"><RefreshCw size={14} className="spin" /> {t("Checking for updates...", "Проверка обновлений...")}</span>
                 : update?.kind === "error" ? <span className="muted" title={update.message}><CircleAlert size={14} /> {t("Update failed", "Ошибка обновления")}</span>
                   : <span className="muted"><CheckCircle2 size={14} /> {t("You have the latest version", "Установлена последняя версия")}</span>}
+        <button type="button" className="update-refresh-btn" onClick={() => void checkLauncherUpdates()} disabled={update?.kind === "checking" || update?.kind === "downloading"} title={t("Check for updates", "Проверить обновления")} aria-label={t("Check for updates", "Проверить обновления")}><RefreshCw size={14} className={update?.kind === "checking" ? "spin" : undefined} /></button>
       </div>
       <div className="filter-row widget-beta"><strong>{t("Beta versions", "Бета-версии")}</strong><button type="button" className="switch" role="switch" aria-checked={beta} aria-label={t("Beta versions", "Бета-версии")} onClick={() => void setSettingFlag("betaUpdates", !beta)}><span className="knob" /></button></div>
     </div>

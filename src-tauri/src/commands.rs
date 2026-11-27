@@ -63,7 +63,6 @@ pub struct AppState {
 
 #[tauri::command]
 pub async fn launcher_bootstrap(
-    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<BootstrapState, String> {
     state.store.reconcile_instances().await;
@@ -72,13 +71,6 @@ pub async fn launcher_bootstrap(
         .discord
         .apply_settings(data.settings.discord_presence, data.settings.discord_hide_instance)
         .await;
-    let updater = state.updater.clone();
-    let app_upd = app.clone();
-    let allow_beta = data.settings.beta_updates;
-    let edition = data.settings.update_edition.clone();
-    tokio::spawn(async move {
-        updater.check(&app_upd, allow_beta, edition.as_deref()).await;
-    });
     let extra = vec![data.settings.java_path.clone()];
     let java_candidates = tokio::task::spawn_blocking(move || java::list_candidate_paths(&extra))
         .await
@@ -972,6 +964,24 @@ pub async fn equip_cape(
     cape_id: Option<String>,
 ) -> Result<Vec<CapeInfo>, String> {
     state.skins.equip_cape(cape_id).await
+}
+
+#[tauri::command]
+pub async fn updater_check(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    force: Option<bool>,
+) -> Result<Value, String> {
+    let settings = state.store.get_data().await.settings;
+    Ok(state
+        .updater
+        .check_with_options(
+            &app,
+            settings.beta_updates,
+            settings.update_edition.as_deref(),
+            force.unwrap_or(false),
+        )
+        .await)
 }
 
 #[tauri::command]

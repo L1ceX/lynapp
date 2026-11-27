@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use url::Url;
 use uuid::Uuid;
@@ -185,7 +187,7 @@ pub struct AuthService {
 impl AuthService {
     pub fn new(store: Arc<JsonStore>) -> Self {
         let client = Client::builder()
-            .user_agent("lynapp/2.0.0-beta.2")
+            .user_agent("lynapp/2.0.0-beta.3")
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| Client::new());
@@ -467,6 +469,8 @@ impl AuthService {
             .inner_size(520.0, 720.0)
             .center()
             .resizable(true)
+            .visible(true)
+            .focused(true)
             .on_navigation(move |next_url| {
                 if next_url.as_str().starts_with(MS_REDIRECT_URI) {
                     let params: HashMap<String, String> =
@@ -898,36 +902,8 @@ impl AuthService {
                 .await;
         }
 
-        let (username, password, totp) = self.open_ely_credentials_popup(app).await?;
-        let full_pass = if totp.is_empty() {
-            password
-        } else {
-            format!("{password}:{totp}")
-        };
-        let client_token = Uuid::new_v4().simple().to_string();
-        let resp = self
-            .client
-            .post("https://authserver.ely.by/auth/authenticate")
-            .json(&json!({
-                "username": username,
-                "password": full_pass,
-                "clientToken": client_token,
-                "requestUser": true
-            }))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        let body: ElyAuthBody = resp.json().await.map_err(|e| e.to_string())?;
-        let (Some(access_token), Some(prof)) = (body.access_token, body.selected_profile) else {
-            let detail = body
-                .error_message
-                .or(body.error)
-                .unwrap_or_else(|| format!("Ely.by login failed (HTTP {status})"));
-            return Err(detail);
-        };
-        let account_id = prof.id.unwrap_or_default().replace('-', "");
-        let profile_name = prof.name.unwrap_or(username);
+        let (account_id, profile_name, access_token, client_token) =
+            self.open_ely_credentials_popup(app).await?;
         self.save_ely_account(
             account_id,
             profile_name,
@@ -966,6 +942,8 @@ impl AuthService {
             .title(tr("Sign in with Ely.by", "Вход через Ely.by"))
             .inner_size(820.0, 660.0)
             .center()
+            .visible(true)
+            .focused(true)
             .on_navigation(move |next_url| {
                 if next_url.as_str().starts_with(redirect_uri) {
                     let params: HashMap<String, String> =
@@ -1071,47 +1049,246 @@ impl AuthService {
     async fn open_ely_credentials_popup(
         &self,
         app: &AppHandle,
-    ) -> Result<(String, String, String), String> {
+    ) -> Result<(String, String, String, String), String> {
         let title_txt = tr("Sign in with Ely.by", "Вход через Ely.by");
+        let subtitle_txt = tr(
+            "Enter your Ely.by username or e-mail and password",
+            "Введите ник или e-mail и пароль от аккаунта Ely.by",
+        );
         let login_ph = tr("Username or e-mail", "Ник или e-mail");
         let pass_ph = tr("Password", "Пароль");
         let totp_ph = tr("2FA code (if enabled)", "Код 2FA (если включён)");
         let btn_txt = tr("Sign in", "Войти");
-        let html = format!(
-            "<!doctype html><html><head><meta charset=utf-8><style>body{{margin:0;background:#0b111d;color:#e8f0fb;font:14px system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh}}form{{width:320px;background:#101d2e;border:1px solid #21364e;border-radius:14px;padding:24px;display:flex;flex-direction:column;gap:12px}}h2{{margin:0 0 6px;font-size:18px}}input{{background:#0b1524;color:#e8f0fb;border:1px solid #21364e;border-radius:8px;padding:10px 12px;font-size:14px}}button{{background:#224e78;color:#fff;border:0;border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer}}button:hover{{background:#2c6396}}</style></head><body><form id=f><h2>{title_txt}</h2><input id=u placeholder='{login_ph}' required autofocus><input id=p type=password placeholder='{pass_ph}' required><input id=t placeholder='{totp_ph}'><button type=submit>{btn_txt}</button></form><script>document.getElementById('f').onsubmit=e=>{{e.preventDefault();const q=new URLSearchParams({{u:u.value.trim(),p:p.value,t:t.value.trim()}});location.href='http://127.0.0.1/ely-submit?'+q.toString();}};</script></body></html>"
+        let busy_txt = tr("Signing in...", "Выполняется вход...");
+        let err_empty = tr(
+            "Enter your username or e-mail and password.",
+            "Введите логин или e-mail и пароль.",
         );
-        let data_url = Url::parse(&format!(
-            "data:text/html;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(html.as_bytes())
-        ))
-        .map_err(|e| e.to_string())?;
+        let err_net = tr(
+            "Could not connect to Ely.by.",
+            "Не удалось подключиться к Ely.by.",
+        );
+        let csrf_token = Uuid::new_v4().simple().to_string();
 
-        let (tx, rx) = oneshot::channel::<Result<(String, String, String), String>>();
+        let html = format!(
+            "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>{title_txt}</title><style>*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;background:radial-gradient(circle at 20% 0%,#162c49 0%,#0b111d 60%);color:#e8f0fb;font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;display:flex;align-items:center;justify-content:center;padding:20px}}form{{width:100%;max-width:360px;background:rgba(16,29,46,.92);border:1px solid rgba(114,173,255,.22);border-radius:16px;padding:24px;display:flex;flex-direction:column;gap:12px;box-shadow:0 20px 50px rgba(0,0,0,.55)}}h2{{margin:0;font-size:19px;font-weight:700}}.sub{{margin:0 0 6px;font-size:12.5px;color:#9ab1cc}}input{{width:100%;background:#0b1524;color:#e8f0fb;border:1px solid #243b57;border-radius:10px;padding:11px 12px;font-size:14px;outline:none;transition:border-color .15s}}input:focus{{border-color:#4fa3ff}}.err{{display:none;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.42);color:#fecaca;border-radius:10px;padding:9px 11px;font-size:12.5px;word-break:break-word}}.err.show{{display:block}}button{{margin-top:4px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;border:0;border-radius:10px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .15s}}button:hover:not(:disabled){{opacity:.92}}button:disabled{{opacity:.55;cursor:default}}</style></head><body><form id=f autocomplete=on><h2>{title_txt}</h2><p class=sub>{subtitle_txt}</p><div id=err class=err></div><input id=u name=username placeholder='{login_ph}' autocomplete=username required autofocus><input id=p name=password type=password placeholder='{pass_ph}' autocomplete=current-password required><input id=t name=totp inputmode=numeric placeholder='{totp_ph}' autocomplete=one-time-code><button id=btn type=submit>{btn_txt}</button></form><script>const f=document.getElementById('f'),u=document.getElementById('u'),p=document.getElementById('p'),t=document.getElementById('t'),b=document.getElementById('btn'),eEl=document.getElementById('err');const showErr=m=>{{eEl.textContent=m;eEl.classList.add('show');}};f.onsubmit=async ev=>{{ev.preventDefault();const uv=u.value.trim(),pv=p.value,tv=t.value.trim();if(!uv||!pv){{showErr({err_empty:?});return;}}eEl.classList.remove('show');b.disabled=true;b.textContent={busy_txt:?};try{{const r=await fetch('/login',{{method:'POST',headers:{{'Content-Type':'application/json','X-Lynapp-Token':{csrf_token:?}}},body:JSON.stringify({{username:uv,password:pv,totp:tv}})}});const d=await r.json();if(!d.ok){{showErr(d.error||{err_net:?});if(d.needTotp)t.focus();b.disabled=false;b.textContent={btn_txt:?};return;}}}}catch(_){{showErr({err_net:?});b.disabled=false;b.textContent={btn_txt:?};}}}};</script></body></html>"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| e.to_string())?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        let page_url = Url::parse(&format!("http://127.0.0.1:{port}/")).map_err(|e| e.to_string())?;
+
+        let (tx, rx) = oneshot::channel::<Result<(String, String, String, String), String>>();
         let tx_cell = Arc::new(StdMutex::new(Some(tx)));
-        let tx_nav = tx_cell.clone();
-        let label = format!("ely-login-{}", Uuid::new_v4().simple());
+        let tx_srv = tx_cell.clone();
+        let client = self.client.clone();
+        let expected_token = csrf_token.clone();
 
-        let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(data_url))
+        let server_task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let html_clone = html.clone();
+                let client_clone = client.clone();
+                let token_clone = expected_token.clone();
+                let tx_req = tx_srv.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::with_capacity(4096);
+                    let mut tmp = [0u8; 2048];
+                    let mut header_end = None;
+                    let mut content_len: usize = 0;
+                    loop {
+                        let Ok(n) = stream.read(&mut tmp).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if header_end.is_none() {
+                            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                header_end = Some(pos + 4);
+                                let hdr_str = String::from_utf8_lossy(&buf[..pos]);
+                                for line in hdr_str.lines().skip(1) {
+                                    if let Some((k, v)) = line.split_once(':') {
+                                        if k.trim().eq_ignore_ascii_case("content-length") {
+                                            content_len = v.trim().parse().unwrap_or(0);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(he) = header_end {
+                            if buf.len() >= he + content_len {
+                                break;
+                            }
+                        }
+                        if buf.len() > 65536 {
+                            return;
+                        }
+                    }
+                    let Some(he) = header_end else {
+                        return;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..he]);
+                    let first_line = head.lines().next().unwrap_or("");
+                    let mut parts = first_line.split_whitespace();
+                    let method = parts.next().unwrap_or("");
+                    let req_path = parts.next().unwrap_or("/");
+
+                    if method == "GET" && (req_path == "/" || req_path.starts_with("/?")) {
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            html_clone.len(),
+                            html_clone
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+
+                    if method == "POST" && req_path == "/login" {
+                        let mut token_ok = false;
+                        for line in head.lines().skip(1) {
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.trim().eq_ignore_ascii_case("x-lynapp-token")
+                                    && v.trim() == token_clone
+                                {
+                                    token_ok = true;
+                                }
+                            }
+                        }
+                        if !token_ok {
+                            let body = r#"{"ok":false,"error":"Forbidden"}"#;
+                            let resp = format!(
+                                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                            return;
+                        }
+                        let raw_body = &buf[he..buf.len().min(he + content_len)];
+                        #[derive(Deserialize)]
+                        struct CredReq {
+                            username: String,
+                            password: String,
+                            #[serde(default)]
+                            totp: String,
+                        }
+                        let Ok(creds) = serde_json::from_slice::<CredReq>(raw_body) else {
+                            let body = r#"{"ok":false,"error":"Invalid request"}"#;
+                            let resp = format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                            return;
+                        };
+                        let username = creds.username.trim().to_string();
+                        let totp = creds.totp.trim().to_string();
+                        let full_pass = if totp.is_empty() {
+                            creds.password
+                        } else {
+                            format!("{}:{totp}", creds.password)
+                        };
+                        let client_token = Uuid::new_v4().simple().to_string();
+                        let auth_res = client_clone
+                            .post("https://authserver.ely.by/auth/authenticate")
+                            .json(&json!({
+                                "username": username,
+                                "password": full_pass,
+                                "clientToken": client_token,
+                                "requestUser": true
+                            }))
+                            .send()
+                            .await;
+                        let json_reply = match auth_res {
+                            Ok(r) => {
+                                let status = r.status().as_u16();
+                                match r.json::<ElyAuthBody>().await {
+                                    Ok(body) => {
+                                        if let (Some(access_token), Some(prof)) =
+                                            (body.access_token, body.selected_profile)
+                                        {
+                                            let account_id =
+                                                prof.id.unwrap_or_default().replace('-', "");
+                                            let profile_name = prof.name.unwrap_or(username);
+                                            if let Some(s) = tx_req.lock().unwrap().take() {
+                                                let _ = s.send(Ok((
+                                                    account_id,
+                                                    profile_name,
+                                                    access_token,
+                                                    client_token,
+                                                )));
+                                            }
+                                            json!({ "ok": true }).to_string()
+                                        } else {
+                                            let detail = body
+                                                .error_message
+                                                .or(body.error)
+                                                .unwrap_or_else(|| {
+                                                    format!("Ely.by login failed (HTTP {status})")
+                                                });
+                                            let need_totp = detail
+                                                .to_ascii_lowercase()
+                                                .contains("two factor");
+                                            let msg = if need_totp {
+                                                format!(
+                                                    "{detail}. {}",
+                                                    tr(
+                                                        "Enter your 2FA code in the field below.",
+                                                        "Введите код 2FA в поле ниже."
+                                                    )
+                                                )
+                                            } else {
+                                                detail
+                                            };
+                                            json!({ "ok": false, "error": msg, "needTotp": need_totp })
+                                                .to_string()
+                                        }
+                                    }
+                                    Err(e) => {
+                                        json!({ "ok": false, "error": e.to_string() }).to_string()
+                                    }
+                                }
+                            }
+                            Err(e) => json!({ "ok": false, "error": e.to_string() }).to_string(),
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            json_reply.len(),
+                            json_reply
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+
+                    let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let label = format!("ely-login-{}", Uuid::new_v4().simple());
+        let win = match WebviewWindowBuilder::new(app, &label, WebviewUrl::External(page_url))
             .title(title_txt)
-            .inner_size(420.0, 380.0)
+            .inner_size(430.0, 420.0)
             .center()
             .resizable(false)
-            .on_navigation(move |next_url| {
-                if next_url.as_str().starts_with("http://127.0.0.1/ely-submit") {
-                    let params: HashMap<String, String> =
-                        next_url.query_pairs().into_owned().collect();
-                    let u = params.get("u").cloned().unwrap_or_default();
-                    let p = params.get("p").cloned().unwrap_or_default();
-                    let t = params.get("t").cloned().unwrap_or_default();
-                    if let Some(s) = tx_nav.lock().unwrap().take() {
-                        let _ = s.send(Ok((u, p, t)));
-                    }
-                    return false;
-                }
-                true
-            })
+            .visible(true)
+            .focused(true)
             .build()
-            .map_err(|e| e.to_string())?;
+        {
+            Ok(w) => w,
+            Err(e) => {
+                server_task.abort();
+                return Err(e.to_string());
+            }
+        };
 
         let tx_close = tx_cell.clone();
         win.on_window_event(move |ev| {
@@ -1127,6 +1304,7 @@ impl AuthService {
         });
 
         let res = rx.await;
+        server_task.abort();
         let _ = win.close();
         match res {
             Ok(Ok(creds)) => Ok(creds),

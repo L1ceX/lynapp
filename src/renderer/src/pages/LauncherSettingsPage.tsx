@@ -12,7 +12,7 @@ export function LauncherSettingsPage() {
 }
 
 function LauncherSettingsContent() {
-  const { afterLaunchLabel, afterLaunchOptions, bootstrap, downloadUpdate, installUpdate, javaAction, javaBusy, javaInstalls, lang, saveSettings, sectionExiting, setAfterLaunch, setLanguage, setSettingFlag, setSettingsDraft, setUpdateEdition, setVersionTypeFlag, settingsDraft, status, t, update, versionTypes } = useApp();
+  const { afterLaunchLabel, afterLaunchOptions, bootstrap, checkLauncherUpdates, downloadUpdate, installUpdate, javaAction, javaBusy, javaInstalls, lang, saveSettings, sectionExiting, setAfterLaunch, setLanguage, setSettingFlag, setSettingsDraft, setUpdateEdition, setVersionTypeFlag, settingsDraft, status, t, update, versionTypes } = useApp();
   const runningEdition: UpdateEdition = bootstrap.appVersion.startsWith("2.") ? "tauri" : "electron";
   const selectedEdition: UpdateEdition = settingsDraft.updateEdition ?? runningEdition;
   const tauriVer = update?.latestTauri?.version ?? null;
@@ -61,6 +61,7 @@ function LauncherSettingsContent() {
           ) : (
             <span className="muted"><CheckCircle2 size={14} /> {t("You have the latest version", "Установлена последняя версия")}</span>
           )}
+          <button type="button" className="update-refresh-btn" onClick={() => void checkLauncherUpdates()} disabled={update?.kind === "checking" || update?.kind === "downloading"} title={t("Check for updates", "Проверить обновления")} aria-label={t("Check for updates", "Проверить обновления")}><RefreshCw size={14} className={update?.kind === "checking" ? "spin" : undefined} /></button>
         </div>
         <div className="filter-row effects-row"><div><strong>{t("Beta versions", "Бета-версии")}</strong><span className="muted">{t("Offer test builds with new features before the stable release. They may contain bugs.", "Предлагать тестовые сборки с новыми функциями до стабильного релиза. В них возможны ошибки.")}</span></div><button type="button" className="switch" role="switch" aria-checked={settingsDraft.betaUpdates ?? false} aria-label={t("Beta versions", "Бета-версии")} onClick={() => void setSettingFlag("betaUpdates", !(settingsDraft.betaUpdates ?? false))}><span className="knob" /></button></div>
         <span className="muted">{(settingsDraft.betaUpdates ?? false) ? t("After turning betas off you stay on the current version until a newer stable release comes out.", "Если отключить бета-версии, текущая версия останется до выхода более новой стабильной.") : t("Only stable releases are offered.", "Предлагаются только стабильные релизы.")}</span>

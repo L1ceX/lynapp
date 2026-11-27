@@ -2487,7 +2487,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "lynapp-remaster"
-version = "2.0.0-beta.2"
+version = "2.0.0-beta.3"
 dependencies = [
  "aes-gcm",
  "arboard",

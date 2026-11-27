@@ -325,7 +325,7 @@ pub struct ContentService {
 impl ContentService {
     pub fn new(store: Arc<JsonStore>, curseforge: Arc<CurseForgeService>) -> Self {
         let client = Client::builder()
-            .user_agent("lynapp/2.0.0-beta.2")
+            .user_agent("lynapp/2.0.0-beta.3")
             .timeout(Duration::from_secs(20))
             .build()
             .unwrap_or_else(|_| Client::new());

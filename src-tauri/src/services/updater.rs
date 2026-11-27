@@ -15,6 +15,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex;
 
 const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/L1ceX/lynapp/releases?per_page=30";
+const CACHE_TTL_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Deserialize)]
 struct GhAsset {
@@ -44,6 +45,9 @@ struct PendingRelease {
 struct UpdaterInner {
     pending_tauri: Option<PendingRelease>,
     pending_electron: Option<PendingRelease>,
+    cached_releases: Vec<GhRelease>,
+    fetched_at: Option<Instant>,
+    last_status: Option<Value>,
     downloaded_path: Option<PathBuf>,
     downloading: bool,
     checking: bool,
@@ -162,6 +166,98 @@ fn to_pending(rel: &GhRelease) -> PendingRelease {
     }
 }
 
+fn select_best_releases(
+    releases: &[GhRelease],
+    allow_beta: bool,
+) -> (Option<PendingRelease>, Option<PendingRelease>) {
+    let mut best_tauri: Option<PendingRelease> = None;
+    let mut best_electron: Option<PendingRelease> = None;
+    for rel in releases {
+        if rel.draft {
+            continue;
+        }
+        let ver = rel.tag_name.trim_start_matches('v').trim_start_matches('V');
+        let Some(parsed) = parse_semver(ver) else {
+            continue;
+        };
+        let is_pre = rel.prerelease || parsed.3.is_some();
+        if !allow_beta && is_pre {
+            continue;
+        }
+        let candidate = to_pending(rel);
+        if parsed.0 >= 2 {
+            let replace = best_tauri
+                .as_ref()
+                .map(|cur| compare_semver(&candidate.version, &cur.version) == std::cmp::Ordering::Greater)
+                .unwrap_or(true);
+            if replace {
+                best_tauri = Some(candidate);
+            }
+        } else if parsed.0 == 1 {
+            let replace = best_electron
+                .as_ref()
+                .map(|cur| compare_semver(&candidate.version, &cur.version) == std::cmp::Ordering::Greater)
+                .unwrap_or(true);
+            if replace {
+                best_electron = Some(candidate);
+            }
+        }
+    }
+    (best_tauri, best_electron)
+}
+
+fn build_status_payload(
+    edition: &str,
+    current_version: &str,
+    best_tauri: &Option<PendingRelease>,
+    best_electron: &Option<PendingRelease>,
+) -> Value {
+    let lt = release_summary(best_tauri);
+    let le = release_summary(best_electron);
+    if edition == "electron" {
+        if let Some(ref target) = best_electron {
+            json!({
+                "kind": "available",
+                "edition": "electron",
+                "version": target.version,
+                "latestTauri": lt,
+                "latestElectron": le
+            })
+        } else {
+            json!({
+                "kind": "up-to-date",
+                "edition": "electron",
+                "latestTauri": lt,
+                "latestElectron": le
+            })
+        }
+    } else if let Some(ref target) = best_tauri {
+        if is_newer_version(&target.version, current_version) {
+            json!({
+                "kind": "available",
+                "edition": "tauri",
+                "version": target.version,
+                "latestTauri": lt,
+                "latestElectron": le
+            })
+        } else {
+            json!({
+                "kind": "up-to-date",
+                "edition": "tauri",
+                "latestTauri": lt,
+                "latestElectron": le
+            })
+        }
+    } else {
+        json!({
+            "kind": "up-to-date",
+            "edition": "tauri",
+            "latestTauri": lt,
+            "latestElectron": le
+        })
+    }
+}
+
 impl UpdaterService {
     pub fn new(current_version: String) -> Arc<Self> {
         let client = Client::builder()
@@ -175,6 +271,9 @@ impl UpdaterService {
             inner: Mutex::new(UpdaterInner {
                 pending_tauri: None,
                 pending_electron: None,
+                cached_releases: Vec::new(),
+                fetched_at: None,
+                last_status: None,
                 downloaded_path: None,
                 downloading: false,
                 checking: false,
@@ -185,30 +284,80 @@ impl UpdaterService {
     }
 
     pub async fn check(&self, app: &AppHandle, allow_beta: bool, preferred_edition: Option<&str>) {
+        let _ = self
+            .check_with_options(app, allow_beta, preferred_edition, false)
+            .await;
+    }
+
+    pub async fn check_with_options(
+        &self,
+        app: &AppHandle,
+        allow_beta: bool,
+        preferred_edition: Option<&str>,
+        force: bool,
+    ) -> Value {
         let edition = normalize_edition(preferred_edition);
-        let (prev_tauri, prev_electron) = {
+        let checking_payload = {
             let mut guard = self.inner.lock().await;
             guard.allow_beta = allow_beta;
             guard.preferred_edition = edition.clone();
-            if guard.checking || guard.downloading {
-                return;
+            if guard.downloading {
+                let status = guard.last_status.clone().unwrap_or_else(|| {
+                    json!({
+                        "kind": "downloading",
+                        "edition": guard.preferred_edition,
+                        "latestTauri": release_summary(&guard.pending_tauri),
+                        "latestElectron": release_summary(&guard.pending_electron)
+                    })
+                });
+                drop(guard);
+                let _ = app.emit("updater:status", status.clone());
+                return status;
+            }
+            let cache_fresh = !force
+                && !guard.cached_releases.is_empty()
+                && guard
+                    .fetched_at
+                    .map(|t| t.elapsed() < Duration::from_secs(CACHE_TTL_SECS))
+                    .unwrap_or(false);
+            if cache_fresh && !guard.checking {
+                let (best_tauri, best_electron) =
+                    select_best_releases(&guard.cached_releases, allow_beta);
+                let payload = build_status_payload(
+                    &edition,
+                    &self.current_version,
+                    &best_tauri,
+                    &best_electron,
+                );
+                guard.pending_tauri = best_tauri;
+                guard.pending_electron = best_electron;
+                guard.last_status = Some(payload.clone());
+                drop(guard);
+                let _ = app.emit("updater:status", payload.clone());
+                return payload;
+            }
+            if guard.checking {
+                return guard.last_status.clone().unwrap_or_else(|| {
+                    json!({
+                        "kind": "checking",
+                        "edition": guard.preferred_edition,
+                        "latestTauri": release_summary(&guard.pending_tauri),
+                        "latestElectron": release_summary(&guard.pending_electron)
+                    })
+                });
             }
             guard.checking = true;
-            (
-                release_summary(&guard.pending_tauri),
-                release_summary(&guard.pending_electron),
-            )
-        };
-
-        let _ = app.emit(
-            "updater:status",
-            json!({
+            let p = json!({
                 "kind": "checking",
                 "edition": edition,
-                "latestTauri": prev_tauri,
-                "latestElectron": prev_electron
-            }),
-        );
+                "latestTauri": release_summary(&guard.pending_tauri),
+                "latestElectron": release_summary(&guard.pending_electron)
+            });
+            guard.last_status = Some(p.clone());
+            p
+        };
+
+        let _ = app.emit("updater:status", checking_payload);
 
         let res = self
             .client
@@ -223,144 +372,76 @@ impl UpdaterService {
                 Err(e) => {
                     let mut guard = self.inner.lock().await;
                     guard.checking = false;
-                    let _ = app.emit(
-                        "updater:status",
-                        json!({
-                            "kind": "error",
-                            "edition": guard.preferred_edition,
-                            "message": e.to_string(),
-                            "latestTauri": release_summary(&guard.pending_tauri),
-                            "latestElectron": release_summary(&guard.pending_electron)
-                        }),
-                    );
-                    return;
+                    let payload = json!({
+                        "kind": "error",
+                        "edition": guard.preferred_edition,
+                        "message": e.to_string(),
+                        "latestTauri": release_summary(&guard.pending_tauri),
+                        "latestElectron": release_summary(&guard.pending_electron)
+                    });
+                    guard.last_status = Some(payload.clone());
+                    drop(guard);
+                    let _ = app.emit("updater:status", payload.clone());
+                    return payload;
                 }
             },
             Ok(resp) => {
                 let code = resp.status().as_u16();
                 let mut guard = self.inner.lock().await;
                 guard.checking = false;
-                let _ = app.emit(
-                    "updater:status",
-                    json!({
-                        "kind": "error",
-                        "edition": guard.preferred_edition,
-                        "message": tr_string(
-                            format!("Update server returned HTTP {code}"),
-                            format!("Сервер обновлений вернул HTTP {code}")
-                        ),
-                        "latestTauri": release_summary(&guard.pending_tauri),
-                        "latestElectron": release_summary(&guard.pending_electron)
-                    }),
-                );
-                return;
+                let payload = json!({
+                    "kind": "error",
+                    "edition": guard.preferred_edition,
+                    "message": tr_string(
+                        format!("Update server returned HTTP {code}"),
+                        format!("Сервер обновлений вернул HTTP {code}")
+                    ),
+                    "latestTauri": release_summary(&guard.pending_tauri),
+                    "latestElectron": release_summary(&guard.pending_electron)
+                });
+                guard.last_status = Some(payload.clone());
+                drop(guard);
+                let _ = app.emit("updater:status", payload.clone());
+                return payload;
             }
             Err(e) => {
                 let mut guard = self.inner.lock().await;
                 guard.checking = false;
-                let _ = app.emit(
-                    "updater:status",
-                    json!({
-                        "kind": "error",
-                        "edition": guard.preferred_edition,
-                        "message": e.to_string(),
-                        "latestTauri": release_summary(&guard.pending_tauri),
-                        "latestElectron": release_summary(&guard.pending_electron)
-                    }),
-                );
-                return;
+                let payload = json!({
+                    "kind": "error",
+                    "edition": guard.preferred_edition,
+                    "message": e.to_string(),
+                    "latestTauri": release_summary(&guard.pending_tauri),
+                    "latestElectron": release_summary(&guard.pending_electron)
+                });
+                guard.last_status = Some(payload.clone());
+                drop(guard);
+                let _ = app.emit("updater:status", payload.clone());
+                return payload;
             }
         };
 
-        let mut best_tauri: Option<PendingRelease> = None;
-        let mut best_electron: Option<PendingRelease> = None;
-
-        for rel in releases {
-            if rel.draft {
-                continue;
-            }
-            let ver = rel.tag_name.trim_start_matches('v').trim_start_matches('V');
-            let Some(parsed) = parse_semver(ver) else {
-                continue;
-            };
-            let is_pre = rel.prerelease || parsed.3.is_some();
-            if !allow_beta && is_pre {
-                continue;
-            }
-            let candidate = to_pending(&rel);
-            if parsed.0 >= 2 {
-                let replace = best_tauri
-                    .as_ref()
-                    .map(|cur| compare_semver(&candidate.version, &cur.version) == std::cmp::Ordering::Greater)
-                    .unwrap_or(true);
-                if replace {
-                    best_tauri = Some(candidate);
-                }
-            } else if parsed.0 == 1 {
-                let replace = best_electron
-                    .as_ref()
-                    .map(|cur| compare_semver(&candidate.version, &cur.version) == std::cmp::Ordering::Greater)
-                    .unwrap_or(true);
-                if replace {
-                    best_electron = Some(candidate);
-                }
-            }
-        }
-
-        let lt = release_summary(&best_tauri);
-        let le = release_summary(&best_electron);
-
-        let payload = if edition == "electron" {
-            if let Some(ref target) = best_electron {
-                json!({
-                    "kind": "available",
-                    "edition": "electron",
-                    "version": target.version,
-                    "latestTauri": lt,
-                    "latestElectron": le
-                })
-            } else {
-                json!({
-                    "kind": "up-to-date",
-                    "edition": "electron",
-                    "latestTauri": lt,
-                    "latestElectron": le
-                })
-            }
-        } else if let Some(ref target) = best_tauri {
-            if is_newer_version(&target.version, &self.current_version) {
-                json!({
-                    "kind": "available",
-                    "edition": "tauri",
-                    "version": target.version,
-                    "latestTauri": lt,
-                    "latestElectron": le
-                })
-            } else {
-                json!({
-                    "kind": "up-to-date",
-                    "edition": "tauri",
-                    "latestTauri": lt,
-                    "latestElectron": le
-                })
-            }
-        } else {
-            json!({
-                "kind": "up-to-date",
-                "edition": "tauri",
-                "latestTauri": lt,
-                "latestElectron": le
-            })
-        };
-
-        {
+        let payload = {
             let mut guard = self.inner.lock().await;
             guard.checking = false;
+            guard.cached_releases = releases;
+            guard.fetched_at = Some(Instant::now());
+            let (best_tauri, best_electron) =
+                select_best_releases(&guard.cached_releases, guard.allow_beta);
+            let p = build_status_payload(
+                &guard.preferred_edition,
+                &self.current_version,
+                &best_tauri,
+                &best_electron,
+            );
             guard.pending_tauri = best_tauri;
             guard.pending_electron = best_electron;
             guard.downloaded_path = None;
-        }
-        let _ = app.emit("updater:status", payload);
+            guard.last_status = Some(p.clone());
+            p
+        };
+        let _ = app.emit("updater:status", payload.clone());
+        payload
     }
 
     pub async fn download(&self, app: &AppHandle, edition: Option<String>) -> Result<(), String> {
@@ -392,32 +473,33 @@ impl UpdaterService {
         };
 
         let Some(url) = pending.asset_url.clone() else {
-            self.inner.lock().await.downloading = false;
+            let payload = json!({
+                "kind": "available",
+                "edition": target_edition,
+                "version": pending.version,
+                "latestTauri": lt,
+                "latestElectron": le
+            });
+            {
+                let mut guard = self.inner.lock().await;
+                guard.downloading = false;
+                guard.last_status = Some(payload.clone());
+            }
             let _ = app.opener().open_url(&pending.html_url, None::<&str>);
-            let _ = app.emit(
-                "updater:status",
-                json!({
-                    "kind": "available",
-                    "edition": target_edition,
-                    "version": pending.version,
-                    "latestTauri": lt,
-                    "latestElectron": le
-                }),
-            );
+            let _ = app.emit("updater:status", payload);
             return Ok(());
         };
 
-        let _ = app.emit(
-            "updater:status",
-            json!({
-                "kind": "downloading",
-                "edition": target_edition,
-                "version": pending.version,
-                "percent": 0,
-                "latestTauri": lt,
-                "latestElectron": le
-            }),
-        );
+        let start_payload = json!({
+            "kind": "downloading",
+            "edition": target_edition,
+            "version": pending.version,
+            "percent": 0,
+            "latestTauri": lt,
+            "latestElectron": le
+        });
+        self.inner.lock().await.last_status = Some(start_payload.clone());
+        let _ = app.emit("updater:status", start_payload);
 
         let dl_client = Client::builder()
             .user_agent(format!("lynapp/{}", self.current_version))
@@ -428,33 +510,37 @@ impl UpdaterService {
         let resp = match dl_client.get(&url).send().await {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
-                self.inner.lock().await.downloading = false;
                 let msg = format!("HTTP {}", r.status().as_u16());
-                let _ = app.emit(
-                    "updater:status",
-                    json!({
-                        "kind": "error",
-                        "edition": target_edition,
-                        "message": msg,
-                        "latestTauri": lt,
-                        "latestElectron": le
-                    }),
-                );
+                let payload = json!({
+                    "kind": "error",
+                    "edition": target_edition,
+                    "message": msg,
+                    "latestTauri": lt,
+                    "latestElectron": le
+                });
+                {
+                    let mut guard = self.inner.lock().await;
+                    guard.downloading = false;
+                    guard.last_status = Some(payload.clone());
+                }
+                let _ = app.emit("updater:status", payload);
                 return Err(msg);
             }
             Err(e) => {
-                self.inner.lock().await.downloading = false;
                 let msg = e.to_string();
-                let _ = app.emit(
-                    "updater:status",
-                    json!({
-                        "kind": "error",
-                        "edition": target_edition,
-                        "message": msg,
-                        "latestTauri": lt,
-                        "latestElectron": le
-                    }),
-                );
+                let payload = json!({
+                    "kind": "error",
+                    "edition": target_edition,
+                    "message": msg,
+                    "latestTauri": lt,
+                    "latestElectron": le
+                });
+                {
+                    let mut guard = self.inner.lock().await;
+                    guard.downloading = false;
+                    guard.last_status = Some(payload.clone());
+                }
+                let _ = app.emit("updater:status", payload);
                 return Err(msg);
             }
         };
@@ -472,18 +558,20 @@ impl UpdaterService {
         let mut file = match File::create(&tmp) {
             Ok(f) => f,
             Err(e) => {
-                self.inner.lock().await.downloading = false;
                 let msg = e.to_string();
-                let _ = app.emit(
-                    "updater:status",
-                    json!({
-                        "kind": "error",
-                        "edition": target_edition,
-                        "message": msg,
-                        "latestTauri": lt,
-                        "latestElectron": le
-                    }),
-                );
+                let payload = json!({
+                    "kind": "error",
+                    "edition": target_edition,
+                    "message": msg,
+                    "latestTauri": lt,
+                    "latestElectron": le
+                });
+                {
+                    let mut guard = self.inner.lock().await;
+                    guard.downloading = false;
+                    guard.last_status = Some(payload.clone());
+                }
+                let _ = app.emit("updater:status", payload);
                 return Err(msg);
             }
         };
@@ -497,18 +585,20 @@ impl UpdaterService {
                     if let Err(e) = file.write_all(&bytes) {
                         drop(file);
                         let _ = fs::remove_file(&tmp);
-                        self.inner.lock().await.downloading = false;
                         let msg = e.to_string();
-                        let _ = app.emit(
-                            "updater:status",
-                            json!({
-                                "kind": "error",
-                                "edition": target_edition,
-                                "message": msg,
-                                "latestTauri": lt,
-                                "latestElectron": le
-                            }),
-                        );
+                        let payload = json!({
+                            "kind": "error",
+                            "edition": target_edition,
+                            "message": msg,
+                            "latestTauri": lt,
+                            "latestElectron": le
+                        });
+                        {
+                            let mut guard = self.inner.lock().await;
+                            guard.downloading = false;
+                            guard.last_status = Some(payload.clone());
+                        }
+                        let _ = app.emit("updater:status", payload);
                         return Err(msg);
                     }
                     received += bytes.len() as u64;
@@ -518,34 +608,34 @@ impl UpdaterService {
                             .filter(|&t| t > 0)
                             .map(|t| ((received.saturating_mul(100)) / t).min(100))
                             .unwrap_or(0);
-                        let _ = app.emit(
-                            "updater:status",
-                            json!({
-                                "kind": "downloading",
-                                "edition": target_edition,
-                                "version": pending.version,
-                                "percent": pct,
-                                "latestTauri": lt,
-                                "latestElectron": le
-                            }),
-                        );
+                        let payload = json!({
+                            "kind": "downloading",
+                            "edition": target_edition,
+                            "version": pending.version,
+                            "percent": pct,
+                            "latestTauri": lt,
+                            "latestElectron": le
+                        });
+                        let _ = app.emit("updater:status", payload);
                     }
                 }
                 Err(e) => {
                     drop(file);
                     let _ = fs::remove_file(&tmp);
-                    self.inner.lock().await.downloading = false;
                     let msg = e.to_string();
-                    let _ = app.emit(
-                        "updater:status",
-                        json!({
-                            "kind": "error",
-                            "edition": target_edition,
-                            "message": msg,
-                            "latestTauri": lt,
-                            "latestElectron": le
-                        }),
-                    );
+                    let payload = json!({
+                        "kind": "error",
+                        "edition": target_edition,
+                        "message": msg,
+                        "latestTauri": lt,
+                        "latestElectron": le
+                    });
+                    {
+                        let mut guard = self.inner.lock().await;
+                        guard.downloading = false;
+                        guard.last_status = Some(payload.clone());
+                    }
+                    let _ = app.emit("updater:status", payload);
                     return Err(msg);
                 }
             }
@@ -554,18 +644,20 @@ impl UpdaterService {
         let _ = fs::remove_file(&dest);
         if let Err(e) = fs::rename(&tmp, &dest) {
             let _ = fs::remove_file(&tmp);
-            self.inner.lock().await.downloading = false;
             let msg = e.to_string();
-            let _ = app.emit(
-                "updater:status",
-                json!({
-                    "kind": "error",
-                    "edition": target_edition,
-                    "message": msg,
-                    "latestTauri": lt,
-                    "latestElectron": le
-                }),
-            );
+            let payload = json!({
+                "kind": "error",
+                "edition": target_edition,
+                "message": msg,
+                "latestTauri": lt,
+                "latestElectron": le
+            });
+            {
+                let mut guard = self.inner.lock().await;
+                guard.downloading = false;
+                guard.last_status = Some(payload.clone());
+            }
+            let _ = app.emit("updater:status", payload);
             return Err(msg);
         }
 
@@ -579,19 +671,20 @@ impl UpdaterService {
             }
         }
 
-        let mut guard = self.inner.lock().await;
-        guard.downloading = false;
-        guard.downloaded_path = Some(dest);
-        let _ = app.emit(
-            "updater:status",
-            json!({
-                "kind": "ready",
-                "edition": target_edition,
-                "version": pending.version,
-                "latestTauri": lt,
-                "latestElectron": le
-            }),
-        );
+        let ready_payload = json!({
+            "kind": "ready",
+            "edition": target_edition,
+            "version": pending.version,
+            "latestTauri": lt,
+            "latestElectron": le
+        });
+        {
+            let mut guard = self.inner.lock().await;
+            guard.downloading = false;
+            guard.downloaded_path = Some(dest);
+            guard.last_status = Some(ready_payload.clone());
+        }
+        let _ = app.emit("updater:status", ready_payload);
         Ok(())
     }
 
